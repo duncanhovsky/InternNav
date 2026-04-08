@@ -1,6 +1,6 @@
-"""NavDP LeRobot 数据集读取与预处理模块。
+"""FlowNav LeRobot 数据集读取与预处理模块
 
-该模块实现了 NavDP 训练所需的数据管线，核心职责包括：
+该模块实现了 FlowNav 训练所需的数据管线，核心职责包括：
 1. 扫描并索引多场景离线轨迹数据。
 2. 读取 RGB、Depth、Parquet 轨迹、点云等多模态输入。
 3. 构造历史记忆帧、点目标、图像目标、像素目标。
@@ -8,9 +8,9 @@
 5. 输出可直接用于 PyTorch 训练的张量格式样本。
 
 说明：
-- 本文件保留了原有类名 `NavDP_Base_Datset`（存在拼写习惯问题），
+- 本文保留了原有类名 'NavDP_Base_Datset',
     为兼容既有代码，不在此处更名。
-- 为了便于分布式训练日志排查，模块覆盖了内置 `print`，仅在 rank=0 打印。
+- 为了便于分布式训练日志排查，模块覆盖了内置'print'，仅在 rank=0 打印。
 """
 
 # 覆盖内置 print：只在主进程打印，并附带毫秒级时间戳。
@@ -32,7 +32,6 @@ from tqdm import tqdm
 
 original_print = builtins.print
 
-
 def print(*args, **kwargs):
     """带时间戳的安全打印函数。
 
@@ -47,11 +46,9 @@ def print(*args, **kwargs):
     except Exception:  # Catch any exception to prevent crashes
         pass
 
-
 builtins.print = print
 
-
-class NavDP_Base_Datset(Dataset):
+class FlowNav_Base_Datset(Dataset):
     """NavDP 基础数据集。
 
     该数据集从指定根目录递归收集轨迹文件与图像路径，并在 `__getitem__`
@@ -61,6 +58,8 @@ class NavDP_Base_Datset(Dataset):
         root_dirs: 数据根目录，目录结构需符合项目约定。
         preload_path: 预加载索引文件路径；当 `preload=True` 时从该 JSON 加载。
         memory_size: 历史帧长度（时间记忆窗口大小）。
+        history_frames: 用来估计场景流的历史帧数量。
+        predict_frames: 预测4D运动场未来帧的数量。
         predict_size: 未来动作预测长度（用于采样 action index）。
         batch_size: 仅用于打印性能统计时的窗口大小。
         image_size: RGB/Depth/Mask 统一缩放到的边长。
@@ -73,27 +72,30 @@ class NavDP_Base_Datset(Dataset):
         random_digit: 是否随机采样时间步长（memory/pred digit）。
         prior_sample: 是否按障碍密度优先采样起终点。
     """
-
     def __init__(
-        self,
-        root_dirs,
-        preload_path=False,
-        memory_size=8,
-        predict_size=24,
-        batch_size=64,
-        image_size=224,
-        scene_data_scale=1.0,
-        trajectory_data_scale=1.0,
-        pixel_channel=7,
-        action_dim=3,
-        debug=False,
-        preload=False,
-        random_digit=False,
-        prior_sample=False,
-    ):
+            self,
+            root_dirs,
+            preload_path=False,
+            memory_size=1,
+            history_frames=2,
+            predict_frames=8,
+            predict_size=24,
+            batch_size=64,
+            image_size=224,
+            scene_data_scale=1.0,
+            trajectory_data_scale=1.0,
+            pixel_channel=7,
+            action_dim=3,
+            debug=False,
+            preload=False,
+            random_digit=False,
+            prior_sample=False,
+        ):
 
         self.dataset_dirs = np.array([p for p in os.listdir(root_dirs)])
         self.memory_size = memory_size
+        self.history_frames = history_frames
+        self.predict_frames = predict_frames
         self.image_size = image_size
         self.scene_scale_size = scene_data_scale
         self.trajectory_data_scale = trajectory_data_scale
@@ -158,7 +160,6 @@ class NavDP_Base_Datset(Dataset):
 
                             print(f"Error processing episode {episode_idx}: {e}")
                             pdb.set_trace()
-
             # 将扫描结果保存为索引文件，后续可跳过目录扫描加速启动。
             save_dict = {
                 'trajectory_data_dir': self.trajectory_data_dir,
@@ -185,13 +186,11 @@ class NavDP_Base_Datset(Dataset):
     def __len__(self):
         """返回数据集样本数。"""
         return len(self.trajectory_data_dir)
-
+    
     def load_image(self, image_url):
         """读取 RGB 图像。
-
         Args:
-            image_url: 图像文件路径。
-
+            image_url: RGB 图像文件路径。
         Returns:
             np.ndarray: uint8 格式的 HWC 图像，读取失败时返回全零占位图。
         """
@@ -205,16 +204,14 @@ class NavDP_Base_Datset(Dataset):
 
     def load_depth(self, depth_url):
         """读取深度图。
-
         Args:
             depth_url: 深度图文件路径。
-
-        Returns:
+        Returns：
             np.ndarray: uint16 格式的 HW 深度图，失败时返回全零图。
         """
         try:
             depth = Image.open(depth_url)
-            depth = np.array(depth, np.uint16)
+            depth = np.array(depth, np.uint16)]
         except Exception as e:
             print(f"Error loading depth {depth_url}: {e}")
             depth = np.zeros((self.image_size, self.image_size), dtype=np.uint16)
@@ -222,28 +219,23 @@ class NavDP_Base_Datset(Dataset):
 
     def load_pointcloud(self, pcd_url):
         """读取场景点云。
-
         Args:
-            pcd_url: 点云文件路径（.ply）。
-
+            pcd_url: 点云文件路径(.ply)
         Returns:
             open3d.geometry.PointCloud: 读取到的点云对象。
         """
         pcd = o3d.io.read_point_cloud(pcd_url)
         return pcd
-
+    
     def process_image(self, image_path):
         """预处理 RGB 图像到统一分辨率并归一化。
-
         处理流程：
-        1. 等比例缩放到最长边为 `image_size`。
-        2. 居中零填充至正方形。
-        3. 再次 resize 到精确尺寸。
-        4. 转为 float32 并归一化到 [0, 1]。
-
+        1. 等比例缩放到最长边为'image_size'。
+        2. 
+        3. 
+        4.
         Args:
-            image_path: 原始图像路径。
-
+            image_path: 原始图像路径
         Returns:
             np.ndarray: shape=(image_size, image_size, 3) 的 float32 图像。
         """
@@ -253,13 +245,13 @@ class NavDP_Base_Datset(Dataset):
         image = cv2.resize(image, (-1, -1), fx=prop, fy=prop)
         pad_width = max((self.image_size - image.shape[1]) // 2, 0)
         pad_height = max((self.image_size - image.shape[0]) // 2, 0)
-        pad_image = np.pad(
-            image, ((pad_height, pad_height), (pad_width, pad_width), (0, 0)), mode='constant', constant_values=0
-        )
+        pad_image = np.pad(image, ((pad_height, pad_height), 
+                                   (pad_width, pad_width), (0, 0)), mode='constant', constant_values=0
+                                   )
         image = cv2.resize(pad_image, (self.image_size, self.image_size))
         image = np.array(image, np.float32) / 255.0
         return image
-
+    
     def process_depth(self, depth_path):
         """预处理深度图到统一分辨率并过滤异常值。
 
@@ -330,7 +322,7 @@ class NavDP_Base_Datset(Dataset):
         scene_obstacle.points = o3d.utility.Vector3dVector(scene_points[select_index])
         scene_obstacle.colors = o3d.utility.Vector3dVector(scene_color[select_index])
         return np.array(scene_obstacle.points), scene_obstacle
-
+    
     def process_memory(self, rgb_paths, depth_paths, start_step, memory_digit=1):
         """构造历史记忆帧与当前深度图。
 
@@ -343,17 +335,33 @@ class NavDP_Base_Datset(Dataset):
         Returns:
             tuple:
                 context_image: shape=(memory_size, H, W, 3) 的历史图像序列。
-                context_depth: shape=(H, W, 1) 的当前深度图。
+                context_depth: shape=(history_frames, H, W, 1) 的深度图序列。
                 memory_index: 实际使用的时间索引（前部越界会被裁剪）。
+                history_index: 实际使用的历史深度图帧时间索引（前部越界会被裁剪）。
         """
-        memory_index = np.arange(start_step - (self.memory_size - 1) * memory_digit, start_step + 1, memory_digit)
+        memory_index = np.arange(
+            start_step - (self.memory_size - 1) * memory_digit, 
+            start_step + 1, 
+            memory_digit
+        )
         outrange_sum = (memory_index < 0).sum()
         memory_index = memory_index[outrange_sum:]
+
+        history_index = np.arange(
+            start_step - (self.history_frames - 1) * memory_digit, 
+            start_step + 1, 
+            memory_digit
+        )
+        history_sum = (history_index < 0).sum()
+        history_index = history_index[history_sum:]
+
         context_image = np.zeros((self.memory_size, self.image_size, self.image_size, 3), np.float32)
         context_image[outrange_sum:] = np.array([self.process_image(rgb_paths[i]) for i in memory_index])
-        context_depth = self.process_depth(depth_paths[start_step])
-        return context_image, context_depth, memory_index
-
+        context_depth = np.zeros((self.history_frames, self.image_size, self.image_size, 1), np.float32)
+        context_depth[history_sum:] = np.array([self.process_depth(depth_paths[i]) for i in history_index])
+        
+        return context_image, context_depth, memory_index, history_index
+    
     def process_pixel_goal(self, image_url, target_point, camera_intrinsic, camera_extrinsic):
         """将局部目标点投影到图像平面，生成像素目标输入。
 
@@ -446,7 +454,7 @@ class NavDP_Base_Datset(Dataset):
             T_frame = T_frame[:, [1, 0, 2]]
             T_frame[:, 1] = -T_frame[:, 1]
             return R_frame, T_frame
-
+    
     def absolute_pose(self, R_base, T_base, R_frame, T_frame, base_extrinsic):
         """将相对位姿恢复到世界坐标系绝对位姿。
 
@@ -482,10 +490,10 @@ class NavDP_Base_Datset(Dataset):
                 ).T,
             ).T[:, 0:3]
         return R_world, T_world
-
+    
     def xyz_to_xyt(self, xyz_actions, init_vector):
         """将局部三维轨迹点序列转换为二维平面动作序列 (x, y, theta)。
-
+        (即去掉Z轴)
         角度 `theta` 由初始方向向量与当前位移向量之间的夹角计算得到。
 
         Args:
@@ -503,23 +511,20 @@ class NavDP_Base_Datset(Dataset):
             theta = np.arctan2(cross_product, dot_product)
             xyt_actions.append([xyz_actions[i][0], xyz_actions[i][1], theta])
         return np.array(xyt_actions)
-
+    
     def process_actions(self, extrinsics, base_extrinsic, start_step, end_step, pred_digit=1):
         """构造监督动作与增强动作轨迹。
-
         主要步骤：
-        1. 将 `[start_step, end_step]` 的绝对轨迹转到局部坐标，得到标签轨迹。
-        2. 在局部平面随机旋转未来轨迹，得到增强锚点。
-        3. 使用三次样条在世界系插值，再转回局部系，形成增强轨迹。
-        4. 依据 `predict_size` 与 `pred_digit` 生成采样索引。
-
+        1. 将 '[start_step, end_step]' 的绝对轨迹转到局部坐标，得到标签轨迹。
+        2. 在局部平面随机旋转未来轨迹，得到增强锚点
+        3. 使用三次样条在是世界坐标系插值，再转回局部系，形成增强轨迹。
+        4. 依据 'predict_size' 与 'pred_digit' 生成采样索引
         Args:
             extrinsics: shape=(T, 4, 4) 的位姿序列。
             base_extrinsic: 基准外参。
             start_step: 预测起始时刻。
             end_step: 预测终止时刻。
             pred_digit: 未来轨迹采样步长。
-
         Returns:
             tuple:
                 local_label_points: 局部标签轨迹点。
@@ -531,64 +536,97 @@ class NavDP_Base_Datset(Dataset):
         label_linear_pos = []
         for f_ext in extrinsics[start_step : end_step + 1]:
             R, T = self.relative_pose(
-                extrinsics[start_step][0:3, 0:3],
-                extrinsics[start_step][0:3, 3],
-                f_ext[0:3, 0:3],
-                f_ext[0:3, 3],
-                base_extrinsic,
+                extrinsics[start_step][0:3, 0:3], # 基准旋转
+                extrinsics[start_step][0:3, 3],   # 基准平移
+                f_ext[0:3, 0:3],                  # 当前帧旋转
+                f_ext[0:3, 3],                    # 当前帧平移
+                base_extrinsic,                   # 数据集定义的基准外参
             )
             label_linear_pos.append(T)
         label_actions = np.array(label_linear_pos)
 
-        # 轨迹增强：先随机旋转，再用样条平滑，避免出现不连续转向。
+        # 轨迹增强：先随机旋转，再用样条平滑，避免出现不连续转向
         rotate_yaw_angle = np.random.uniform(-np.pi / 3, np.pi / 3)
         rotate_matrix = np.array(
             [
-                [np.cos(rotate_yaw_angle), -np.sin(rotate_yaw_angle)],
+                [np.cos(rotate_yaw_angle), -np.sin(rotate_yaw_angle)], 
                 [np.sin(rotate_yaw_angle), np.cos(rotate_yaw_angle)],
-            ],
+            ], 
             np.float32,
         )
+
+        # 仅旋转 x/y 平面坐标，theta 角度保持不变
+        # （后续训练时会随机旋转输入，增强模型的旋转不变性）
         rotate_local_actions = np.matmul(rotate_matrix, label_actions[:, 0:2].T).T
+        # 旋转后补零 z 轴，保持与原始局部坐标维度一致
         rotate_local_actions = np.stack(
-            (rotate_local_actions[:, 0], rotate_local_actions[:, 1], np.zeros_like(rotate_local_actions[:, 0])), axis=-1
+            (rotate_local_actions[:, 0],    # 旋转后的 x 坐标
+             rotate_local_actions[:, 1],    # 旋转后的 y 坐标
+             np.zeros_like(rotate_local_actions[:, 0])  # 补零 z 坐标
+            ), axis=-1  # 在最后一个维度拼接成 (x, y, z) 格式
         )
-        rotate_world_points = []
+
+        rotate_world_points = []    # 旋转后的世界坐标点，用于后续样条插值
         for act in rotate_local_actions:
             w_rot, w_act = self.absolute_pose(
-                extrinsics[start_step, 0:3, 0:3], extrinsics[start_step, 0:3, 3], np.eye(3), act, base_extrinsic
+                extrinsics[start_step, 0:3, 0:3],   # 基准旋转
+                extrinsics[start_step, 0:3, 3],     # 基准平移
+                np.eye(3),  # 局部旋转保持不变（仅平移旋转）
+                act,    # 局部坐标点
+                base_extrinsic  # 数据集定义的基准外参
             )
-            rotate_world_points.append(w_act)
+            rotate_world_points.append(w_act) # 旋转后的世界坐标点
+        
         rotate_world_points = np.array(rotate_world_points)
+        # 原始世界坐标点
         origin_world_points = extrinsics[start_step : end_step + 1, 0:3, 3]
+        # 直接使用旋转后的世界坐标点作为增强轨迹点，避免样条插值可能引入的过度平滑问题
         mix_anchor_points = rotate_world_points
 
+        # 使用三次样条在世界坐标系插值，生成更平滑的增强轨迹
         t = np.linspace(0, 1, mix_anchor_points.shape[0])
-        cs_x = CubicSpline(t, mix_anchor_points[:, 0])
-        cs_y = CubicSpline(t, mix_anchor_points[:, 1])
-        cs_z = CubicSpline(t, mix_anchor_points[:, 2])
-        interpolate_nums = origin_world_points.shape[0]
-        t_fine = np.linspace(0, 1, int(interpolate_nums))
-        x_fine = cs_x(t_fine)
-        y_fine = cs_y(t_fine)
-        z_fine = cs_z(t_fine)
+        cs_x = CubicSpline(t, mix_anchor_points[:, 0])  # x 轴样条函数
+        cs_y = CubicSpline(t, mix_anchor_points[:, 1])  # y 轴样条函数
+        cs_z = CubicSpline(t, mix_anchor_points[:, 2])  # z 轴样条函数
+
+        interpolate_nums = origin_world_points.shape[0] # 插值点数量与原始轨迹点数量一致
+        # 生成等间距的插值时间点，范围从 0 到 1，数量为 interpolate_nums
+        t_fine = np.linspace(0, 1, interpolate_nums)
+        x_fine = cs_x(t_fine)  # 插值后的 x 坐标
+        y_fine = cs_y(t_fine)  # 插值后的 y 坐标
+        z_fine = cs_z(t_fine)  # 插值后的 z 坐标
+        
+        # 将插值后的 x、y、z 坐标拼接成 shape=(interpolate_nums, 3) 的增强轨迹点数组
         result_augment_points = np.stack((x_fine, y_fine, z_fine), axis=-1)
-        local_label_points = []
-        local_augment_points = []
+
+        local_label_points = []  # 标签轨迹点（局部坐标系）
+        local_augment_points = [] # 增强轨迹点（局部坐标系）
         for f_ext, g_ext in zip(origin_world_points, result_augment_points):
+            # 将原始世界坐标点和增强后的世界坐标点都转换到局部坐标系，得到标签轨迹点和增强轨迹点
             Rf, Tf = self.relative_pose(
-                extrinsics[start_step][0:3, 0:3], extrinsics[start_step][0:3, 3], np.eye(3), f_ext, base_extrinsic
+                extrinsics[start_step][0:3, 0:3],   # 基准旋转
+                extrinsics[start_step][0:3, 3],     # 基准平移
+                np.eye(3),  # 局部旋转保持不变（仅平移旋转）
+                f_ext,  # 原始世界坐标点
+                base_extrinsic  # 数据集定义的基准外参
             )
             Rg, Tg = self.relative_pose(
-                extrinsics[start_step][0:3, 0:3], extrinsics[start_step][0:3, 3], np.eye(3), g_ext, base_extrinsic
+                extrinsics[start_step][0:3, 0:3],   # 基准旋转
+                extrinsics[start_step][0:3, 3],     # 基准平移
+                np.eye(3),  # 局部旋转保持不变（仅平移旋转）
+                g_ext,  # 增强后的世界坐标点
+                base_extrinsic  # 数据集定义的基准外参
             )
-            local_label_points.append(Tf)
-            local_augment_points.append(Tg)
         local_label_points = np.array(local_label_points)
         local_augment_points = np.array(local_augment_points)
-        action_indexes = np.clip(np.arange(self.predict_size + 1) * pred_digit, 0, label_actions.shape[0] - 2)
+        # 根据 'predict_size' 与 'pred_digit' 生成采样索引，确保不越界
+        action_indexes = np.clip(
+            np.arange(self.predict_size+1)*pred_digit, # 生成等间距的索引，范围从 0 到 predict_size*pred_digit，步长为 pred_digit
+            0, 
+            label_actions.shape[0]-2
+        )
         return local_label_points, local_augment_points, origin_world_points, result_augment_points, action_indexes
-
+    
     def rank_steps(self, extrinsics, obstacle_points, pred_digit=4):
         """基于障碍物密度对起终点进行概率采样。
 
@@ -596,7 +634,7 @@ class NavDP_Base_Datset(Dataset):
         目的：提高训练样本的多样性和挑战性，使模型能够更好地处理复杂的导航环境。
 
         Args:
-            extrinsics: shape=(T, 4, 4) 位姿序列。
+            extrinsics: shape=(T, 4, 4) 位姿序列。(T:轨迹长度, 4:4:位姿矩阵)
             obstacle_points: shape=(N, 3) 障碍点。
             pred_digit: 未来窗口采样步长。
 
@@ -608,12 +646,14 @@ class NavDP_Base_Datset(Dataset):
         # bev_points = obstacle_points[:, 0:2]
         for i in range(0, trajectory.shape[0] - 1):
             future_actions = trajectory[i : min(i + self.predict_size * pred_digit, trajectory.shape[0] - 1)]
+            # 计算未来轨迹的边界框，扩展一定范围以包含周围环境。
             future_bound = [
-                np.min(future_actions[:, 0]) - 1,
-                np.min(future_actions[:, 1]) - 1,
-                np.max(future_actions[:, 0]) + 1,
-                np.max(future_actions[:, 1]) + 1,
+                np.min(future_actions[:, 0]) - 1, # x_min
+                np.min(future_actions[:, 1]) - 1, # y_min
+                np.max(future_actions[:, 0]) + 1, # x_max
+                np.max(future_actions[:, 1]) + 1, # y_max
             ]
+            # 统计障碍点在未来轨迹边界内的数量，作为密度评分。
             within_bound_points = (
                 (obstacle_points[:, 0] > future_bound[0])
                 & (obstacle_points[:, 1] > future_bound[1])
@@ -621,45 +661,56 @@ class NavDP_Base_Datset(Dataset):
                 & (obstacle_points[:, 1] < future_bound[3])
             )
             points_score.append(np.sum(within_bound_points))
+        # 归一化分数并转换为概率分布，增加采样的随机性。
         points_score = np.array(points_score) / (np.array(points_score).max() + 1e-8)
+        # 通过 softmax 函数将分数转换为概率，温度参数控制分布的平滑程度。
+        # probs: shape=(T-1,) 的概率分布，表示每个时间步作为起点的相对优先级。
         probs = np.exp(points_score / 0.2) / np.sum(np.exp(points_score / 0.2))
+        # 根据概率分布随机选择起点，增加训练样本的多样性。
         start_choice = np.random.choice(np.arange(probs.shape[0]), p=probs)
+        # 生成未来时间步的候选列表，并根据距离起点的远近赋予不同的采样概率。
         target_choice_candidates = np.arange(start_choice + 1, trajectory.shape[0])
+        # 目标选择概率与时间步距离成正相关，倾向选择更远的目标点，增加训练的挑战性。
         target_choice_p = (target_choice_candidates - start_choice) / (
             (target_choice_candidates - start_choice).max() + 1e-8
         )
+        # 通过 softmax 函数将目标选择概率转换为分布，温度参数控制分布的平滑程度。
         target_choice_p = np.exp(target_choice_p / 0.2) / np.exp(target_choice_p / 0.2).sum()
+        
         target_choice = np.random.choice(target_choice_candidates, p=target_choice_p)
         return start_choice, target_choice
 
     def __getitem__(self, index):
         """获取单条训练样本。
-
         输出内容涵盖点目标、图像目标、像素目标、历史图像、深度图、
         原始/增强动作序列及其 critic 分数。
-
+        （注意：这里计算的 critic 分数只是初步估计，用于指导训练过程）
+        （注意：真正的 critic 分数需要在训练过程中进一步优化）
         Args:
             index: 样本索引。
-
         Returns:
-            tuple: 训练所需的 10 个字段（主要为 torch.float32 张量）。
+            tuple: 训练所需的 10 个字段(主要为 torch.float32 张量)。
         """
         import os
         import time
 
+        # 记录数据加载与处理时间，帮助分析性能瓶颈。
         if self._last_time is None:
             self._last_time = time.time()
         start_time = time.time()
 
+        # 1. 读取并处理轨迹数据，获取相机参数、位姿序列和轨迹长度。
         (
             camera_intrinsic,
             trajectory_base_extrinsic,
             trajectory_extrinsics,
             trajectory_length,
         ) = self.process_data_parquet(index)
-
+        
+        # 2. 从场景点云中提取障碍物点，供后续的起终点采样使用。
         trajectory_obstacle_points, trajectory_obstacle_pcd = self.process_obstacle_points(index)
 
+        # 3. 根据 prior_sample 设置，选择采样策略：基于障碍密度的优先采样或均匀随机采样。
         if self.prior_sample:
             # 注意：prior 采样依赖障碍分布，倾向采集更“困难”的导航片段。
             pixel_start_choice, target_choice = self.rank_steps()
@@ -670,20 +721,23 @@ class NavDP_Base_Datset(Dataset):
             target_choice = np.random.randint(pixel_start_choice + 1, trajectory_length - 1)
             memory_start_choice = np.random.randint(pixel_start_choice, target_choice)
 
+        # 4. 根据 random_digit 设置，决定记忆帧的采样间隔，增加训练样本的多样性。
         if self.random_digit:
             memory_digit = np.random.randint(2, 8)
             pred_digit = memory_digit
         else:
             memory_digit = 4
             pred_digit = 4
-
+        
+        # 5. 构造历史记忆帧与当前深度图，确保时序一致性，提供丰富的视觉上下文。
         # 历史观测与未来动作共享同一个记忆起点，保证时序一致性。
-        memory_images, depth_image, memory_index = self.process_memory(
-            self.trajectory_rgb_path[index],
-            self.trajectory_depth_path[index],
-            memory_start_choice,
-            memory_digit=memory_digit,
+        memory_images, depth_images, memory_index, history_index = self.process_memory(
+            self.trajectory_rgb_path[index],    # 轨迹 RGB 图像路径列表
+            self.trajectory_depth_path[index],  # 轨迹 Depth 图像路径列表
+            memory_start_choice,                # 记忆起点时刻
+            memory_digit=memory_digit,          # 记忆采样间隔
         )
+        # 6. 构造像素目标输入，并判断目标点在图像中的可见性。
         (
             target_local_points,
             augment_local_points,
@@ -694,76 +748,102 @@ class NavDP_Base_Datset(Dataset):
             trajectory_extrinsics, trajectory_base_extrinsic, memory_start_choice, target_choice, pred_digit=pred_digit
         )
 
-        # 将局部三维点轨迹转为平面动作表示 (x, y, theta)。
+        # 计算初始方向向量，作为后续计算 theta 角度的参考。
         init_vector = target_local_points[1] - target_local_points[0]
+        # 将局部三维轨迹点转换为二维平面动作序列 (x, y, theta)，其中 theta 由初始方向向量与当前位移向量之间的夹角计算得到。
         target_xyt_actions = self.xyz_to_xyt(target_local_points, init_vector)
+        # 同样转换增强轨迹点，得到增强动作序列。
         augment_xyt_actions = self.xyz_to_xyt(augment_local_points, init_vector)
-        # 按预测长度和步长采样固定数量的动作点。
+
+        # 按预测长度和步长采样固定数量的动作点，确保训练输入的一致性。
         pred_actions = target_xyt_actions[action_indexes]
+        # 直接使用旋转后的世界坐标点作为增强轨迹点，避免样条插值可能引入的过度平滑问题，因此增强动作的索引与标签动作保持一致。
         augment_actions = augment_xyt_actions[action_indexes]
+        
+        # 7. 计算与障碍点的距离以及设计 heuristic critic 分数，初步评估动作的“安全性”，为训练提供指导信号。
+        # 注意：这里计算的 critic 分数只是初步估计，用于指导训练过程，真正的 critic 分数需要在训练过程中进一步优化。
         if trajectory_obstacle_points.shape[0] != 0:
+            # NavDP 原版
             # 使用与障碍点的最小 L1 距离估计轨迹“安全性/可行性”。
             pred_distance = (
                 np.abs(target_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
                 .sum(axis=-1)
                 .min(axis=-1)
             )
+            # 增强轨迹通常更远离原始轨迹，因此与障碍点的距离可能更大，提供了不同的训练信号。
             augment_distance = (
                 np.abs(augment_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
                 .sum(axis=-1)
                 .min(axis=-1)
             )
+            # 设计简单的 heuristic critic 分数，结合当前点与障碍物的距离以及未来轨迹的变化趋势，评估动作的“安全性”。
             pred_critic = (
                 -5.0 * (pred_distance[action_indexes[:-1]] < 0.1).mean()
                 + 0.5 * (pred_distance[action_indexes][1:] - pred_distance[action_indexes][:-1]).sum()
             )
+            # 增强轨迹的 critic 分数同样评估其与障碍物的距离以及未来趋势，鼓励模型学习更安全的增强动作。
             augment_critic = (
                 -5.0 * (augment_distance[action_indexes[:-1]] < 0.1).mean()
                 + 0.5 * (augment_distance[action_indexes][1:] - augment_distance[action_indexes][:-1]).sum()
             )
         else:
-            # 无障碍点时给予中性分数，避免 critic 为 NaN 或极端值。
+            # 无障碍点时给予中性分数，避免 critic 为NaN 或极端值。
             pred_distance = np.ones(pred_actions.shape[0], dtype=np.float32)
             augment_distance = np.ones(pred_actions.shape[0], dtype=np.float32)
             pred_critic = 2.0
             augment_critic = 2.0
-
-        point_goal = target_xyt_actions[-1]
+        
+        point_goal = target_xyt_actions[-1]  # 目标点作为最后一个动作点
         image_goal = np.concatenate(
             (
-                self.process_image(self.trajectory_rgb_path[index][target_choice]),
-                self.process_image(self.trajectory_rgb_path[index][memory_start_choice]),
-            ),
+                self.process_image(self.trajectory_rgb_path[index][target_choice]), 
+                self.process_image(self.trajectory_rgb_path[index][memory_start_choice]), 
+            ), 
             axis=-1,
         )
 
-        # 额外构造像素级目标监督（在起始图像中标出目标区域）。
+        # 额外构造像素级目标监督 (在起始图像中标出目标区域) 。
+        # 与上一个process_actions调用不同，这里使用 pixel_start_choice 作为起点，确保像素目标与动作标签的一致性。
         pixel_target_local_points, _, _, _, _ = self.process_actions(
-            trajectory_extrinsics, trajectory_base_extrinsic, pixel_start_choice, target_choice, pred_digit=pred_digit
+            trajectory_extrinsics,      # 轨迹位姿序列
+            trajectory_base_extrinsic,  # 基准外参
+            pixel_start_choice,         # 像素目标起点，与动作标签的起点可能不同
+            target_choice,              # 目标点，与动作标签的目标点一致
+            pred_digit=pred_digit,      # 采样步长与动作标签保持一致，确保像素目标与动作标签的一致性
         )
+        # 像素目标起点 pixel_start_choice 与动作标签的起点 memory_start_choice 不同:
+        # - pixel_start_choice 用于构造像素级目标监督，确保像素目标与动作标签的一致性。
+        # - memory_start_choice 用于构造历史记忆帧，提供丰富的视觉上下文。
+
+        # 计算像素目标的初始方向向量，作为后续计算 theta 角度的参考。
         pixel_init_vector = pixel_target_local_points[1] - pixel_target_local_points[0]
+        # 将局部三维轨迹点转换为二维平面动作序列 (x, y, theta)，其中 theta 由初始方向向量与当前位移向量之间的夹角计算得到。
+        # theta: 代表机器人当前朝向与目标点方向之间的角度差，提供了重要的导航信息。
         pixel_xyt_actions = self.xyz_to_xyt(pixel_target_local_points, pixel_init_vector)
+        # 构造像素目标输入，并判断目标点在图像中的可见性。
         pixel_goal, pixel_flag = self.process_pixel_goal(
-            self.trajectory_rgb_path[index][pixel_start_choice],
-            pixel_xyt_actions[-1],
+            self.trajectory_rgb_path[index][pixel_start_choice], # 起始帧图像路径
+            pixel_xyt_actions[-1],  # 像素目标点，取局部轨迹的最后一个点作为目标
             camera_intrinsic,
             trajectory_base_extrinsic,
         )
+
         # pixel_channel=7: [pixel_mask(1) + 带标注历史帧(3) + 当前帧(3)]。
         # pixel_channel=4: [pixel_mask(1) + 当前帧(3)]。
-        # 带标注历史帧: 既提供视觉上下文，又突出目标位置，帮助模型学习从历史信息中推断目标。
         if self.pixel_channel == 7:
             pixel_goal = np.concatenate((pixel_goal, memory_images[-1]), axis=-1)
-
-        # 将绝对动作点差分为相邻步增量，并按经验系数放大。
-        # 说人话就是：模型预测相对动作增量（而非绝对位置），更符合实际导航控制的闭环反馈机制。
+        
+        # 将绝对动作点差分为相邻步增量，并按经验系数放大
+        # 说人话就是：模型预测相对动作增量（而非绝对位置），更符合实际控制需求，同时放大增量有助于训练稳定性。
+        # pred_actions[1:]: 从第二个动作点开始，表示每个动作点相对于前一个动作点的增量。
+        # pred_actions[:-1]: 从第一个动作点到倒数第二个动作点，表示每个动作点的绝对位置。
         pred_actions = (pred_actions[1:] - pred_actions[:-1]) * 4.0
         augment_actions = (augment_actions[1:] - augment_actions[:-1]) * 4.0
 
-        # 对齐动作维度到 `action_dim`，缺失维补零，便于统一 batch 张量。
+        # 对齐动作维度到 'action_dim'，缺失维度补零，便于统一 batch 张量
         pred_actions = np.pad(
-            pred_actions,
-            ((0, 0), (0, self.action_dim - pred_actions.shape[-1])),
+            pred_actions, 
+            ((0, 0), (0, self.action_dim - pred_actions.shape[-1])), 
             mode='constant',
             constant_values=(0, 0),
         )
@@ -774,7 +854,7 @@ class NavDP_Base_Datset(Dataset):
             constant_values=(0, 0),
         )
 
-        # 按 batch 窗口打印 __getitem__ 平均耗时，便于性能分析。
+        # 按 batch 窗口打印  __getitem__ 平均耗时，便于性能分析。
         end_time = time.time()
         self.item_cnt += 1
         self.batch_time_sum += end_time - start_time
@@ -784,7 +864,7 @@ class NavDP_Base_Datset(Dataset):
                 f'__getitem__ pid={os.getpid()}, avg_time(last {self.batch_size})={avg_time:.2f}s, cnt={self.item_cnt}'
             )
             self.batch_time_sum = 0.0
-
+        
         # 统一转换为 torch.float32，便于后续模型前向与 loss 计算。
         point_goal = torch.tensor(point_goal, dtype=torch.float32)
         image_goal = torch.tensor(image_goal, dtype=torch.float32)
@@ -808,9 +888,8 @@ class NavDP_Base_Datset(Dataset):
             float(pixel_flag),
         )
 
-
-def navdp_collate_fn(batch):
-    """NavDP 数据集自定义拼接函数。
+def flownav_collate_fn(batch):
+    """Flownav 数据集自定义拼接函数。
     用来将 `__getitem__` 返回的单条样本列表拼接成 batch 张量字典，便于 DataLoader 直接使用。
     Args:
         batch: `__getitem__` 返回元组组成的列表。
@@ -832,13 +911,12 @@ def navdp_collate_fn(batch):
     }
     return collated
 
-
 if __name__ == "__main__":
     # 简单的离线可视化自测：导出像素目标、图像目标等结果图。
-    os.makedirs("./navdp_dataset_test/", exist_ok=True)
-    dataset = NavDP_Base_Datset(
+    os.makedirs("./flownav_dataset_test/", exist_ok=True)
+    dataset = FlowNav_Base_Datset(
         "/mnt/data/liuyu/InternDate-N1-v05/vln-n1",
-        "./navdp_dataset_test/dataset_lerobot_v05_with_interiorgs.json",
+        "./flownav_dataset_test/dataset_lerobot_v05_with_interiorgs.json",
         8,
         24,
         224,
@@ -888,4 +966,6 @@ if __name__ == "__main__":
                 0.6,
                 (0, 0, 255),
             )
-            cv2.imwrite("./navdp_dataset_test/goal_information_%d.png" % i, goal_info_image)
+            cv2.imwrite("./flownav_dataset_test/goal_information_%d.png" % i, goal_info_image)
+
+
