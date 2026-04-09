@@ -211,7 +211,7 @@ class FlowNav_Base_Datset(Dataset):
         """
         try:
             depth = Image.open(depth_url)
-            depth = np.array(depth, np.uint16)]
+            depth = np.array(depth, np.uint16)
         except Exception as e:
             print(f"Error loading depth {depth_url}: {e}")
             depth = np.zeros((self.image_size, self.image_size), dtype=np.uint16)
@@ -302,6 +302,7 @@ class FlowNav_Base_Datset(Dataset):
 
     def process_obstacle_points(self, index):
         """从场景点云中提取障碍物点。
+        （对于动态场景来说，这里只包含静态障碍点）
 
         当前实现按颜色阈值筛选（接近 [0, 0, 0.5] 的点视作障碍）。
 
@@ -617,6 +618,8 @@ class FlowNav_Base_Datset(Dataset):
                 g_ext,  # 增强后的世界坐标点
                 base_extrinsic  # 数据集定义的基准外参
             )
+            local_label_points.append(Tf)
+            local_augment_points.append(Tg)
         local_label_points = np.array(local_label_points)
         local_augment_points = np.array(local_augment_points)
         # 根据 'predict_size' 与 'pred_digit' 生成采样索引，确保不越界
@@ -755,6 +758,20 @@ class FlowNav_Base_Datset(Dataset):
         # 同样转换增强轨迹点，得到增强动作序列。
         augment_xyt_actions = self.xyz_to_xyt(augment_local_points, init_vector)
 
+        # 与 pred_actions 对齐的全局帧索引
+        odom_global_idx = np.clip(
+            memory_start_choice + action_indexes, 
+            0, 
+            trajectory_extrinsics.shape[0] - 1
+        ).astype(np.int64)
+        # 获取 odometry
+        odom_pose = trajectory_extrinsics[odom_global_idx]
+        # 相邻帧增量 odom
+        odom_delta = np.matmul(
+            np.linalg.inv(odom_pose[:-1]), 
+            odom_pose[1:]
+        )   # shape: (K-1, 4, 4)
+
         # 按预测长度和步长采样固定数量的动作点，确保训练输入的一致性。
         pred_actions = target_xyt_actions[action_indexes]
         # 直接使用旋转后的世界坐标点作为增强轨迹点，避免样条插值可能引入的过度平滑问题，因此增强动作的索引与标签动作保持一致。
@@ -870,22 +887,26 @@ class FlowNav_Base_Datset(Dataset):
         image_goal = torch.tensor(image_goal, dtype=torch.float32)
         pixel_goal = torch.tensor(pixel_goal, dtype=torch.float32)
         memory_images = torch.tensor(memory_images, dtype=torch.float32)
-        depth_image = torch.tensor(depth_image, dtype=torch.float32)
+        depth_images = torch.tensor(depth_images, dtype=torch.float32)
         pred_actions = torch.tensor(pred_actions, dtype=torch.float32)
         augment_actions = torch.tensor(augment_actions, dtype=torch.float32)
         pred_critic = torch.tensor(pred_critic, dtype=torch.float32)
         augment_critic = torch.tensor(augment_critic, dtype=torch.float32)
+        odom_pose = torch.tensor(odom_pose, dtype=torch.float32)
+        odom_delta = torch.tensor(odom_delta, dtype=torch.float32)
         return (
-            point_goal,
-            image_goal,
-            pixel_goal,
-            memory_images,
-            depth_image,
-            pred_actions,
-            augment_actions,
-            pred_critic,
-            augment_critic,
-            float(pixel_flag),
+            point_goal,         # 目标点坐标，提供导航目标的位置信息。
+            image_goal,         # 图像目标，包含当前帧和目标帧的视觉信息，帮助模型理解导航环境。
+            pixel_goal,         # 像素目标，提供像素级别的导航监督信号。
+            memory_images,      # 历史记忆帧，提供丰富的视觉上下文，帮助模型理解环境动态。
+            depth_images,        # 深度图像，提供环境的几何信息，辅助模型进行空间理解。
+            pred_actions,       # 监督动作序列，指导模型学习正确的导航行为。
+            augment_actions,    # 增强动作序列，提供多样化的训练信号，增强模型的泛化能力。
+            pred_critic,        # 预测动作的 critic 分数，初步评估动作的“安全性”，为训练提供指导信号。
+            augment_critic,     # 增强动作的 critic 分数，评估增强动作的“安全性”，鼓励模型学习更安全的增强动作。
+            odom_pose,          # Odometry 位姿，提供环境的运动信息，辅助模型进行空间理解。
+            odom_delta,         # Odometry 增量，提供相邻帧之间的运动信息，辅助模型进行空间理解。
+            float(pixel_flag),  # 像素目标可见性标志，指示目标点在图像中的可见性，帮助模型区分不同的训练样本类型。
         )
 
 def flownav_collate_fn(batch):
@@ -908,6 +929,8 @@ def flownav_collate_fn(batch):
         "batch_augments": torch.stack([item[6] for item in batch]),
         "batch_label_critic": torch.stack([item[7] for item in batch]),
         "batch_augment_critic": torch.stack([item[8] for item in batch]),
+        "batch_odom_pose": torch.stack([item[9] for item in batch]),
+        "batch_odom_delta": torch.stack([item[10] for item in batch]),
     }
     return collated
 
@@ -931,11 +954,13 @@ if __name__ == "__main__":
             image_goal,
             pixel_goal,
             memory_images,
-            depth_image,
+            depth_images,
             pred_actions,
             augment_actions,
             pred_critic,
             augment_critic,
+            odom_pose,
+            odom_delta,
             pixel_flag,
         ) = dataset.__getitem__(i)
         if pixel_flag == 1.0:
