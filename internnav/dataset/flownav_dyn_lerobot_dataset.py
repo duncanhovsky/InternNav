@@ -140,6 +140,7 @@ class FlowNav_Dyn_Lerobot_Dataset(FlowNav_Base_Datset):
         trajectory_data_scale: 轨迹下采样比例（当前保留参数）。
         pixel_channel: 像素目标通道。
         action_dim: 动作维度。
+        fallback_fps: 当 parquet 缺少时间戳时使用的回退帧率（Hz）。
         debug: 调试开关。
         preload: 是否从 preload_path 直接加载索引。
         random_digit: 是否随机时间步长采样。
@@ -173,6 +174,7 @@ class FlowNav_Dyn_Lerobot_Dataset(FlowNav_Base_Datset):
         trajectory_data_scale=1.0,
         pixel_channel=7,
         action_dim=3,
+        fallback_fps: float = 30.0,
         debug=False,
         preload=False,
         random_digit=False,
@@ -204,6 +206,7 @@ class FlowNav_Dyn_Lerobot_Dataset(FlowNav_Base_Datset):
             trajectory_data_scale=trajectory_data_scale,
             pixel_channel=pixel_channel,
             action_dim=action_dim,
+            fallback_fps=fallback_fps,
             debug=debug,
             preload=preload,
             random_digit=random_digit,

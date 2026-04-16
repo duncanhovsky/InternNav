@@ -48,6 +48,14 @@ def print(*args, **kwargs):
 
 builtins.print = print
 
+
+def _find_first_existing_column(df, candidates):
+    """返回 DataFrame 中第一个存在的候选列名。"""
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
 class FlowNav_Base_Datset(Dataset):
     """NavDP 基础数据集。
 
@@ -67,6 +75,7 @@ class FlowNav_Base_Datset(Dataset):
         trajectory_data_scale: 轨迹采样比例（当前实现中仅保留参数）。
         pixel_channel: 像素目标通道模式，常见为 4 或 7。
         action_dim: 动作维度，若 xyt 维度不足会右侧补零。
+        fallback_fps: 当 parquet 缺少真实时间戳时使用的回退帧率（Hz）。
         debug: 调试开关（当前实现中仅保留参数）。
         preload: 是否直接使用 `preload_path` 加载索引。
         random_digit: 是否随机采样时间步长（memory/pred digit）。
@@ -86,6 +95,7 @@ class FlowNav_Base_Datset(Dataset):
             trajectory_data_scale=1.0,
             pixel_channel=7,
             action_dim=3,
+            fallback_fps=30.0,
             debug=False,
             preload=False,
             random_digit=False,
@@ -101,6 +111,9 @@ class FlowNav_Base_Datset(Dataset):
         self.trajectory_data_scale = trajectory_data_scale
         self.predict_size = predict_size
         self.action_dim = action_dim
+        # 为什么这样改：真实数据常缺失时间戳列，回退帧率必须可配置，
+        # 才能让 dyn_module 在不同采样率数据上仍得到物理时间一致的速度估计。
+        self.fallback_fps = max(float(fallback_fps), 1e-3)
         self.debug = debug
 
         self.trajectory_data_dir = []
@@ -124,7 +137,20 @@ class FlowNav_Base_Datset(Dataset):
                 ]
 
                 for scene_dir in tqdm(select_scene_dirs):
-                    chunk_name = os.listdir(os.path.join(root_dirs, group_dir, scene_dir, 'data'))[0]
+                    # 使用排序后的 chunk 列表，避免文件系统返回顺序不稳定导致索引漂移。
+                    # 这里仍保留“取第一个 chunk”的原有策略，以保证最小行为变更。
+                    scene_data_root = os.path.join(root_dirs, group_dir, scene_dir, 'data')
+                    chunk_candidates = sorted(
+                        [
+                            p
+                            for p in os.listdir(scene_data_root)
+                            if os.path.isdir(os.path.join(scene_data_root, p))
+                        ]
+                    )
+                    if len(chunk_candidates) == 0:
+                        print(f"Skip scene without data chunk: {os.path.join(root_dirs, group_dir, scene_dir)}")
+                        continue
+                    chunk_name = chunk_candidates[0]
                     data_dir = os.path.join(root_dirs, group_dir, scene_dir, f'data/{chunk_name}')
                     afford_dir = os.path.join(root_dirs, group_dir, scene_dir, 'meta/pointcloud.ply')
                     with jsonlines.open(
@@ -141,9 +167,26 @@ class FlowNav_Base_Datset(Dataset):
                     )
                     depth_paths = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))]
 
-                    data_paths = [os.path.join(data_dir, p) for p in sorted(os.listdir(data_dir))]
+                    # 仅收集 parquet 轨迹文件，避免目录内混入临时文件造成 episode 对齐偏差。
+                    data_paths = [
+                        os.path.join(data_dir, p)
+                        for p in sorted(os.listdir(data_dir))
+                        if p.endswith('.parquet')
+                    ]
+
+                    # episode 数多于 parquet 数时，旧逻辑会在 append 时越界并进入 pdb，
+                    # 这里先做显式告警并在循环中保护，避免训练作业“卡死”。
+                    if len(data_paths) < len(episode_info):
+                        print(
+                            "Warning: episode_info count is larger than parquet count, "
+                            f"scene={os.path.join(root_dirs, group_dir, scene_dir)}, "
+                            f"episodes={len(episode_info)}, parquets={len(data_paths)}"
+                        )
 
                     for episode_idx, episode in enumerate(episode_info):
+                        if episode_idx >= len(data_paths):
+                            # 缺失 parquet 的 episode 直接跳过，保证索引构建可继续。
+                            break
                         # 每个 episode 使用 image_index 对齐 RGB 与 Depth 帧范围。
                         image_start_index = episode['image_index']['min']
                         image_end_index = episode['image_index']['max']
@@ -156,10 +199,13 @@ class FlowNav_Base_Datset(Dataset):
                             self.trajectory_depth_path.append(episode_depth_path)
                             self.trajectory_afford_path.append(afford_dir)
                         except Exception as e:
-                            import pdb
-
-                            print(f"Error processing episode {episode_idx}: {e}")
-                            pdb.set_trace()
+                            # 训练/预处理环境通常是无人值守，不应进入交互式断点。
+                            # 这里改为抛出带上下文的异常，便于日志系统直接定位问题。
+                            raise RuntimeError(
+                                "Error processing dataset episode. "
+                                f"group={group_dir}, scene={scene_dir}, episode_idx={episode_idx}, "
+                                f"data_dir={data_dir}"
+                            ) from e
             # 将扫描结果保存为索引文件，后续可跳过目录扫描加速启动。
             save_dict = {
                 'trajectory_data_dir': self.trajectory_data_dir,
@@ -252,7 +298,7 @@ class FlowNav_Base_Datset(Dataset):
         image = np.array(image, np.float32) / 255.0
         return image
     
-    def process_depth(self, depth_path):
+    def process_depth(self, depth_path, return_meta=False):
         """预处理深度图到统一分辨率并过滤异常值。
 
         深度由原始单位转换为米（除以 10000），并将过近/过远值置零。
@@ -260,23 +306,101 @@ class FlowNav_Base_Datset(Dataset):
         Args:
             depth_path: 深度图路径。
 
+        Args:
+            return_meta: 是否额外返回几何一致性所需的预处理元信息。
+
         Returns:
             np.ndarray: shape=(image_size, image_size, 1) 的 float32 深度图。
+            np.ndarray(可选): shape=(10,) 的预处理元信息，字段顺序为
+                [scale_x, scale_y, pad_left, pad_top,
+                 crop_x0, crop_y0, crop_w, crop_h,
+                 final_scale_x, final_scale_y]。
         """
         depth = self.load_depth(depth_path) / 10000.0
         H, W = depth.shape
         prop = self.image_size / max(H, W)
         depth = cv2.resize(depth, (-1, -1), fx=prop, fy=prop)
-        pad_width = max((self.image_size - depth.shape[1]) // 2, 0)
-        pad_height = max((self.image_size - depth.shape[0]) // 2, 0)
+        resized_h, resized_w = depth.shape
+        pad_width = max((self.image_size - resized_w) // 2, 0)
+        pad_height = max((self.image_size - resized_h) // 2, 0)
+        # 为什么这样改：当差值为奇数时，左右/上下 padding 不能简单对称，
+        # 必须显式记录左上偏移，才能在 trainer 里正确修正主点位置。
+        pad_right = max(self.image_size - resized_w - pad_width, 0)
+        pad_bottom = max(self.image_size - resized_h - pad_height, 0)
         pad_depth = np.pad(
-            depth, ((pad_height, pad_height), (pad_width, pad_width)), mode='constant', constant_values=0
+            depth,
+            ((pad_height, pad_bottom), (pad_width, pad_right)),
+            mode='constant',
+            constant_values=0,
         )
+        # 当前预处理链路无额外裁剪，保留 crop 元信息是为了兼容未来启用裁剪时
+        # 仍可在 trainer 端维持“深度感受野 == 点云感受野”的几何一致性。
+        crop_x0, crop_y0 = 0, 0
+        crop_h, crop_w = pad_depth.shape
+        crop_depth = pad_depth[crop_y0 : crop_y0 + crop_h, crop_x0 : crop_x0 + crop_w]
         pad_depth[pad_depth > 5.0] = 0
         pad_depth[pad_depth < 0.1] = 0
-        depth = cv2.resize(pad_depth, (self.image_size, self.image_size))
+        depth = cv2.resize(crop_depth, (self.image_size, self.image_size))
         depth = np.array(depth, np.float32)
-        return depth[:, :, np.newaxis]
+        depth = depth[:, :, np.newaxis]
+
+        if not return_meta:
+            return depth
+
+        final_scale_x = float(self.image_size) / max(float(crop_w), 1e-6)
+        final_scale_y = float(self.image_size) / max(float(crop_h), 1e-6)
+        preprocess_meta = np.array(
+            [
+                float(prop),
+                float(prop),
+                float(pad_width),
+                float(pad_height),
+                float(crop_x0),
+                float(crop_y0),
+                float(crop_w),
+                float(crop_h),
+                final_scale_x,
+                final_scale_y,
+            ],
+            dtype=np.float32,
+        )
+        return depth, preprocess_meta
+
+    def process_memory_with_depth_meta(self, rgb_paths, depth_paths, start_step, memory_digit=1):
+        """在历史记忆构造基础上，额外返回深度几何预处理元信息。"""
+        memory_index = np.arange(
+            start_step - (self.memory_size - 1) * memory_digit,
+            start_step + 1,
+            memory_digit,
+        )
+        outrange_sum = (memory_index < 0).sum()
+        memory_index = memory_index[outrange_sum:]
+
+        history_index = np.arange(
+            start_step - (self.history_frames - 1) * memory_digit,
+            start_step + 1,
+            memory_digit,
+        )
+        history_sum = (history_index < 0).sum()
+        history_index = history_index[history_sum:]
+
+        context_image = np.zeros((self.memory_size, self.image_size, self.image_size, 3), np.float32)
+        context_image[outrange_sum:] = np.array([self.process_image(rgb_paths[i]) for i in memory_index])
+
+        context_depth = np.zeros((self.history_frames, self.image_size, self.image_size, 1), np.float32)
+        # 为什么这样改：为每帧深度保存“缩放/填充/裁剪”参数，trainer 才能把内参同步变换。
+        # 否则即便深度图被裁剪或缩放，反投影仍会使用原始内参，导致点云几何畸变。
+        default_meta = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0, float(self.image_size), float(self.image_size), 1.0, 1.0], dtype=np.float32)
+        depth_preprocess_meta = np.repeat(default_meta[None, :], self.history_frames, axis=0)
+
+        if history_index.shape[0] > 0:
+            depth_and_meta = [self.process_depth(depth_paths[i], return_meta=True) for i in history_index]
+            valid_depth = np.array([item[0] for item in depth_and_meta], dtype=np.float32)
+            valid_meta = np.array([item[1] for item in depth_and_meta], dtype=np.float32)
+            context_depth[history_sum:] = valid_depth
+            depth_preprocess_meta[history_sum:] = valid_meta
+
+        return context_image, context_depth, memory_index, history_index, depth_preprocess_meta
 
     def process_data_parquet(self, index):
         """读取轨迹 parquet 并解析相机参数与动作序列。
@@ -290,6 +414,7 @@ class FlowNav_Base_Datset(Dataset):
                 camera_extrinsic: shape=(4, 4) 基准外参。
                 camera_trajectory: shape=(T, 4, 4) 位姿序列。
                 trajectory_length: 轨迹长度 T。
+                timestamps_ns: shape=(T,) 的时间戳序列（纳秒）。
         """
         if not os.path.isfile(self.trajectory_data_dir[index]):
             raise FileNotFoundError(self.trajectory_data_dir[index])
@@ -298,7 +423,29 @@ class FlowNav_Base_Datset(Dataset):
         camera_extrinsic = np.vstack(np.array(df['observation.camera_extrinsic'].tolist()[0])).reshape(4, 4)
         trajectory_length = len(df['action'].tolist())
         camera_trajectory = np.array([np.stack(frame) for frame in df['action']], dtype=np.float64).reshape(-1, 4, 4)
-        return camera_intrinsic, camera_extrinsic, camera_trajectory, trajectory_length
+        # 为动态模块补齐统一时间轴：优先读数据集真实时间戳，缺失时回退到等间隔序列。
+        ts_col = _find_first_existing_column(
+            df,
+            [
+                'timestamp_ns',
+                'timestamps_ns',
+                'observation.timestamp_ns',
+                'time_ns',
+            ],
+        )
+        if ts_col is None:
+            # 为什么这样改：旧逻辑使用 arange(0..T) 会把时间单位隐式当成“步”，
+            # dyn_module 估计速度时会失真；这里改为按可配置 fallback_fps 构造纳秒时间轴。
+            # 当fallback_fps = 30Hz 时，dt_ns = 33,333,333ns = 33.333333ms，符合常见视频帧率，能让速度估计更接近真实物理值。
+            dt_ns = int(round(1e9 / self.fallback_fps))
+            timestamps_ns = np.arange(trajectory_length, dtype=np.int64) * dt_ns
+        else:
+            timestamps_ns = np.asarray(df[ts_col].tolist(), dtype=np.int64).reshape(-1)
+            if timestamps_ns.shape[0] != trajectory_length:
+                # 时间戳长度异常时回退，确保与轨迹长度一致，避免下游索引错位。
+                dt_ns = int(round(1e9 / self.fallback_fps))
+                timestamps_ns = np.arange(trajectory_length, dtype=np.int64) * dt_ns
+        return camera_intrinsic, camera_extrinsic, camera_trajectory, trajectory_length, timestamps_ns
 
     def process_obstacle_points(self, index):
         """从场景点云中提取障碍物点。
@@ -692,7 +839,9 @@ class FlowNav_Base_Datset(Dataset):
         Args:
             index: 样本索引。
         Returns:
-            tuple: 训练所需的 10 个字段(主要为 torch.float32 张量)。
+            tuple: 训练所需字段（主要为 torch.float32 张量），
+                含 point/image/pixel goal、memory/depth、pred/augment actions、
+                pred/augment critic、odom_pose/odom_delta、pixel_flag。
         """
         import os
         import time
@@ -708,7 +857,13 @@ class FlowNav_Base_Datset(Dataset):
             trajectory_base_extrinsic,
             trajectory_extrinsics,
             trajectory_length,
+            trajectory_timestamps_ns,
         ) = self.process_data_parquet(index)
+
+        # 轨迹过短时无法稳定构造监督（例如 target 点采样区间为空），
+        # 回退到相邻样本可避免 DataLoader 直接崩溃。
+        if trajectory_length < 3:
+            return self.__getitem__((index + 1) % len(self))
         
         # 2. 从场景点云中提取障碍物点，供后续的起终点采样使用。
         trajectory_obstacle_points, trajectory_obstacle_pcd = self.process_obstacle_points(index)
@@ -716,13 +871,21 @@ class FlowNav_Base_Datset(Dataset):
         # 3. 根据 prior_sample 设置，选择采样策略：基于障碍密度的优先采样或均匀随机采样。
         if self.prior_sample:
             # 注意：prior 采样依赖障碍分布，倾向采集更“困难”的导航片段。
-            pixel_start_choice, target_choice = self.rank_steps()
+            pixel_start_choice, target_choice = self.rank_steps(trajectory_extrinsics, trajectory_obstacle_points)
             memory_start_choice = np.random.randint(pixel_start_choice, target_choice)
         else:
             # 默认均匀随机采样，覆盖更多轨迹阶段。
-            pixel_start_choice = np.random.randint(0, trajectory_length // 2)
-            target_choice = np.random.randint(pixel_start_choice + 1, trajectory_length - 1)
-            memory_start_choice = np.random.randint(pixel_start_choice, target_choice)
+            # 加入边界保护，确保 randint 的 high 始终大于 low。
+            start_high = max(trajectory_length // 2, 1)
+            pixel_start_choice = np.random.randint(0, start_high)
+
+            target_low = pixel_start_choice + 1
+            target_high = max(target_low + 1, trajectory_length - 1)
+            target_choice = np.random.randint(target_low, target_high)
+
+            # memory 起点位于 [pixel_start_choice, target_choice) 区间。
+            memory_high = max(pixel_start_choice + 1, target_choice)
+            memory_start_choice = np.random.randint(pixel_start_choice, memory_high)
 
         # 4. 根据 random_digit 设置，决定记忆帧的采样间隔，增加训练样本的多样性。
         if self.random_digit:
@@ -734,12 +897,20 @@ class FlowNav_Base_Datset(Dataset):
         
         # 5. 构造历史记忆帧与当前深度图，确保时序一致性，提供丰富的视觉上下文。
         # 历史观测与未来动作共享同一个记忆起点，保证时序一致性。
-        memory_images, depth_images, memory_index, history_index = self.process_memory(
+        memory_images, depth_images, memory_index, history_index, depth_preprocess_meta = self.process_memory_with_depth_meta(
             self.trajectory_rgb_path[index],    # 轨迹 RGB 图像路径列表
             self.trajectory_depth_path[index],  # 轨迹 Depth 图像路径列表
             memory_start_choice,                # 记忆起点时刻
             memory_digit=memory_digit,          # 记忆采样间隔
         )
+        # 生成与 depth_history 张量严格对齐的“完整历史索引”（长度固定为 history_frames）。
+        # 这样可以把位姿/时间戳按同一索引对齐到 dyn_module 输入，不依赖上游再次重建索引。
+        history_index_full = np.arange(
+            memory_start_choice - (self.history_frames - 1) * memory_digit,
+            memory_start_choice + 1,
+            memory_digit,
+        )
+        history_index_full = np.clip(history_index_full, 0, trajectory_extrinsics.shape[0] - 1).astype(np.int64)
         # 6. 构造像素目标输入，并判断目标点在图像中的可见性。
         (
             target_local_points,
@@ -894,6 +1065,18 @@ class FlowNav_Base_Datset(Dataset):
         augment_critic = torch.tensor(augment_critic, dtype=torch.float32)
         odom_pose = torch.tensor(odom_pose, dtype=torch.float32)
         odom_delta = torch.tensor(odom_delta, dtype=torch.float32)
+
+        # ================= dyn_module 兜底所需附加字段 =================
+        # 1) depth_raw_m_hist: 训练器在线生成 dynamic_voxels 时使用的历史深度序列（米）。
+        # 2) pose_world_hist: 与历史深度逐帧对齐的世界位姿（4x4）。
+        # 3) timestamp_hist_s: 与历史深度逐帧对齐的时间戳（秒）。
+        # 4) camera_intrinsic: 反投影深度图时使用的相机内参。
+        # 这些字段是静态数据集走 dyn_module 在线分支的必要上下文。
+        depth_raw_m_hist = torch.tensor(depth_images, dtype=torch.float32)
+        pose_world_hist = torch.tensor(trajectory_extrinsics[history_index_full], dtype=torch.float32)
+        timestamp_hist_s = torch.tensor(trajectory_timestamps_ns[history_index_full].astype(np.float64) / 1e9, dtype=torch.float32)
+        camera_intrinsic = torch.tensor(camera_intrinsic, dtype=torch.float32)
+        depth_preprocess_meta = torch.tensor(depth_preprocess_meta, dtype=torch.float32)
         return (
             point_goal,         # 目标点坐标，提供导航目标的位置信息。
             image_goal,         # 图像目标，包含当前帧和目标帧的视觉信息，帮助模型理解导航环境。
@@ -906,6 +1089,11 @@ class FlowNav_Base_Datset(Dataset):
             augment_critic,     # 增强动作的 critic 分数，评估增强动作的“安全性”，鼓励模型学习更安全的增强动作。
             odom_pose,          # Odometry 位姿，提供环境的运动信息，辅助模型进行空间理解。
             odom_delta,         # Odometry 增量，提供相邻帧之间的运动信息，辅助模型进行空间理解。
+            depth_raw_m_hist,   # dyn_module 兜底分支使用的历史深度（米）。
+            pose_world_hist,    # dyn_module 兜底分支使用的历史位姿（world<-ego）。
+            timestamp_hist_s,   # dyn_module 兜底分支使用的历史时间戳（秒）。
+            camera_intrinsic,   # dyn_module 兜底分支使用的相机内参。
+            depth_preprocess_meta,  # dyn_module 兜底分支使用的深度预处理元信息（用于几何一致反投影）。
             float(pixel_flag),  # 像素目标可见性标志，指示目标点在图像中的可见性，帮助模型区分不同的训练样本类型。
         )
 
@@ -931,6 +1119,14 @@ def flownav_collate_fn(batch):
         "batch_augment_critic": torch.stack([item[8] for item in batch]),
         "batch_odom_pose": torch.stack([item[9] for item in batch]),
         "batch_odom_delta": torch.stack([item[10] for item in batch]),
+        # 下列字段用于 FlowNavTrainer 在静态数据集上在线生成 dynamic_voxels。
+        "batch_depth_raw_m_hist": torch.stack([item[11] for item in batch]),
+        "batch_pose_world_hist": torch.stack([item[12] for item in batch]),
+        "batch_timestamp_hist_s": torch.stack([item[13] for item in batch]),
+        "batch_camera_intrinsic": torch.stack([item[14] for item in batch]),
+        # 为什么这样改：把深度预处理参数一并入 batch，保证 trainer 能按同感受野修正内参后再反投影。
+        "batch_depth_preprocess_meta": torch.stack([item[15] for item in batch]),
+        "batch_pixel_flag": torch.tensor([item[16] for item in batch], dtype=torch.float32),
     }
     return collated
 
@@ -961,6 +1157,11 @@ if __name__ == "__main__":
             augment_critic,
             odom_pose,
             odom_delta,
+            depth_raw_m_hist,
+            pose_world_hist,
+            timestamp_hist_s,
+            camera_intrinsic,
+            depth_preprocess_meta,
             pixel_flag,
         ) = dataset.__getitem__(i)
         if pixel_flag == 1.0:

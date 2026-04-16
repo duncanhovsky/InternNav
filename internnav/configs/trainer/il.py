@@ -33,5 +33,8 @@ class IlCfg(BaseModel, extra='allow'):
     camera_name: Optional[str] = None
     filter_failure: Optional[FilterFailure] = None
     use_discrete_dataset: Optional[bool] = None
+    # 为什么这样改：静态 FlowNav 在缺失真实时间戳时需要用该帧率回退时间轴，
+    # 把它放进配置可避免硬编码并方便不同数据源复现实验。
+    fallback_fps: Optional[float] = None
     loss: Optional[Loss] = None
     report_to: Optional[str] = None

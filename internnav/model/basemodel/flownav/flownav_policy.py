@@ -71,17 +71,31 @@ class FlowNavNet(PreTrainedModel):
 
         # 加载预训练权重，兼容目录与文件两种形式
         if os.path.isdir(pretrained_model_name_or_path):
-            incompatible_keys, _ = model.load_state_dict(
-                torch.load(os.path.join(pretrained_model_name_or_path, 'pytorch_model_bin'))
-            )
-            if len(incompatible_keys) > 0:
-                print(f"Incompatible keys: {incompatible_keys}")
+            ckpt_candidates = [
+                os.path.join(pretrained_model_name_or_path, 'flownav.ckpt'),
+                os.path.join(pretrained_model_name_or_path, 'pytorch_model.bin'),
+            ]
+            ckpt_path = next((p for p in ckpt_candidates if os.path.isfile(p)), None)
+            if ckpt_path is None:
+                raise FileNotFoundError(
+                    f"No FlowNav checkpoint found in {pretrained_model_name_or_path}. "
+                    f"Tried: {ckpt_candidates}"
+                )
+            load_res = model.load_state_dict(torch.load(ckpt_path, map_location='cpu'), strict=False)
+            if len(load_res.missing_keys) > 0 or len(load_res.unexpected_keys) > 0:
+                print(
+                    f"Incompatible keys while loading {ckpt_path}. "
+                    f"missing={len(load_res.missing_keys)}, unexpected={len(load_res.unexpected_keys)}"
+                )
         elif pretrained_model_name_or_path is None or len(pretrained_model_name_or_path) == 0:
             pass
         else:
-            incompatible_keys, _ = model.load_state_dict(torch.load(pretrained_model_name_or_path), strict=False)
-            if len(incompatible_keys) > 0:
-                print(f'Incompatible keys: {incompatible_keys}')
+            load_res = model.load_state_dict(torch.load(pretrained_model_name_or_path, map_location='cpu'), strict=False)
+            if len(load_res.missing_keys) > 0 or len(load_res.unexpected_keys) > 0:
+                print(
+                    f"Incompatible keys while loading {pretrained_model_name_or_path}. "
+                    f"missing={len(load_res.missing_keys)}, unexpected={len(load_res.unexpected_keys)}"
+                )
         
         return model
     

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import math
@@ -215,6 +216,7 @@ class FlowNavFusionBackbone(nn.Module):
                  dynamics_checkpoint="checkpoints/flow_nav_dynamic.pth",
                  input_dtype="fp32",
                  hidden_dim=384,
+                 version="flownav_fusion_v1",
                  device='cuda:0'):
         """初始化 FlowNavFusionBackbone。
         Args:
@@ -245,7 +247,7 @@ class FlowNavFusionBackbone(nn.Module):
         self.rgb_checkpoint = rgb_checkpoint
         self.dynamics_checkpoint = dynamics_checkpoint  # 实时训练，不预先加载
         self.input_dtype = torch.bfloat16 if input_dtype == "bf16" else torch.float32
-        self.version = self.version
+        self.version = version
         # self.hidden_dim = 384
         self.hidden_dim = hidden_dim
         

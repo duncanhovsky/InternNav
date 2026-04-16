@@ -26,6 +26,10 @@ def get_policy(policy_name):
         from .basemodel.navdp.navdp_policy import NavDPNet
 
         return NavDPNet
+    elif policy_name == 'FlowNav_Policy':
+        from .basemodel.flownav.flownav_policy import FlowNavNet
+
+        return FlowNavNet
     else:
         raise ValueError(f'Policy {policy_name} not found')
 
@@ -58,5 +62,9 @@ def get_config(policy_name):
         from .basemodel.navdp.navdp_policy import NavDPModelConfig
 
         return NavDPModelConfig
+    elif policy_name == 'FlowNav_Policy':
+        from .basemodel.flownav.flownav_policy import FlowNavModelConfig
+
+        return FlowNavModelConfig
     else:
         raise ValueError(f'Policy {policy_name} not found')
