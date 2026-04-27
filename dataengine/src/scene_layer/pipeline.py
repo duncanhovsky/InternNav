@@ -29,6 +29,7 @@ class SceneLayerPipeline:
     cfg: SceneLayerConfig
 
     def __post_init__(self) -> None:
+        """初始化核心组件并执行配置校验。"""
         self.cfg.validate()
         self.registry = AssetRegistry(self.cfg.asset_root)
         self.compiler = SceneCompiler(self.cfg)
@@ -39,6 +40,7 @@ class SceneLayerPipeline:
         )
 
     def _build_run_snapshot(self) -> None:
+        """写入本次运行配置快照，便于复现实验。"""
         snapshot_path = self.cfg.scene_manifest_path.replace(".jsonl", "_run_config.json")
         payload = {
             "saved_at": dt.datetime.utcnow().isoformat() + "Z",
@@ -47,9 +49,11 @@ class SceneLayerPipeline:
         atomic_write_text(snapshot_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _load_frozen_rows(self) -> List[Dict]:
+        """加载 eval 冻结清单。"""
         return load_jsonl(self.cfg.frozen_manifest_path)
 
     def _make_candidate(self, idx: int, mode: str, template, seed: int) -> SceneCandidate:
+        """将采样结果封装为 SceneCandidate。"""
         scene_id = f"scene_{idx:06d}_{template.scene_type}_{mode}"
         return SceneCandidate(
             scene_id=scene_id,
@@ -61,6 +65,7 @@ class SceneLayerPipeline:
         )
 
     def _result_to_row(self, result: SceneCompileResult) -> Dict:
+        """将编译结果转换为 manifest 可落盘结构。"""
         m = result.metrics
         return {
             "scene_id": result.scene_id,
@@ -86,6 +91,7 @@ class SceneLayerPipeline:
         }
 
     def _build_tasks_for_scene(self, row: Dict) -> List[TrajectoryTask]:
+        """根据单场景结果生成轨迹任务列表。"""
         tasks: List[TrajectoryTask] = []
         agents = self.cfg.per_scene_agents
         for ep_idx in range(self.cfg.trajectories_per_scene):
@@ -107,6 +113,13 @@ class SceneLayerPipeline:
         return tasks
 
     def run(self) -> Dict[str, int]:
+        """执行场景层主流程并返回统计摘要。
+
+        返回值字段：
+            done: 编译成功场景数。
+            failed: 编译失败场景数。
+            tasks: 生成的轨迹任务数。
+        """
         self._build_run_snapshot()
 
         done_scene_ids = self.store.load_done_scene_ids()
@@ -135,7 +148,6 @@ class SceneLayerPipeline:
         )
 
         results: List[SceneCompileResult] = []
-        compile_logs: List[Dict] = []
 
         for i in range(self.cfg.target_scene_count):
             mode, template = selector.sample(templates)
@@ -147,21 +159,23 @@ class SceneLayerPipeline:
 
             result = self.compiler.compile_with_retry(candidate)
             results.append(result)
-            compile_logs.append(
-                {
-                    "scene_id": result.scene_id,
-                    "status": result.status,
-                    "reason": result.reason,
-                    "scene_type": result.scene_type,
-                    "mode": result.mode,
-                    "seed": result.seed,
-                    "timestamp": dt.datetime.utcnow().isoformat() + "Z",
-                }
+            scene_row = self._result_to_row(result)
+            self.store.append_scene_rows([scene_row])
+            self.store.append_compile_logs(
+                [
+                    {
+                        "scene_id": result.scene_id,
+                        "status": result.status,
+                        "reason": result.reason,
+                        "scene_type": result.scene_type,
+                        "mode": result.mode,
+                        "seed": result.seed,
+                        "timestamp": dt.datetime.utcnow().isoformat() + "Z",
+                    }
+                ]
             )
 
         scene_rows = [self._result_to_row(r) for r in results]
-        self.store.append_scene_rows(scene_rows)
-        self.store.append_compile_logs(compile_logs)
 
         task_rows: List[Dict] = []
         for row in scene_rows:

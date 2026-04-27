@@ -1,0 +1,112 @@
+{
+  "scan_meta": {
+    "generated_at": "2026-04-17",
+    "scan_root": "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1/Isaac",
+    "note": "Focused index for scene-layer and near-term dynamic-layer work"
+  },
+  "environments": {
+    "root": "Environments",
+    "categories": [
+      "Digital_Twin_Warehouse",
+      "Grid",
+      "Hospital",
+      "Jetracer",
+      "Modular_Warehouse",
+      "Office",
+      "Outdoor",
+      "Simple_Room",
+      "Simple_Warehouse",
+      "Terrains"
+    ],
+    "key_usd_files": [
+      "Environments/Digital_Twin_Warehouse/small_warehouse_digital_twin.usd",
+      "Environments/Hospital/hospital.usd",
+      "Environments/Office/office.usd",
+      "Environments/Outdoor/Rivermark/rivermark.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h10m_center.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h10m_corner_in.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h10m_corner_out.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h10m_straight.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h10m_straight_90.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h450cm_center.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h450cm_corner_in.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h450cm_corner_out.usd",
+      "Environments/Modular_Warehouse/Props/warehouse_h450cm_straight.usd",
+      "Environments/Grid/default_environment.usd",
+      "Environments/Grid/gridroom_black.usd",
+      "Environments/Grid/gridroom_curved.usd",
+      "Environments/Simple_Warehouse/full_warehouse.usd",
+      "Environments/Simple_Warehouse/warehouse.usd",
+      "Environments/Simple_Warehouse/warehouse_multiple_shelves.usd",
+      "Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
+      "Environments/Simple_Room/simple_room.usd",
+      "Environments/Terrains/flat_plane.usd",
+      "Environments/Terrains/rough_plane.usd",
+      "Environments/Terrains/slope.usd",
+      "Environments/Terrains/stairs.usd",
+      "Environments/Jetracer/jetracer_track_solid.usd"
+    ]
+  },
+  "robots": {
+    "root": "Robots",
+    "unitree_subdirs": [
+      "A1",
+      "B2",
+      "Dex3",
+      "Dex5",
+      "G1",
+      "G1_23dof",
+      "Go1",
+      "Go2",
+      "H1",
+      "Z1",
+      "aliengo",
+      "laikago"
+    ],
+    "key_usd_files": [
+      "Robots/Unitree/Go2/go2.usd",
+      "Robots/Unitree/G1/g1.usd"
+    ]
+  },
+  "sensors": {
+    "root": "Sensors",
+    "categories": [
+      "HESAI",
+      "Intel",
+      "LeopardImaging",
+      "NVIDIA",
+      "Orbbec",
+      "Ouster",
+      "SICK",
+      "Sensing",
+      "Slamtec",
+      "Stereolabs",
+      "Tashan",
+      "Velodyne",
+      "ZVISION"
+    ],
+    "key_usd_files": [
+      "Sensors/Intel/RealSense/rsd455.usd",
+      "Sensors/HESAI/XT-32.usd"
+    ]
+  },
+  "people": {
+    "root": "People",
+    "categories": [
+      "Animations",
+      "Characters",
+      "DH_Characters",
+      "DH_Characters_Extended"
+    ]
+  },
+  "scene_layer_template_resolution": {
+    "asset_registry_expected_relpaths": [
+      "Isaac/Environments/Digital_Twin_Warehouse/small_warehouse_digital_twin.usd",
+      "Isaac/Environments/Modular_Warehouse/Props/warehouse_h10m_center.usd",
+      "Isaac/Environments/Hospital/hospital.usd",
+      "Isaac/Environments/Office/office.usd",
+      "Isaac/Environments/Outdoor/Rivermark/rivermark.usd"
+    ],
+    "recommended_asset_root_for_current_registry": "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1"
+  }
+}

@@ -10,15 +10,29 @@ SUPPORTED_SCENE_TYPES = {"warehouse", "hospital", "outdoor"}
 SUPPORTED_AGENT_PROFILES = {"go2", "g1"}
 SUPPORTED_MODES = {"train", "eval", "build_manifest"}
 SUPPORTED_SCENE_MODES = {"complete", "modular"}
+SUPPORTED_SCENE_BACKENDS = {"stub", "isaac_replicator"}
+SUPPORTED_PROP_CLASSES = {"large", "medium", "small"}
+SUPPORTED_PLACEMENT_ZONES = {"aisle", "wall", "corner", "open"}
 
 
 @dataclass
 class SceneLayerConfig:
-    """场景层配置 schema（精简实现版）。"""
+    """场景层配置契约。
+
+    该对象是 scene-layer 的唯一运行时输入源，覆盖：
+    1. 模板采样策略与随机种子。
+    2. 场景组合后端与 Replicator 摆放策略。
+    3. NavMesh/Metrics 质量阈值。
+    4. manifest 与任务输出路径。
+
+    所有字段都可通过 JSON 或 CLI 覆盖，`validate()` 负责统一约束检查。
+    """
 
     schema_version: str = "1.1.0"
     mode: str = "train"
-    asset_root: str = "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/"
+    # Isaac 5.1 资产通常位于 Assets/Isaac/5.1 下。
+    # asset_registry.py 中模板路径默认以 "Isaac/..." 开头拼接。
+    asset_root: str = "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1"
     enabled_scene_types: List[str] = field(default_factory=lambda: ["warehouse", "hospital", "outdoor"])
     scene_type_weights: Dict[str, float] = field(
         default_factory=lambda: {"warehouse": 1.0, "hospital": 1.0, "outdoor": 1.0}
@@ -100,9 +114,75 @@ class SceneLayerConfig:
     # 可选：外部覆盖路径，便于实验管理
     run_name: str = "scene_layer_run"
 
+    # 场景组合后端：
+    # - stub: 仅写 stage_spec，不依赖 Isaac Runtime
+    # - isaac_replicator: 通过 Isaac Sim + Replicator 程序化生成并导出 stage
+    scene_backend: str = "stub"
+    isaac_headless: bool = True
+    isaac_renderer: str = "RayTracedLighting"
+    isaac_enable_replicator: bool = True
+    isaac_close_on_finish: bool = False
+    # GUI 调试模式：为 True 时保持窗口运行，直到用户手动关闭。
+    isaac_gui_inspect_mode: bool = False
+    # 导出前额外执行的 update 帧数，确保资产加载/渲染状态稳定。
+    isaac_warmup_frames: int = 12
+
+    # 复制器可复现参数。相同 scene_seed + 相同配置应得到一致布局。
+    replicator_seed_offset: int = 17
+    replicator_min_props: int = 8
+    replicator_max_props: int = 28
+    replicator_xy_range_m: float = 16.0
+    replicator_z_offset_m: float = 0.05
+    replicator_yaw_min_deg: float = -180.0
+    replicator_yaw_max_deg: float = 180.0
+    replicator_scale_min: float = 0.9
+    replicator_scale_max: float = 1.1
+    # 物体摆放约束：最小间距（米）+ 每个物体位置采样重试次数。
+    replicator_min_spacing_m: float = 1.2
+    replicator_position_max_retries: int = 24
+    # 朝向策略：按概率吸附到主轴方向（0/90/180/270），再叠加小抖动。
+    replicator_axis_align_prob: float = 0.75
+    replicator_axis_jitter_deg: float = 8.0
+    replicator_axis_candidates_deg: List[float] = field(default_factory=lambda: [0.0, 90.0, 180.0, 270.0])
+    # 资产类别比例控制：用于降低“全随机导致的杂乱分布”。
+    replicator_prop_class_ratio: Dict[str, float] = field(
+        default_factory=lambda: {"large": 0.25, "medium": 0.35, "small": 0.40}
+    )
+    # 分区采样策略：zoned 时按功能区采样，uniform 时全局采样。
+    replicator_zone_sampling_strategy: str = "zoned"
+    # aisle 采用中心纵向走廊：|x| <= xy_range * aisle_half_width_ratio
+    replicator_aisle_half_width_ratio: float = 0.14
+    # wall 采用四边条带：边缘厚度 = xy_range * wall_band_ratio
+    replicator_wall_band_ratio: float = 0.18
+    # corner 采用四角方区：边长约为 xy_range * corner_zone_ratio
+    replicator_corner_zone_ratio: float = 0.22
+    # 类别 -> 分区权重。每类键集合必须完整覆盖 aisle/wall/corner/open。
+    replicator_zone_weights_large: Dict[str, float] = field(
+        default_factory=lambda: {"aisle": 0.05, "wall": 0.50, "corner": 0.35, "open": 0.10}
+    )
+    replicator_zone_weights_medium: Dict[str, float] = field(
+        default_factory=lambda: {"aisle": 0.12, "wall": 0.28, "corner": 0.20, "open": 0.40}
+    )
+    replicator_zone_weights_small: Dict[str, float] = field(
+        default_factory=lambda: {"aisle": 0.08, "wall": 0.20, "corner": 0.12, "open": 0.60}
+    )
+    # 禁入区矩形列表，每项格式：[xmin, xmax, ymin, ymax]（单位米）。
+    replicator_keepout_rects: List[List[float]] = field(default_factory=list)
+    generated_stage_filename: str = "stage_composed.usda"
+
+    # 可选固定候选资产，路径相对于 asset_root。
+    # 为空时将自动扫描 Modular_Warehouse/Props/*.usd。
+    replicator_prop_relpaths: List[str] = field(default_factory=list)
+
     def validate(self) -> None:
+        """执行配置合法性校验。"""
         if self.mode not in SUPPORTED_MODES:
             raise ValueError(f"mode 必须属于 {SUPPORTED_MODES}, got={self.mode}")
+
+        if self.scene_backend not in SUPPORTED_SCENE_BACKENDS:
+            raise ValueError(
+                f"scene_backend 必须属于 {SUPPORTED_SCENE_BACKENDS}, got={self.scene_backend}"
+            )
 
         if len(self.enabled_scene_types) == 0:
             raise ValueError("enabled_scene_types 不能为空")
@@ -155,6 +235,54 @@ class SceneLayerConfig:
         if self.trajectories_per_scene <= 0:
             raise ValueError("trajectories_per_scene 必须 > 0")
 
+        if self.replicator_min_props < 0:
+            raise ValueError("replicator_min_props 不能小于 0")
+        if self.replicator_max_props < self.replicator_min_props:
+            raise ValueError("replicator_max_props 必须 >= replicator_min_props")
+        if self.replicator_xy_range_m <= 0:
+            raise ValueError("replicator_xy_range_m 必须 > 0")
+        if self.replicator_scale_min <= 0 or self.replicator_scale_max <= 0:
+            raise ValueError("replicator_scale_min/max 必须 > 0")
+        if self.replicator_scale_max < self.replicator_scale_min:
+            raise ValueError("replicator_scale_max 必须 >= replicator_scale_min")
+        if self.replicator_min_spacing_m < 0:
+            raise ValueError("replicator_min_spacing_m 不能小于 0")
+        if self.replicator_position_max_retries <= 0:
+            raise ValueError("replicator_position_max_retries 必须 > 0")
+        if not (0.0 <= self.replicator_axis_align_prob <= 1.0):
+            raise ValueError("replicator_axis_align_prob 必须在 [0, 1] 区间")
+        if self.replicator_axis_jitter_deg < 0:
+            raise ValueError("replicator_axis_jitter_deg 不能小于 0")
+        if len(self.replicator_axis_candidates_deg) == 0:
+            raise ValueError("replicator_axis_candidates_deg 不能为空")
+        if set(self.replicator_prop_class_ratio.keys()) != SUPPORTED_PROP_CLASSES:
+            raise ValueError(
+                "replicator_prop_class_ratio 必须包含 large/medium/small 三个键"
+            )
+        if any(v <= 0 for v in self.replicator_prop_class_ratio.values()):
+            raise ValueError("replicator_prop_class_ratio 各项必须 > 0")
+        if self.replicator_zone_sampling_strategy not in {"uniform", "zoned"}:
+            raise ValueError("replicator_zone_sampling_strategy 必须是 uniform 或 zoned")
+        if not (0.0 < self.replicator_aisle_half_width_ratio < 0.95):
+            raise ValueError("replicator_aisle_half_width_ratio 必须在 (0, 0.95) 区间")
+        if not (0.0 < self.replicator_wall_band_ratio < 0.95):
+            raise ValueError("replicator_wall_band_ratio 必须在 (0, 0.95) 区间")
+        if not (0.0 < self.replicator_corner_zone_ratio < 0.95):
+            raise ValueError("replicator_corner_zone_ratio 必须在 (0, 0.95) 区间")
+        self._validate_zone_weights(self.replicator_zone_weights_large, "replicator_zone_weights_large")
+        self._validate_zone_weights(self.replicator_zone_weights_medium, "replicator_zone_weights_medium")
+        self._validate_zone_weights(self.replicator_zone_weights_small, "replicator_zone_weights_small")
+        for idx, rect in enumerate(self.replicator_keepout_rects):
+            if len(rect) != 4:
+                raise ValueError(f"replicator_keepout_rects[{idx}] 必须是 [xmin,xmax,ymin,ymax]")
+            xmin, xmax, ymin, ymax = rect
+            if not (xmax > xmin and ymax > ymin):
+                raise ValueError(f"replicator_keepout_rects[{idx}] 非法范围: {rect}")
+        if self.generated_stage_filename.strip() == "":
+            raise ValueError("generated_stage_filename 不能为空")
+        if self.isaac_warmup_frames < 0:
+            raise ValueError("isaac_warmup_frames 不能小于 0")
+
         for profile in self.navmesh_agent_profiles:
             if profile not in SUPPORTED_AGENT_PROFILES:
                 raise ValueError(f"不支持的 navmesh_agent_profiles: {profile}")
@@ -177,17 +305,27 @@ class SceneLayerConfig:
             if not values[i] > values[i - 1]:
                 raise ValueError(f"{name} 必须严格递增: {values}")
 
+    @staticmethod
+    def _validate_zone_weights(weights: Dict[str, float], name: str) -> None:
+        if set(weights.keys()) != SUPPORTED_PLACEMENT_ZONES:
+            raise ValueError(f"{name} 必须包含 {SUPPORTED_PLACEMENT_ZONES}")
+        if any(v <= 0 for v in weights.values()):
+            raise ValueError(f"{name} 的权重必须全部 > 0")
+
     @classmethod
     def from_dict(cls, cfg_dict: Dict) -> "SceneLayerConfig":
+        """从字典构建并校验配置。"""
         cfg = cls(**cfg_dict)
         cfg.validate()
         return cfg
 
     @classmethod
     def from_json(cls, json_path: str) -> "SceneLayerConfig":
+        """从 JSON 文件读取并构建配置。"""
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data)
 
     def to_dict(self) -> Dict:
+        """导出配置字典，用于 run snapshot 与审计。"""
         return self.__dict__.copy()

@@ -3,12 +3,14 @@
   "mode": "train",
   "asset_root": "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1",
   "scene_backend": "isaac_replicator",
-  "isaac_headless": true,
+  "isaac_headless": false,
   "isaac_close_on_finish": false,
   "isaac_gui_inspect_mode": false,
   "isaac_warmup_frames": 12,
   "isaac_renderer": "RayTracedLighting",
   "isaac_enable_replicator": true,
+  "target_scene_count": 1,
+  "trajectories_per_scene": 1,
   "replicator_seed_offset": 17,
   "replicator_min_props": 8,
   "replicator_max_props": 28,
@@ -54,29 +56,5 @@
     [-2.0, 2.0, -2.0, 2.0]
   ],
   "generated_stage_filename": "stage_composed.usda",
-  "replicator_prop_relpaths": [],
-  "enabled_scene_types": ["warehouse", "hospital", "outdoor"],
-  "scene_type_weights": {
-    "warehouse": 1.0,
-    "hospital": 1.0,
-    "outdoor": 1.0
-  },
-  "scene_mode_weights": {
-    "complete": 0.7,
-    "modular": 0.3
-  },
-  "freeze_eval_manifest": true,
-  "frozen_manifest_path": "dataengine/manifests/scene_frozen_v1.jsonl",
-  "usd_output_root": "dataengine/out/scenes/usd",
-  "scene_manifest_path": "dataengine/out/manifests/scene_manifest.jsonl",
-  "compile_log_path": "dataengine/out/logs/scene_compile_log.jsonl",
-  "task_manifest_path": "dataengine/out/manifests/trajectory_tasks.jsonl",
-  "min_path_count": 3,
-  "min_detour_margin_m": 2.0,
-  "detour_margin_ratio_floor": 0.15,
-  "min_free_space_ratio": 0.22,
-  "complexity_ratio_easy_medium_hard": [10, 5, 2],
-  "target_scene_count": 30,
-  "trajectories_per_scene": 100,
-  "per_scene_agents": ["go2", "g1"]
+  "replicator_prop_relpaths": []
 }

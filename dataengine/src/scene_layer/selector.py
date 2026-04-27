@@ -17,11 +17,13 @@ class WeightedSceneSelector:
     seed: int
 
     def __post_init__(self) -> None:
+        """初始化确定性随机采样器与归一化权重。"""
         self._rng = random.Random(self.seed)
         self._scene_type_weights = normalize_weights(self.scene_type_weights)
         self._scene_mode_weights = normalize_weights(self.scene_mode_weights)
 
     def _sample_key(self, weighted: Dict[str, float]) -> str:
+        """从离散权重分布采样一个键。"""
         keys = list(weighted.keys())
         probs = list(weighted.values())
         return self._rng.choices(keys, weights=probs, k=1)[0]
