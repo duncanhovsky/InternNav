@@ -1,0 +1,1 @@
+我刚刚自行去了解了isaacsim5.1推荐的自动生成动态场景数据的方案，需要使用一个名为IRA的插件，也称isaacsim.replicator.agent，并按照教程设置了配置文件（位于config/IRA文件夹下），能够正确生成有行走的动态行人的场景。请你也阅读一下这部分的文档，并按照这套方案重写或完善dynamic_layer（之前的dynamic_layer相关代码被实现在了scene_layer中，后续请将这部分代码移动到dynamic_layer里面）：https://docs.isaacsim.omniverse.nvidia.com/5.1.0/action_and_event_data_generation/tutorial_replicator_agent.html

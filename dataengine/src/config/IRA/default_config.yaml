@@ -1,0 +1,58 @@
+isaacsim.replicator.agent:
+  version: 0.7.1
+  character:
+    asset_path: /home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1/Isaac/People/Characters/
+    command_file: /home/monika/isaacsim_assets/config/IRA/command.txt
+    filters:
+    - male
+    - medical
+    navigation_area:
+    - Walkable
+    num: 10
+    spawn_area:
+    - Walkable
+  global:
+    seed: 123456
+    simulation_length: 300
+  replicator:
+    writer: IRABasicWriter
+    parameters:
+      object_info_bounding_box_2d_tight: true
+      object_info_bounding_box_2d_loose: true
+      object_info_bounding_box_3d: true
+      agent_info_skeleton_data: false
+      output_dir: /home/monika/ReplicatorResult
+      semantic_filter_predicate: class:character|robot;id:*
+      image_output_format: png
+      rgb: true
+      camera_params: true
+      semantic_segmentation: false
+      instance_id_segmentation: false
+      instance_segmentation: false
+      distance_to_camera: false
+      distance_to_image_plane: false
+      colorize_depth: false
+      colorize_semantic_segmentation: true
+      colorize_instance_id_segmentation: true
+      colorize_instance_segmentation: true
+      occlusion: false
+      normals: false
+      motion_vectors: false
+      pointcloud: false
+      pointcloud_include_unlabelled: false
+      use_common_output_dir: false
+  response:
+    response_list: []
+  robot:
+    command_file: /home/monika/isaacsim_assets/config/IRA/robot_command.txt
+    iw_hub_num: 0
+    navigation_area: []
+    nova_carter_num: 0
+    spawn_area: []
+    write_data: false
+  scene:
+    asset_path: /home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/full_warehouse.usd
+  sensor:
+    camera_num: 5
+  event:
+    event_list: []

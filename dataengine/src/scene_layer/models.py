@@ -57,6 +57,17 @@ class SceneCompileResult:
     reason: Optional[str] = None
     layout_hash: str = ""
     template_id: str = ""
+    schema_version: str = "v1alpha"
+    navmesh_metrics_by_profile: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    navmesh_files_by_profile: Dict[str, str] = field(default_factory=dict)
+    navmesh_debug_by_profile: Dict[str, str] = field(default_factory=dict)
+    dynamic_enabled: bool = False
+    dynamic_backend: str = ""
+    dynamic_track_file: str = ""
+    dynamic_behavior_event_file: str = ""
+    dynamic_overlay_usd: str = ""
+    dynamic_object_count: int = 0
+    dynamic_sample_count: int = 0
 
 
 @dataclass

@@ -1,0 +1,34 @@
+{
+  "schema_version": "v1alpha",
+  "mode": "train",
+  "asset_root": "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1",
+  "scene_backend": "stub",
+  "target_scene_count": 1,
+  "trajectories_per_scene": 2,
+  "enabled_scene_types": ["warehouse"],
+  "scene_type_weights": {
+    "warehouse": 1.0
+  },
+  "scene_mode_weights": {
+    "complete": 1.0,
+    "modular": 0.01
+  },
+  "global_seed": 42,
+  "scene_seed_offset": 0,
+  "enable_dynamics": true,
+  "dynamics_backend": "synthetic",
+  "dynamic_steps": 8,
+  "dynamic_dt_s": 0.1,
+  "dynamic_num_people_min": 1,
+  "dynamic_num_people_max": 1,
+  "dynamic_num_objects_min": 1,
+  "dynamic_num_objects_max": 1,
+  "min_path_count": 2,
+  "min_detour_margin_m": 0.0,
+  "detour_margin_ratio_floor": 0.0,
+  "min_free_space_ratio": 0.01,
+  "usd_output_root": "dataengine/out/smoke/scenes/usd",
+  "scene_manifest_path": "dataengine/out/smoke/manifests/scene_manifest.jsonl",
+  "compile_log_path": "dataengine/out/smoke/logs/scene_compile_log.jsonl",
+  "task_manifest_path": "dataengine/out/smoke/manifests/trajectory_tasks.jsonl"
+}

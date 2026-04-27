@@ -68,6 +68,8 @@ class SceneLayerPipeline:
         """将编译结果转换为 manifest 可落盘结构。"""
         m = result.metrics
         return {
+            "schema_version": result.schema_version or self.cfg.schema_version,
+            "contract": "scene_manifest.v1alpha",
             "scene_id": result.scene_id,
             "scene_type": result.scene_type,
             "mode": result.mode,
@@ -79,6 +81,20 @@ class SceneLayerPipeline:
             "reason": result.reason,
             "layout_hash": result.layout_hash,
             "template_id": result.template_id,
+            "navmesh": {
+                "metrics_by_profile": result.navmesh_metrics_by_profile,
+                "navmesh_files_by_profile": result.navmesh_files_by_profile,
+                "debug_files_by_profile": result.navmesh_debug_by_profile,
+            },
+            "dynamic": {
+                "enabled": result.dynamic_enabled,
+                "backend": result.dynamic_backend,
+                "track_file": result.dynamic_track_file,
+                "behavior_event_file": result.dynamic_behavior_event_file,
+                "overlay_usd": result.dynamic_overlay_usd,
+                "object_count": result.dynamic_object_count,
+                "sample_count": result.dynamic_sample_count,
+            },
             "metrics": {
                 "path_count": m.path_count,
                 "shortest_path_m": m.shortest_path_m,
@@ -112,6 +128,22 @@ class SceneLayerPipeline:
             )
         return tasks
 
+    def _task_to_row(self, task: TrajectoryTask, scene_row: Dict) -> Dict:
+        return {
+            "schema_version": self.cfg.schema_version,
+            "contract": "task_manifest.v1alpha",
+            "task_id": task.task_id,
+            "scene_id": task.scene_id,
+            "agent_type": task.agent_type,
+            "episode_idx": task.episode_idx,
+            "global_seed": task.global_seed,
+            "scene_seed": task.scene_seed,
+            "complexity_bucket": task.complexity_bucket,
+            "scene_type": task.scene_type,
+            "mode": task.mode,
+            "scene_layout_hash": scene_row.get("layout_hash", ""),
+        }
+
     def run(self) -> Dict[str, int]:
         """执行场景层主流程并返回统计摘要。
 
@@ -136,7 +168,7 @@ class SceneLayerPipeline:
             task_rows: List[Dict] = []
             for row in selected_rows:
                 for task in self._build_tasks_for_scene(row):
-                    task_rows.append(task.__dict__)
+                    task_rows.append(self._task_to_row(task, row))
             self.store.append_task_rows(task_rows)
             return {"done": len(selected_rows), "failed": 0, "tasks": len(task_rows)}
 
@@ -182,7 +214,7 @@ class SceneLayerPipeline:
             if row["status"] != "DONE":
                 continue
             for task in self._build_tasks_for_scene(row):
-                task_rows.append(task.__dict__)
+                task_rows.append(self._task_to_row(task, row))
         self.store.append_task_rows(task_rows)
 
         done_count = sum(1 for r in results if r.status == "DONE")

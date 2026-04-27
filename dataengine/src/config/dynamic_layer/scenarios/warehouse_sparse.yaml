@@ -1,0 +1,39 @@
+# 稀疏仓库场景行为方案
+# 适用于评估场景：少量 NPC、以站立和偶尔移动为主
+
+enable_dynamics: true
+backend: ira
+simulation_length: 300
+
+# 角色：少量人物
+character_filters:
+  - male
+character_num_min: 2
+character_num_max: 5
+character_spawn_area:
+  - Walkable
+character_navigation_area:
+  - Walkable
+
+# 行为策略：高静止比例
+idle_ratio: 0.5
+look_around_ratio: 0.2
+max_commands_per_character: 3
+goto_x_range: [-20.0, 5.0]
+goto_y_range: [-15.0, 20.0]
+goto_z: 0.0
+idle_duration_range: [3.0, 8.0]
+look_around_duration_range: [2.0, 5.0]
+
+# 传感器
+camera_num: 3
+
+# 输出：基本标注
+rgb: true
+camera_params: true
+bbox_2d_tight: true
+bbox_2d_loose: false
+bbox_3d: true
+
+headless: true
+timeout_s: 600

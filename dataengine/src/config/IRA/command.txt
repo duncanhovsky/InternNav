@@ -1,0 +1,24 @@
+Character Idle 4.1
+Character GoTo -14.16 7.29 0.0 _
+Character_01 GoTo -19.28 28.59 0.0 _
+Character_02 Idle 2.84
+Character_02 GoTo -25.53 -1.93 0.0 _
+Character_02 LookAround 3.39
+Character_03 Idle 2.42
+Character_03 LookAround 2.5
+Character_03 GoTo -11.5 -12.03 -0.0 _
+Character_04 Idle 4.36
+Character_04 GoTo -4.52 -6.53 -0.0 _
+Character_05 GoTo -18.48 -21.5 0.0 _
+Character_05 Idle 4.55
+Character_06 GoTo 4.29 -16.54 0.0 _
+Character_06 LookAround 2.52
+Character_06 GoTo -10.98 -13.9 0.0 _
+Character_07 LookAround 2.02
+Character_07 GoTo -18.29 24.95 0.0 _
+Character_08 Idle 4.62
+Character_08 LookAround 3.29
+Character_08 GoTo 4.56 27.26 0.0 _
+Character_09 GoTo -24.09 13.14 0.0 _
+Character_09 LookAround 2.13
+Character_09 GoTo -6.79 13.51 0.0 _

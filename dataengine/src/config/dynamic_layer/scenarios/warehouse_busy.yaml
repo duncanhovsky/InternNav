@@ -1,0 +1,44 @@
+# 繁忙仓库场景行为方案
+# 适用于训练数据生成：高密度 NPC、频繁移动、多样化行为
+
+enable_dynamics: true
+backend: ira
+simulation_length: 600
+
+# 角色：多人、混合筛选
+character_filters:
+  - male
+  - female
+  - construction
+character_num_min: 10
+character_num_max: 20
+character_spawn_area:
+  - Walkable
+character_navigation_area:
+  - Walkable
+
+# 行为策略：低静止比例，大多数在移动
+idle_ratio: 0.15
+look_around_ratio: 0.10
+max_commands_per_character: 8
+# 仓库典型坐标范围（基于 full_warehouse.usd）
+goto_x_range: [-30.0, 10.0]
+goto_y_range: [-25.0, 30.0]
+goto_z: 0.0
+idle_duration_range: [1.0, 3.0]
+look_around_duration_range: [1.0, 2.5]
+
+# 传感器
+camera_num: 8
+
+# 输出：启用更多标注
+rgb: true
+camera_params: true
+bbox_2d_tight: true
+bbox_2d_loose: true
+bbox_3d: true
+semantic_segmentation: true
+distance_to_camera: true
+
+headless: true
+timeout_s: 900

@@ -11,6 +11,7 @@ SUPPORTED_AGENT_PROFILES = {"go2", "g1"}
 SUPPORTED_MODES = {"train", "eval", "build_manifest"}
 SUPPORTED_SCENE_MODES = {"complete", "modular"}
 SUPPORTED_SCENE_BACKENDS = {"stub", "isaac_replicator"}
+SUPPORTED_DYNAMICS_BACKENDS = {"synthetic", "asset_driven", "ira_character_graph", "ira"}
 SUPPORTED_PROP_CLASSES = {"large", "medium", "small"}
 SUPPORTED_PLACEMENT_ZONES = {"aisle", "wall", "corner", "open"}
 
@@ -28,7 +29,7 @@ class SceneLayerConfig:
     所有字段都可通过 JSON 或 CLI 覆盖，`validate()` 负责统一约束检查。
     """
 
-    schema_version: str = "1.1.0"
+    schema_version: str = "v1alpha"
     mode: str = "train"
     # Isaac 5.1 资产通常位于 Assets/Isaac/5.1 下。
     # asset_registry.py 中模板路径默认以 "Isaac/..." 开头拼接。
@@ -67,6 +68,47 @@ class SceneLayerConfig:
     navmesh_max_slope_deg: float = 35.0
     navmesh_step_height_m: float = 0.25
     agent_radius_m_by_profile: Dict[str, float] = field(default_factory=lambda: {"go2": 0.28, "g1": 0.34})
+
+    # 动态层最小闭环配置。
+    enable_dynamics: bool = False
+    dynamics_backend: str = "synthetic"
+    dynamics_timeout_s: int = 90
+    dynamic_steps: int = 20
+    dynamic_dt_s: float = 0.1
+    dynamic_num_people_min: int = 1
+    dynamic_num_people_max: int = 2
+    dynamic_num_objects_min: int = 1
+    dynamic_num_objects_max: int = 2
+    dynamic_asset_strict: bool = False
+    dynamic_people_character_relpaths: List[str] = field(
+        default_factory=lambda: ["Isaac/People/Characters/F_Business_02/F_Business_02.usd"]
+    )
+    dynamic_people_idle_animation_relpaths: List[str] = field(
+        default_factory=lambda: ["Isaac/People/Animations/stand_idle_loop.skelanim.usd"]
+    )
+    dynamic_people_walk_animation_relpaths: List[str] = field(
+        default_factory=lambda: ["Isaac/People/Animations/stand_walk_loop.skelanim.usd"]
+    )
+    dynamic_vehicle_relpaths: List[str] = field(
+        default_factory=lambda: ["Isaac/Props/Forklift/forklift.usd"]
+    )
+    # Ensure animation clips are present and semantically matched to behavior.
+    dynamic_require_animation_binding: bool = True
+    dynamic_people_idle_ratio: float = 0.35
+    dynamic_vehicle_parked_ratio: float = 0.40
+
+    # ─── IRA (isaacsim.replicator.agent) 动态层配置 ───
+    # 当 dynamics_backend == "ira" 时生效。
+    ira_simulation_length: int = 300
+    ira_character_asset_path: str = ""
+    ira_character_filters: List[str] = field(default_factory=lambda: ["male", "medical"])
+    ira_character_spawn_area: List[str] = field(default_factory=lambda: ["Walkable"])
+    ira_character_navigation_area: List[str] = field(default_factory=lambda: ["Walkable"])
+    ira_max_commands_per_character: int = 5
+    ira_camera_num: int = 5
+    ira_isaac_sim_python: str = ""
+    ira_fallback_to_synthetic: bool = True
+    ira_output_dir: str = ""
 
     start_goal_pairs_per_scene: int = 128
     pair_sampling_retry_limit: int = 200
@@ -176,6 +218,9 @@ class SceneLayerConfig:
 
     def validate(self) -> None:
         """执行配置合法性校验。"""
+        if self.schema_version.strip() == "":
+            raise ValueError("schema_version 不能为空")
+
         if self.mode not in SUPPORTED_MODES:
             raise ValueError(f"mode 必须属于 {SUPPORTED_MODES}, got={self.mode}")
 
@@ -293,6 +338,57 @@ class SceneLayerConfig:
             if profile not in SUPPORTED_AGENT_PROFILES:
                 raise ValueError(f"不支持的 per_scene_agents: {profile}")
 
+        if self.dynamics_backend not in SUPPORTED_DYNAMICS_BACKENDS:
+            raise ValueError(f"dynamics_backend 必须属于 {SUPPORTED_DYNAMICS_BACKENDS}, got={self.dynamics_backend}")
+        if self.dynamics_timeout_s <= 0:
+            raise ValueError("dynamics_timeout_s 必须 > 0")
+        if self.dynamic_steps <= 0:
+            raise ValueError("dynamic_steps 必须 > 0")
+        if self.dynamic_dt_s <= 0:
+            raise ValueError("dynamic_dt_s 必须 > 0")
+        if self.dynamic_num_people_min < 0 or self.dynamic_num_objects_min < 0:
+            raise ValueError("dynamic_num_people_min/dynamic_num_objects_min 不能小于 0")
+        if self.dynamic_num_people_max < self.dynamic_num_people_min:
+            raise ValueError("dynamic_num_people_max 必须 >= dynamic_num_people_min")
+        if self.dynamic_num_objects_max < self.dynamic_num_objects_min:
+            raise ValueError("dynamic_num_objects_max 必须 >= dynamic_num_objects_min")
+        if not (0.0 <= self.dynamic_people_idle_ratio <= 1.0):
+            raise ValueError("dynamic_people_idle_ratio 必须在 [0, 1] 区间")
+        if not (0.0 <= self.dynamic_vehicle_parked_ratio <= 1.0):
+            raise ValueError("dynamic_vehicle_parked_ratio 必须在 [0, 1] 区间")
+        self._validate_relpath_list(self.dynamic_people_character_relpaths, "dynamic_people_character_relpaths")
+        self._validate_relpath_list(
+            self.dynamic_people_idle_animation_relpaths,
+            "dynamic_people_idle_animation_relpaths",
+        )
+        self._validate_relpath_list(
+            self.dynamic_people_walk_animation_relpaths,
+            "dynamic_people_walk_animation_relpaths",
+        )
+        self._validate_relpath_list(self.dynamic_vehicle_relpaths, "dynamic_vehicle_relpaths")
+
+        if self.enable_dynamics and self.dynamics_backend == "asset_driven" and self.dynamic_asset_strict:
+            self._validate_relpath_exists(
+                self.asset_root,
+                self.dynamic_people_character_relpaths,
+                "dynamic_people_character_relpaths",
+            )
+            self._validate_relpath_exists(
+                self.asset_root,
+                self.dynamic_people_idle_animation_relpaths,
+                "dynamic_people_idle_animation_relpaths",
+            )
+            self._validate_relpath_exists(
+                self.asset_root,
+                self.dynamic_people_walk_animation_relpaths,
+                "dynamic_people_walk_animation_relpaths",
+            )
+            self._validate_relpath_exists(
+                self.asset_root,
+                self.dynamic_vehicle_relpaths,
+                "dynamic_vehicle_relpaths",
+            )
+
         self._validate_increasing_bins(self.length_bins_m, "length_bins_m")
         self._validate_increasing_bins(self.static_complexity_bins, "static_complexity_bins")
         self._validate_increasing_bins(self.dynamic_complexity_bins, "dynamic_complexity_bins")
@@ -311,6 +407,37 @@ class SceneLayerConfig:
             raise ValueError(f"{name} 必须包含 {SUPPORTED_PLACEMENT_ZONES}")
         if any(v <= 0 for v in weights.values()):
             raise ValueError(f"{name} 的权重必须全部 > 0")
+
+    @staticmethod
+    def _validate_relpath_list(values: List[str], name: str) -> None:
+        if len(values) == 0:
+            raise ValueError(f"{name} 不能为空")
+        for idx, relpath in enumerate(values):
+            item = relpath.strip()
+            if item == "":
+                raise ValueError(f"{name}[{idx}] 不能为空")
+            if os.path.isabs(item):
+                raise ValueError(f"{name}[{idx}] 必须是相对 asset_root 的路径")
+
+    @staticmethod
+    def _validate_relpath_exists(asset_root: str, relpaths: List[str], name: str) -> None:
+        missing: List[str] = []
+        for relpath in relpaths:
+            candidates = [relpath]
+            if not relpath.startswith("Isaac/"):
+                candidates.append(f"Isaac/{relpath}")
+
+            exists = False
+            for candidate in candidates:
+                full_path = os.path.join(asset_root, candidate)
+                if os.path.isfile(full_path):
+                    exists = True
+                    break
+
+            if not exists:
+                missing.append(relpath)
+        if missing:
+            raise ValueError(f"{name} 中存在不存在的资产: {missing}")
 
     @classmethod
     def from_dict(cls, cfg_dict: Dict) -> "SceneLayerConfig":

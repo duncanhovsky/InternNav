@@ -1,0 +1,62 @@
+# 动态层默认配置
+# 当未指定场景行为模板时使用此配置
+
+enable_dynamics: true
+backend: ira
+seed: 123456
+simulation_length: 300
+
+# 角色配置
+character_asset_path: ""
+character_filters:
+  - male
+  - medical
+character_num_min: 5
+character_num_max: 15
+character_spawn_area:
+  - Walkable
+character_navigation_area:
+  - Walkable
+
+# 行为策略
+idle_ratio: 0.3
+look_around_ratio: 0.1
+max_commands_per_character: 5
+goto_x_range: [-30.0, 10.0]
+goto_y_range: [-25.0, 30.0]
+goto_z: 0.0
+idle_duration_range: [1.5, 5.0]
+look_around_duration_range: [1.5, 4.0]
+
+# Robot（预留）
+robot_nova_carter_num: 0
+robot_iw_hub_num: 0
+robot_write_data: false
+
+# 传感器
+camera_num: 5
+
+# Replicator 输出
+writer: IRABasicWriter
+image_output_format: png
+rgb: true
+camera_params: true
+bbox_2d_tight: true
+bbox_2d_loose: true
+bbox_3d: true
+skeleton_data: false
+semantic_filter_predicate: "class:character|robot;id:*"
+semantic_segmentation: false
+instance_id_segmentation: false
+instance_segmentation: false
+distance_to_camera: false
+distance_to_image_plane: false
+occlusion: false
+normals: false
+motion_vectors: false
+pointcloud: false
+
+# IRA 驱动
+headless: true
+timeout_s: 600
+fallback_to_synthetic: true

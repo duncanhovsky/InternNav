@@ -292,22 +292,30 @@ def _bake_and_eval(request: Dict) -> Dict:
         metrics = _sample_navmesh_metrics(nav_iface, navmesh_obj, int(request.get("seed", 0)))
 
         scene_dir = str(request["scene_dir"])
-        navmesh_file = os.path.join(scene_dir, "navmesh.bin")
+        profile = str(request.get("profile", "default"))
+        navmesh_file = os.path.join(scene_dir, f"navmesh_{profile}.bin")
         with open(navmesh_file, "wb") as f:
             f.write(b"ISAAC_NAVMESH_READY")
 
-        debug_path = os.path.join(scene_dir, "navmesh_debug.json")
+        debug_path = os.path.join(scene_dir, f"navmesh_debug_{profile}.json")
         _write_json(
             debug_path,
             {
                 "stage_usd": stage_path,
+                "profile": profile,
                 "navmesh_volume_path": navmesh_volume_path,
                 "events": events,
                 "metrics": metrics,
             },
         )
 
-        return {"ok": True, "navmesh_file": navmesh_file, "metrics": metrics}
+        return {
+            "ok": True,
+            "profile": profile,
+            "navmesh_file": navmesh_file,
+            "debug_file": debug_path,
+            "metrics": metrics,
+        }
     finally:
         # Intentionally skip app.close() to reduce close-time crashes on some Isaac builds.
         pass

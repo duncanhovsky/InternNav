@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "v1alpha",
   "mode": "train",
   "asset_root": "/home/monika/dyishere/dataset/assets/isaac/isaac-sim-assets-complete-5.1.0/Assets/Isaac/5.1",
   "scene_backend": "isaac_replicator",
@@ -78,5 +78,30 @@
   "complexity_ratio_easy_medium_hard": [10, 5, 2],
   "target_scene_count": 30,
   "trajectories_per_scene": 100,
-  "per_scene_agents": ["go2", "g1"]
+  "per_scene_agents": ["go2", "g1"],
+  "enable_dynamics": false,
+  "dynamics_backend": "synthetic",
+  "dynamics_timeout_s": 90,
+  "dynamic_steps": 20,
+  "dynamic_dt_s": 0.1,
+  "dynamic_num_people_min": 1,
+  "dynamic_num_people_max": 2,
+  "dynamic_num_objects_min": 1,
+  "dynamic_num_objects_max": 2,
+  "dynamic_asset_strict": false,
+  "dynamic_people_character_relpaths": [
+    "Isaac/People/Characters/F_Business_02/F_Business_02.usd"
+  ],
+  "dynamic_people_idle_animation_relpaths": [
+    "Isaac/People/Animations/stand_idle_loop.skelanim.usd"
+  ],
+  "dynamic_people_walk_animation_relpaths": [
+    "Isaac/People/Animations/stand_walk_loop.skelanim.usd"
+  ],
+  "dynamic_vehicle_relpaths": [
+    "Isaac/Props/Forklift/forklift.usd"
+  ],
+  "dynamic_require_animation_binding": true,
+  "dynamic_people_idle_ratio": 0.35,
+  "dynamic_vehicle_parked_ratio": 0.4
 }

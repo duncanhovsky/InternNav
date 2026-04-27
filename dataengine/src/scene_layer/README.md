@@ -117,6 +117,90 @@ python -m dataengine.src.scene_layer --config-json dataengine/src/scene_layer/de
 python -m dataengine.src.scene_layer.open_stage --stage dataengine/out/scenes/usd/<scene_id>/stage_composed.usda
 ```
 
+### 产物一致性验证（新增）
+
+每轮实现后建议执行一次自动校验，检查 `stage_spec / compose_request/response / navmesh` 是否一致：
+
+1. 校验单个场景目录：
+
+```bash
+python -m dataengine.src.scene_layer.validate_artifacts \
+	--scene-dir dataengine/out/scenes/usd/<scene_id> --json
+```
+
+2. 按 manifest 批量校验（仅 `DONE`）：
+
+```bash
+python -m dataengine.src.scene_layer.validate_artifacts \
+	--scene-manifest dataengine/out/manifests/scene_manifest.jsonl \
+	--usd-output-root dataengine/out/scenes/usd --only-done --json
+```
+
+说明：
+1. 默认 `navmesh_debug.json` 缺失记为 `WARN`（兼容历史运行产物）。
+2. 若希望把告警也当作失败，可添加 `--strict-warn`。
+
+### 资产驱动动态层 Smoke 与可视化预览（新增）
+
+使用资产驱动动态层（行人 + 车辆）最小闭环 smoke：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer \
+	--config-json dataengine/src/scene_layer/smoke_asset_driven_config.json
+```
+
+对 smoke 产物执行一致性校验：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer.validate_artifacts \
+	--scene-manifest dataengine/out/smoke_asset_driven/manifests/scene_manifest.jsonl \
+	--usd-output-root dataengine/out/smoke_asset_driven/scenes/usd \
+	--only-done --json
+```
+
+打开带动态叠加层的场景（有界面预览）：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer.open_stage \
+	--stage dataengine/out/smoke_asset_driven/scenes/usd/<scene_id>/stage_composed.usda \
+	--overlay dataengine/out/smoke_asset_driven/scenes/usd/<scene_id>/dynamic_overlay.usda
+```
+
+说明：
+1. `--overlay` 指向 `dynamic_overlay.usda` 时，预览会打开叠加层，叠加层通过 `subLayers` 引用基础场景。
+2. 若 smoke 采用 `scene_backend=stub`，`--stage` 可传模板 USD 路径，`--overlay` 仍可用于预览动态实体引用。
+3. 当前 `asset_driven` 会生成轨迹与动态实体引用元数据；完整 Omni 人群行为图（如 People Event Graph 驱动）可在后续阶段继续接入。
+
+### IRA 行为图动态层 Smoke 与可视化预览（新增）
+
+使用 `ira_character_graph` 后端生成轨迹 + 行为事件（`dynamic_events.v1alpha`）最小闭环：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer \
+	--config-json dataengine/src/scene_layer/smoke_ira_character_graph_config.json
+```
+
+校验轨迹、行为事件、overlay 一致性：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer.validate_artifacts \
+	--scene-manifest dataengine/out/smoke_ira_character_graph/manifests/scene_manifest.jsonl \
+	--usd-output-root dataengine/out/smoke_ira_character_graph/scenes/usd \
+	--only-done --json
+```
+
+打开带动态叠加层的场景（Isaac Sim GUI 预览）：
+
+```bash
+/home/monika/anaconda3/envs/isaaclab51/bin/python -m dataengine.src.scene_layer.open_stage \
+	--stage dataengine/out/smoke_ira_character_graph/scenes/usd/<scene_id>/stage_composed.usda \
+	--overlay dataengine/out/smoke_ira_character_graph/scenes/usd/<scene_id>/dynamic_overlay.usda
+```
+
+说明：
+1. `ira_character_graph` 会额外输出 `behavior_events.jsonl`，记录 `state_enter` 与 `motion_mode` 切换。
+2. 当前最小状态机覆盖 `Idle/GoTo` 语义（`stand_idle`/`walk`），并强制动画行为匹配。
+
 ### 摆放质量参数（新增）
 
 用于降低“物体摆放杂乱”问题的关键参数：
