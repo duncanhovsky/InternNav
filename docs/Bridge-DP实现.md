@@ -23,11 +23,24 @@
 
 ## 1. 总体改动概览
 
-Bridge-DP 在 InternNav 框架中作为与 NavDP **同级的独立模型**存在，复用 NavDP 的视觉编码器（[`RGBDBackbone`](internnav/model/encoder/navdp_backbone.py:205)、[`ImageGoalBackbone`](internnav/model/encoder/navdp_backbone.py:316)、[`PixelGoalBackbone`](internnav/model/encoder/navdp_backbone.py:379)），但拥有独立的：
+Bridge-DP 在 InternNav 框架中作为与 NavDP **同级的独立模型**存在。
 
-- 数据集类（绝对坐标 + 先验轨迹）
-- 模型类（布朗桥 SDE + PriorEncoder + VisualGate）
-- 训练器类（桥损失计算）
+**核心设计原则**：所有 Bridge-DP 类使用**与 NavDP 相同的基类**，而非继承 NavDP 的类：
+
+| 组件 | NavDP 的类 | 共同基类 | Bridge-DP 的类 |
+|------|-----------|---------|---------------|
+| 数据集 | [`NavDP_Base_Datset`](internnav/dataset/navdp_lerobot_dataset.py:54) | `torch.utils.data.Dataset` | `BridgeDP_Base_Dataset` |
+| 模型策略 | [`NavDPNet`](internnav/model/basemodel/navdp/navdp_policy.py:34) | `transformers.PreTrainedModel` | `BridgeDPNet` |
+| 训练器 | [`NavDPTrainer`](internnav/trainer/navdp_trainer.py:11) | [`BaseTrainer`](internnav/trainer/base.py:32)（→ `transformers.Trainer`） | `BridgeDPTrainer` |
+| 模型配置 | [`NavDPModelConfig`](internnav/model/basemodel/navdp/navdp_policy.py:19) | `transformers.PretrainedConfig` | `BridgeDPModelConfig` |
+
+Bridge-DP 复用 NavDP 的视觉编码器（[`RGBDBackbone`](internnav/model/encoder/navdp_backbone.py:205)、[`ImageGoalBackbone`](internnav/model/encoder/navdp_backbone.py:316)、[`PixelGoalBackbone`](internnav/model/encoder/navdp_backbone.py:379)），这些编码器位于公共目录 `internnav/model/encoder/` 下，属于框架共享组件。
+
+Bridge-DP 拥有独立的：
+
+- 数据集类（独立继承 `Dataset`，绝对坐标 + 先验轨迹）
+- 模型类（独立继承 `PreTrainedModel`，布朗桥 SDE + PriorEncoder + VisualGate）
+- 训练器类（独立继承 `BaseTrainer`，桥损失计算）
 - 配置文件
 - 训练入口分支
 
@@ -37,12 +50,12 @@ Bridge-DP 在 InternNav 框架中作为与 NavDP **同级的独立模型**存在
 
 | NavDP 原文件（不修改） | Bridge-DP 新文件 | 说明 |
 |----------------------|-----------------|------|
-| [`internnav/dataset/navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | `internnav/dataset/bridgedp_lerobot_dataset.py` | 继承 `NavDP_Base_Datset`，覆写 `__getitem__` |
-| [`internnav/model/basemodel/navdp/navdp_policy.py`](internnav/model/basemodel/navdp/navdp_policy.py) | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | 独立模型，复用 backbone |
+| [`internnav/dataset/navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | `internnav/dataset/bridgedp_lerobot_dataset.py` | 独立继承 `Dataset`，仿照 NavDP 实现全部数据加载逻辑 |
+| [`internnav/model/basemodel/navdp/navdp_policy.py`](internnav/model/basemodel/navdp/navdp_policy.py) | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | 独立继承 `PreTrainedModel`，仿照 NavDP 实现，复用共享 backbone |
 | — | `internnav/model/basemodel/bridgedp/__init__.py` | 包初始化 |
-| — | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | 方向自适应布朗桥调度器 |
-| — | `internnav/model/basemodel/bridgedp/prior_encoder.py` | PriorEncoder + VisualGate |
-| [`internnav/trainer/navdp_trainer.py`](internnav/trainer/navdp_trainer.py) | `internnav/trainer/bridgedp_trainer.py` | 独立训练器 |
+| — | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | 方向自适应布朗桥调度器（替换 NavDP 的 DDPMScheduler） |
+| — | `internnav/model/basemodel/bridgedp/prior_encoder.py` | PriorEncoder + VisualGate（Bridge-DP 独有模块） |
+| [`internnav/trainer/navdp_trainer.py`](internnav/trainer/navdp_trainer.py) | `internnav/trainer/bridgedp_trainer.py` | 独立继承 `BaseTrainer`，仿照 NavDP 实现全部训练逻辑 |
 | [`internnav/configs/model/navdp.py`](internnav/configs/model/navdp.py) | `internnav/configs/model/bridgedp.py` | 独立配置 |
 | [`scripts/train/base_train/configs/navdp.py`](scripts/train/base_train/configs/navdp.py) | `scripts/train/base_train/configs/bridgedp.py` | 训练超参配置 |
 
@@ -62,35 +75,130 @@ Bridge-DP 在 InternNav 框架中作为与 NavDP **同级的独立模型**存在
 
 **文件**：`internnav/dataset/bridgedp_lerobot_dataset.py`
 
-**继承** `NavDP_Base_Datset`，复用其全部数据加载逻辑（`load_image`、`load_depth`、`process_data_parquet`、`process_actions`、`process_memory`、`process_pixel_goal`、`rank_steps` 等），仅覆写 `__getitem__` 中的动作空间和先验轨迹逻辑。
+**基类**：`torch.utils.data.Dataset`（与 [`NavDP_Base_Datset`](internnav/dataset/navdp_lerobot_dataset.py:54) 使用相同基类）
 
-### 3.1 与 NavDP 的差异
+**设计原则**：不继承 `NavDP_Base_Datset`，而是独立继承 `Dataset`，仿照 NavDP 的实现思路从零实现全部数据加载逻辑。这样做的好处：
+1. Bridge-DP 与 NavDP 完全解耦，任何一方的修改不会影响另一方
+2. Bridge-DP 可以自由调整数据处理流程（例如动作空间、先验轨迹），不受父类约束
+3. 代码结构清晰，方便独立测试和调试
+
+### 3.1 需要独立实现的方法（仿照 NavDP）
+
+以下方法参照 [`NavDP_Base_Datset`](internnav/dataset/navdp_lerobot_dataset.py:54) 的实现思路，在 `BridgeDP_Base_Dataset` 中独立实现：
+
+| 方法 | NavDP 参照行 | Bridge-DP 实现说明 |
+|------|------------|-------------------|
+| `__init__()` | [L77–183](internnav/dataset/navdp_lerobot_dataset.py:77) | 相同的目录扫描、索引构建逻辑；新增 `sigma_base` 参数 |
+| `__len__()` | [L185–186](internnav/dataset/navdp_lerobot_dataset.py:185) | 相同 |
+| `load_image()` | [L189–204](internnav/dataset/navdp_lerobot_dataset.py:189) | 相同的 RGB 图像读取与预处理 |
+| `load_depth()` | [L206–221](internnav/dataset/navdp_lerobot_dataset.py:206) | 相同的深度图读取与预处理 |
+| `load_pointcloud()` | [L223–233](internnav/dataset/navdp_lerobot_dataset.py:223) | 相同的点云读取 |
+| `process_image()` | [L235–261](internnav/dataset/navdp_lerobot_dataset.py:235) | 相同的图像增强（resize + normalize） |
+| `process_depth()` | [L263–287](internnav/dataset/navdp_lerobot_dataset.py:263) | 相同的深度图增强 |
+| `process_data_parquet()` | [L289–309](internnav/dataset/navdp_lerobot_dataset.py:289) | 相同的 Parquet 轨迹数据解析 |
+| `process_obstacle_points()` | [L311–332](internnav/dataset/navdp_lerobot_dataset.py:311) | 相同的障碍点处理 |
+| `process_memory()` | [L334–355](internnav/dataset/navdp_lerobot_dataset.py:334) | 相同的历史帧记忆构建 |
+| `process_pixel_goal()` | [L357–412](internnav/dataset/navdp_lerobot_dataset.py:357) | 相同的像素目标投影 |
+| `relative_pose()` | [L414–448](internnav/dataset/navdp_lerobot_dataset.py:414) | 相同的相对位姿计算 |
+| `absolute_pose()` | [L450–484](internnav/dataset/navdp_lerobot_dataset.py:450) | 相同的绝对位姿计算 |
+| `xyz_to_xyt()` | [L486–505](internnav/dataset/navdp_lerobot_dataset.py:486) | 相同的坐标变换 |
+| `process_actions()` | [L507–590](internnav/dataset/navdp_lerobot_dataset.py:507) | 相同的轨迹增强（旋转+样条插值） |
+| `rank_steps()` | [L592–633](internnav/dataset/navdp_lerobot_dataset.py:592) | 相同的障碍密度采样 |
+| `__getitem__()` | [L635–809](internnav/dataset/navdp_lerobot_dataset.py:635) | **核心差异点**，见下表 |
+
+### 3.2 `__getitem__` 与 NavDP 的差异
 
 | 功能 | NavDP `__getitem__` | BridgeDP `__getitem__` |
 |------|-------------------|----------------------|
-| 动作空间 | `(pred_actions[1:] - pred_actions[:-1]) * 4.0` | 直接使用 `pred_actions`（绝对坐标） |
-| 先验轨迹 | 无 | 生成 `prior_traj`（含对抗训练） |
+| 动作空间 | `(pred_actions[1:] - pred_actions[:-1]) * 4.0`（[L760](internnav/dataset/navdp_lerobot_dataset.py:760)） | 直接使用 `pred_actions`（绝对坐标 xyt） |
+| 先验轨迹 | 无 | 生成 `prior_traj`（含 30% 对抗训练） |
 | 目标方位角 | 无 | 计算 `theta_g = atan2(g_y, g_x)` |
-| 返回字段 | 10 个字段 | 13 个字段（+prior_traj, theta_g, sigma_base_scale） |
+| 返回字段 | 10 个字段（[L798–809](internnav/dataset/navdp_lerobot_dataset.py:798)） | 12 个字段（+prior_traj, theta_g） |
 
-### 3.2 关键代码逻辑
+### 3.3 关键代码结构
 
 ```python
-from internnav.dataset.navdp_lerobot_dataset import NavDP_Base_Datset
+from torch.utils.data import Dataset  # 使用 NavDP 的基类，而非 NavDP 的类
 
-class BridgeDP_Base_Dataset(NavDP_Base_Datset):
-    """Bridge-DP 数据集，继承 NavDP 数据加载，修改动作空间为绝对坐标。"""
+class BridgeDP_Base_Dataset(Dataset):
+    """Bridge-DP 数据集。
+
+    独立继承 Dataset，仿照 NavDP_Base_Datset 的实现思路，
+    全部数据加载方法独立实现，不依赖 NavDP 任何代码。
+
+    与 NavDP 的核心区别：
+    1. 动作空间为绝对坐标 (x, y, θ)，不做差分×4
+    2. 新增先验轨迹生成（含对抗训练）
+    3. 新增目标方位角 θ_g 计算
+    """
+
+    def __init__(self, root_dirs, preload_path, memory_size, predict_size,
+                 batch_size, image_size, scene_data_scale=1.0,
+                 pixel_channel=7, action_dim=3, preload=False,
+                 random_digit=False, prior_sample=False, sigma_base=1.0):
+        super().__init__()
+        # === 与 NavDP __init__ 相同的逻辑 ===
+        # 目录扫描、索引构建、preload 机制
+        # ...（仿照 NavDP_Base_Datset.__init__ 实现）
+
+        # === Bridge-DP 新增 ===
+        self.sigma_base = sigma_base  # 数据驱动固定常数
+
+    # === 以下方法仿照 NavDP 独立实现（逻辑相同） ===
+    def load_image(self, image_url): ...
+    def load_depth(self, depth_url): ...
+    def load_pointcloud(self, pcd_url): ...
+    def process_image(self, image_path): ...
+    def process_depth(self, depth_path): ...
+    def process_data_parquet(self, index): ...
+    def process_obstacle_points(self, index): ...
+    def process_memory(self, rgb_paths, depth_paths, start_step, memory_digit=1): ...
+    def process_pixel_goal(self, image_url, target_point, camera_intrinsic, camera_extrinsic): ...
+    def relative_pose(self, R_base, T_base, R_world, T_world, base_extrinsic): ...
+    def absolute_pose(self, R_base, T_base, R_frame, T_frame, base_extrinsic): ...
+    def xyz_to_xyt(self, xyz_actions, init_vector): ...
+    def process_actions(self, extrinsics, base_extrinsic, start_step, end_step, pred_digit=1): ...
+    def rank_steps(self, extrinsics, obstacle_points, pred_digit=4): ...
+
+    # === Bridge-DP 新增方法 ===
+    def generate_prior_trajectory(self, pred_actions, point_goal):
+        """生成先验轨迹（70%正确 + 30%对抗）。"""
+        if np.random.random() < 0.3:
+            # 对抗先验：随机旋转或缩放
+            ...
+        else:
+            # 正确先验：直线插值 + 噪声
+            ...
 
     def __getitem__(self, index):
-        # ... 复用父类的所有数据加载逻辑 ...
-        # 与父类的区别：
+        # === 与 NavDP 相同的数据加载流程 ===
+        # process_data_parquet → process_obstacle_points → 采样 →
+        # process_memory → process_actions → xyz_to_xyt →
+        # critic 计算 → process_pixel_goal
+        # ...
+
+        # === Bridge-DP 差异点 ===
         # 1. 不做差分×4，直接使用绝对 xyt 坐标
-        # 2. 生成先验轨迹（70%正确+30%对抗）
-        # 3. 计算 theta_g
-        # 4. 返回新增字段
+        # pred_actions = pred_actions[1:]  # 去掉起点，保持 T 步
+        # （不执行 NavDP 的 (pred_actions[1:] - pred_actions[:-1]) * 4.0）
+
+        # 2. 生成先验轨迹
+        prior_traj = self.generate_prior_trajectory(pred_actions, point_goal)
+
+        # 3. 计算目标方位角
+        theta_g = np.arctan2(point_goal[1], point_goal[0])
+
+        return (
+            point_goal, image_goal, pixel_goal,
+            memory_images, depth_image,
+            pred_actions, augment_actions,        # 绝对坐标
+            pred_critic, augment_critic,
+            float(pixel_flag),
+            prior_traj, theta_g,                  # Bridge-DP 新增
+        )
 ```
 
-### 3.3 collate_fn
+### 3.4 collate_fn
 
 ```python
 def bridgedp_collate_fn(batch):
@@ -104,8 +212,9 @@ def bridgedp_collate_fn(batch):
         "batch_augments": torch.stack([item[6] for item in batch]),    # 绝对坐标
         "batch_label_critic": torch.stack([item[7] for item in batch]),
         "batch_augment_critic": torch.stack([item[8] for item in batch]),
-        "batch_prior": torch.stack([item[9] for item in batch]),       # 新增
-        "batch_theta_g": torch.stack([item[10] for item in batch]),    # 新增
+        # pixel_flag 在 NavDP 中未进 collate，此处同样跳过
+        "batch_prior": torch.stack([item[10] for item in batch]),      # 新增
+        "batch_theta_g": torch.stack([item[11] for item in batch]),    # 新增
     }
     return collated
 ```
@@ -116,35 +225,60 @@ def bridgedp_collate_fn(batch):
 
 **文件**：`internnav/model/basemodel/bridgedp/bridgedp_policy.py`
 
+**基类**：`transformers.PreTrainedModel` / `transformers.PretrainedConfig`（与 [`NavDPNet`](internnav/model/basemodel/navdp/navdp_policy.py:34) / [`NavDPModelConfig`](internnav/model/basemodel/navdp/navdp_policy.py:19) 使用相同基类）
+
 ### 4.1 类结构
 
 ```python
+from transformers import PreTrainedModel, PretrainedConfig
+from internnav.model.encoder.navdp_backbone import (  # 共享编码器，不修改
+    RGBDBackbone, ImageGoalBackbone, PixelGoalBackbone,
+    LearnablePositionalEncoding, SinusoidalPosEmb,
+)
+from .bridge_scheduler import BridgeScheduler
+from .prior_encoder import PriorEncoder, VisualGate
+
 class BridgeDPModelConfig(PretrainedConfig):
+    """Bridge-DP 模型配置。独立继承 PretrainedConfig，仿照 NavDPModelConfig。"""
     model_type = 'bridgedp'
-    # 与 NavDPModelConfig 相同的结构
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    @classmethod
+    def from_dict(cls, config_dict):
+        return cls(**config_dict)
 
 class BridgeDPNet(PreTrainedModel):
+    """Bridge-DP 模型策略。独立继承 PreTrainedModel，仿照 NavDPNet 实现思路。"""
     config_class = BridgeDPModelConfig
 
-    def __init__(self, config):
-        # 复用 NavDP 的编码器（直接 import，不修改）
+    def __init__(self, config: BridgeDPModelConfig):
+        super().__init__(config)
+        # === 复用 NavDP 的共享编码器（直接 import，不修改） ===
         self.rgbd_encoder = RGBDBackbone(...)
         self.pixel_encoder = PixelGoalBackbone(...)
         self.image_encoder = ImageGoalBackbone(...)
         self.point_encoder = nn.Linear(3, token_dim)
 
-        # NavDP 相同的 Transformer Decoder
+        # === 仿照 NavDP 实现 Transformer Decoder ===
         self.decoder = nn.TransformerDecoder(...)
 
-        # ===== Bridge-DP 新增模块 =====
+        # === Bridge-DP 新增模块 ===
         self.prior_encoder = PriorEncoder(...)       # 新增
         self.visual_gate = VisualGate(...)           # 新增
-        self.bridge_scheduler = BridgeScheduler(...) # 替换 DDPMScheduler
+        self.bridge_scheduler = BridgeScheduler(...) # 替换 NavDP 的 DDPMScheduler
 
         # 位置编码长度：原 (mem×16+4) → (mem×16+4+N_p)
         self.cond_pos_embed = LearnablePositionalEncoding(
             token_dim, memory_size * 16 + 4 + self.n_prior_tokens
         )
+
+    # === 仿照 NavDPNet 实现以下方法 ===
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs): ...
+    def to(self, device, *args, **kwargs): ...
+    def _get_device(self): ...
 ```
 
 ### 4.2 与 NavDPNet 的方法对比
@@ -203,12 +337,31 @@ class BridgeScheduler:
 
 **文件**：`internnav/trainer/bridgedp_trainer.py`
 
-继承 `BaseTrainer`（与 `NavDPTrainer` 同级），损失结构保持一致：
+**基类**：[`BaseTrainer`](internnav/trainer/base.py:32)（→ `transformers.Trainer`），与 [`NavDPTrainer`](internnav/trainer/navdp_trainer.py:11) 使用相同基类。
+
+独立继承 `BaseTrainer`，仿照 `NavDPTrainer` 的实现思路，需独立实现以下方法：
+
+| 方法 | NavDP 参照行 | Bridge-DP 实现说明 |
+|------|------------|-------------------|
+| `__init__()` | [L25–44](internnav/trainer/navdp_trainer.py:25) | 仿照 NavDP，加载 Bridge-DP 配置 |
+| `compute_loss()` | [L46–183](internnav/trainer/navdp_trainer.py:46) | 核心差异：布朗桥损失 + 先验注入 |
+| `create_optimizer()` | [L185–219](internnav/trainer/navdp_trainer.py:185) | 仿照 NavDP，分组设置学习率 |
+| `create_scheduler()` | [L221–232](internnav/trainer/navdp_trainer.py:221) | 相同的 warmup scheduler |
+| `create_optimizer_and_scheduler()` | [L234–244](internnav/trainer/navdp_trainer.py:234) | 相同 |
+| `get_train_dataloader()` | [L246–270](internnav/trainer/navdp_trainer.py:246) | 仿照 NavDP，使用 Bridge-DP 的 collate_fn |
+| `save_model()` | [L272–296](internnav/trainer/navdp_trainer.py:272) | 相同的 checkpoint 保存逻辑 |
 
 ```python
-from internnav.trainer.base import BaseTrainer
+from internnav.trainer.base import BaseTrainer  # 与 NavDPTrainer 使用相同基类
 
 class BridgeDPTrainer(BaseTrainer):
+    """Bridge-DP 训练器。独立继承 BaseTrainer，仿照 NavDPTrainer 实现思路。"""
+
+    def __init__(self, config, **kwargs):
+        super().__init__(**kwargs)
+        self.config = config
+        # ...仿照 NavDPTrainer.__init__ 实现
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # 取出新增字段
         prior_traj = inputs["batch_prior"]
@@ -230,6 +383,12 @@ class BridgeDPTrainer(BaseTrainer):
         # 损失结构与 NavDP 完全一致
         # loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
         # action_loss = 0.5 * ng_loss + 0.5 * mg_loss
+
+    def create_optimizer(self): ...      # 仿照 NavDPTrainer 实现
+    def create_scheduler(self, optimizer, num_training_steps): ...
+    def create_optimizer_and_scheduler(self, num_training_steps): ...
+    def get_train_dataloader(self): ...  # 使用 bridgedp_collate_fn
+    def save_model(self, output_dir, state_dict=None, **kwargs): ...
 ```
 
 ---
