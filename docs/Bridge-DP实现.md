@@ -1,359 +1,456 @@
 # Bridge-DP 实现计划
 
 > 基于 NavDP 代码库，分支：`bridgedp-dev`  
-> 最后更新：2026-04-29
+> 最后更新：2026-04-30  
+> **核心原则：不修改任何 NavDP 原始代码，全部另起独立文件**
 
 ---
 
 ## 目录
 
 1. [总体改动概览](#1-总体改动概览)
-2. [数据集改动](#2-数据集改动)
-3. [模型架构改动](#3-模型架构改动)
-4. [训练器改动](#4-训练器改动)
-5. [推理流程改动](#5-推理流程改动)
-6. [配置文件](#6-配置文件)
-7. [v1 实现检查清单](#7-v1-实现检查清单)
+2. [文件清单与对应关系](#2-文件清单与对应关系)
+3. [数据集：bridgedp_lerobot_dataset.py](#3-数据集bridgedp_lerobot_datasetpy)
+4. [模型策略：bridgedp_policy.py](#4-模型策略bridgedp_policypy)
+5. [桥调度器：bridge_scheduler.py](#5-桥调度器bridge_schedulerpy)
+6. [训练器：bridgedp_trainer.py](#6-训练器bridgedp_trainerpy)
+7. [框架注册点（不修改原文件的前提下）](#7-框架注册点)
+8. [训练配置：configs/bridgedp.py](#8-训练配置)
+9. [训练入口：train.py 修改](#9-训练入口)
+10. [v1 实现检查清单](#10-v1-实现检查清单)
 
 ---
 
 ## 1. 总体改动概览
 
-Bridge-DP 在 NavDP 基础上做以下改动：
+Bridge-DP 在 InternNav 框架中作为与 NavDP **同级的独立模型**存在，复用 NavDP 的视觉编码器（[`RGBDBackbone`](internnav/model/encoder/navdp_backbone.py:205)、[`ImageGoalBackbone`](internnav/model/encoder/navdp_backbone.py:316)、[`PixelGoalBackbone`](internnav/model/encoder/navdp_backbone.py:379)），但拥有独立的：
 
-| 模块 | 文件 | 改动类型 | 说明 |
-|------|------|---------|------|
-| 数据集 | [`navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | 修改 | 去掉差分×4，输出绝对坐标；计算 $\theta_g$ |
-| 模型策略 | [`navdp_policy.py`](internnav/model/basemodel/navdp/navdp_policy.py) | 修改 | 替换 DDPMScheduler → BridgeScheduler；增加 PriorEncoder + 门控 |
-| 训练器 | [`navdp_trainer.py`](internnav/trainer/navdp_trainer.py) | 轻微修改 | 传入 prior 轨迹；损失结构不变 |
-| 新增文件 | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | 新建 | 方向自适应布朗桥采样/去噪逻辑 |
-| 新增文件 | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | 新建 | BridgeDPNet 主模型 |
-| 配置 | `internnav/configs/model/bridgedp.py` | 新建 | Bridge-DP 配置 |
-
-**v1 目标**：PointGoal + NoGoal，先验注入，方向自适应方差，样条后处理。
+- 数据集类（绝对坐标 + 先验轨迹）
+- 模型类（布朗桥 SDE + PriorEncoder + VisualGate）
+- 训练器类（桥损失计算）
+- 配置文件
+- 训练入口分支
 
 ---
 
-## 2. 数据集改动
+## 2. 文件清单与对应关系
 
-### 2.1 去掉差分×4，改为绝对坐标
+| NavDP 原文件（不修改） | Bridge-DP 新文件 | 说明 |
+|----------------------|-----------------|------|
+| [`internnav/dataset/navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | `internnav/dataset/bridgedp_lerobot_dataset.py` | 继承 `NavDP_Base_Datset`，覆写 `__getitem__` |
+| [`internnav/model/basemodel/navdp/navdp_policy.py`](internnav/model/basemodel/navdp/navdp_policy.py) | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | 独立模型，复用 backbone |
+| — | `internnav/model/basemodel/bridgedp/__init__.py` | 包初始化 |
+| — | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | 方向自适应布朗桥调度器 |
+| — | `internnav/model/basemodel/bridgedp/prior_encoder.py` | PriorEncoder + VisualGate |
+| [`internnav/trainer/navdp_trainer.py`](internnav/trainer/navdp_trainer.py) | `internnav/trainer/bridgedp_trainer.py` | 独立训练器 |
+| [`internnav/configs/model/navdp.py`](internnav/configs/model/navdp.py) | `internnav/configs/model/bridgedp.py` | 独立配置 |
+| [`scripts/train/base_train/configs/navdp.py`](scripts/train/base_train/configs/navdp.py) | `scripts/train/base_train/configs/bridgedp.py` | 训练超参配置 |
 
-**原始代码**（[`navdp_lerobot_dataset.py:760`](internnav/dataset/navdp_lerobot_dataset.py:760)）：
+**需要追加内容（而非修改原有逻辑）的框架文件**：
+
+| 文件 | 追加内容 | 说明 |
+|------|---------|------|
+| [`internnav/model/__init__.py`](internnav/model/__init__.py) | 新增 `BridgeDP_Policy` 分支 | 模型注册 |
+| [`internnav/configs/model/__init__.py`](internnav/configs/model/__init__.py) | 新增 `bridgedp_cfg` 导入 | 配置注册 |
+| [`internnav/trainer/__init__.py`](internnav/trainer/__init__.py) | 新增 `BridgeDPTrainer` 导入 | 训练器注册 |
+| [`scripts/train/base_train/configs/__init__.py`](scripts/train/base_train/configs/__init__.py) | 新增 `bridgedp_exp_cfg` 导入 | 训练配置注册 |
+| [`scripts/train/base_train/train.py`](scripts/train/base_train/train.py) | 新增 `bridgedp` 分支 | 训练入口 |
+
+---
+
+## 3. 数据集：bridgedp_lerobot_dataset.py
+
+**文件**：`internnav/dataset/bridgedp_lerobot_dataset.py`
+
+**继承** `NavDP_Base_Datset`，复用其全部数据加载逻辑（`load_image`、`load_depth`、`process_data_parquet`、`process_actions`、`process_memory`、`process_pixel_goal`、`rank_steps` 等），仅覆写 `__getitem__` 中的动作空间和先验轨迹逻辑。
+
+### 3.1 与 NavDP 的差异
+
+| 功能 | NavDP `__getitem__` | BridgeDP `__getitem__` |
+|------|-------------------|----------------------|
+| 动作空间 | `(pred_actions[1:] - pred_actions[:-1]) * 4.0` | 直接使用 `pred_actions`（绝对坐标） |
+| 先验轨迹 | 无 | 生成 `prior_traj`（含对抗训练） |
+| 目标方位角 | 无 | 计算 `theta_g = atan2(g_y, g_x)` |
+| 返回字段 | 10 个字段 | 13 个字段（+prior_traj, theta_g, sigma_base_scale） |
+
+### 3.2 关键代码逻辑
 
 ```python
-pred_actions = (pred_actions[1:] - pred_actions[:-1]) * 4.0
-augment_actions = (augment_actions[1:] - augment_actions[:-1]) * 4.0
+from internnav.dataset.navdp_lerobot_dataset import NavDP_Base_Datset
+
+class BridgeDP_Base_Dataset(NavDP_Base_Datset):
+    """Bridge-DP 数据集，继承 NavDP 数据加载，修改动作空间为绝对坐标。"""
+
+    def __getitem__(self, index):
+        # ... 复用父类的所有数据加载逻辑 ...
+        # 与父类的区别：
+        # 1. 不做差分×4，直接使用绝对 xyt 坐标
+        # 2. 生成先验轨迹（70%正确+30%对抗）
+        # 3. 计算 theta_g
+        # 4. 返回新增字段
 ```
 
-**Bridge-DP 改动**：注释掉差分，直接使用绝对坐标（`xyt_actions` 已经是绝对坐标）：
+### 3.3 collate_fn
 
 ```python
-# Bridge-DP: 使用绝对坐标，不做差分
-# pred_actions = (pred_actions[1:] - pred_actions[:-1]) * 4.0
-# augment_actions = (augment_actions[1:] - augment_actions[:-1]) * 4.0
-```
-
-同时 `action_indexes` 的采样逻辑保持不变，但 `pred_actions` 现在是 `(predict_size, 3)` 的绝对坐标序列。
-
-### 2.2 新增 $\theta_g$ 计算
-
-在 `__getitem__` 中，`point_goal` 已经是 `target_xyt_actions[-1]`（[`navdp_lerobot_dataset.py:731`](internnav/dataset/navdp_lerobot_dataset.py:731)），其 `(x, y)` 分量即为目标在机体坐标系中的位置。
-
-```python
-# 计算目标方位角（用于方向自适应方差）
-goal_theta_g = float(np.arctan2(point_goal[1].item(), point_goal[0].item()))
-```
-
-返回值中新增 `goal_theta_g`，并在 `navdp_collate_fn` 中对应添加 `"batch_theta_g"` 字段。
-
-### 2.3 先验轨迹的处理
-
-训练时先验轨迹来自**数据增强**（模拟上一帧预测）：
-
-```python
-# 以 70% 概率使用真实轨迹作为先验（加噪模拟跟踪误差）
-# 以 30% 概率使用随机轨迹（对抗训练）
-if np.random.rand() < 0.7:
-    prior_traj = pred_actions + np.random.randn(*pred_actions.shape) * 0.05
-else:
-    prior_traj = np.random.randn(*pred_actions.shape) * 0.3
-
-# 指数衰减偏移补偿
-delta = prior_traj[0]  # 起点偏差
-lambda_decay = 3.0
-decay = np.exp(-lambda_decay * np.arange(len(prior_traj)) / len(prior_traj))
-prior_traj = prior_traj - delta[None, :] * decay[:, None]
+def bridgedp_collate_fn(batch):
+    collated = {
+        "batch_pg": torch.stack([item[0] for item in batch]),
+        "batch_ig": torch.stack([item[1] for item in batch]),
+        "batch_tg": torch.stack([item[2] for item in batch]),
+        "batch_rgb": torch.stack([item[3] for item in batch]),
+        "batch_depth": torch.stack([item[4] for item in batch]),
+        "batch_labels": torch.stack([item[5] for item in batch]),      # 绝对坐标
+        "batch_augments": torch.stack([item[6] for item in batch]),    # 绝对坐标
+        "batch_label_critic": torch.stack([item[7] for item in batch]),
+        "batch_augment_critic": torch.stack([item[8] for item in batch]),
+        "batch_prior": torch.stack([item[9] for item in batch]),       # 新增
+        "batch_theta_g": torch.stack([item[10] for item in batch]),    # 新增
+    }
+    return collated
 ```
 
 ---
 
-## 3. 模型架构改动
-
-### 3.1 BridgeScheduler（新建）
-
-**文件**：`internnav/model/basemodel/bridgedp/bridge_scheduler.py`
-
-核心功能：
-
-```python
-class BridgeScheduler:
-    def __init__(self, num_train_timesteps=10, sigma_goal=0.1, sigma_base=1.0):
-        self.T = num_train_timesteps
-        self.sigma_goal = sigma_goal
-        self.sigma_base = sigma_base
-
-    def variance(self, t_norm: float, theta_g: float) -> float:
-        """t_norm ∈ [0,1]，theta_g 为目标方位角（弧度）"""
-        p = 0.5 + 0.3 * np.cos(theta_g)
-        f = (t_norm * (1 - t_norm)) ** p
-        return self.sigma_base ** 2 * f + t_norm ** 2 * self.sigma_goal ** 2
-
-    def add_noise(self, x0: Tensor, goal: Tensor, theta_g: Tensor,
-                  timesteps: Tensor) -> tuple[Tensor, Tensor]:
-        """前向加噪：返回 (x_t, epsilon)"""
-        t_norm = timesteps.float() / self.T          # (B,)
-        p = 0.5 + 0.3 * torch.cos(theta_g)          # (B,)
-        f = (t_norm * (1 - t_norm)) ** p             # (B,)
-        var = self.sigma_base ** 2 * f + t_norm ** 2 * self.sigma_goal ** 2
-        sigma = var.sqrt()[:, None, None]            # (B,1,1)
-        mean = (1 - t_norm)[:, None, None] * x0 + t_norm[:, None, None] * goal[:, None, :]
-        epsilon = torch.randn_like(x0)
-        x_t = mean + sigma * epsilon
-        return x_t, epsilon
-
-    def step(self, x_t: Tensor, x0_pred: Tensor, t: int) -> Tensor:
-        """DDIM 确定性反向步：x_{t-1}"""
-        t_norm = t / self.T
-        t_prev_norm = (t - 1) / self.T
-        if t_prev_norm <= 0:
-            return x0_pred
-        x_prev = (t_prev_norm / t_norm) * x_t + (1 - t_prev_norm / t_norm) * x0_pred
-        return x_prev
-```
-
-### 3.2 PriorEncoder（新增模块）
-
-在 [`navdp_backbone.py`](internnav/model/encoder/navdp_backbone.py) 中新增：
-
-```python
-class PriorEncoder(nn.Module):
-    """将先验轨迹 (T, 3) 编码为 N_p 个 token。"""
-    def __init__(self, traj_len=24, token_dim=512, n_tokens=4):
-        super().__init__()
-        self.input_proj = nn.Linear(3, token_dim)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=token_dim, nhead=8, dim_feedforward=2*token_dim,
-            dropout=0.1, activation='gelu', batch_first=True, norm_first=True
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        self.compress = nn.Linear(traj_len, n_tokens)  # 时间维度压缩
-
-    def forward(self, prior_traj: Tensor) -> Tensor:
-        """prior_traj: (B, T, 3) → (B, N_p, token_dim)"""
-        x = self.input_proj(prior_traj)          # (B, T, D)
-        x = self.encoder(x)                      # (B, T, D)
-        x = x.transpose(1, 2)                    # (B, D, T)
-        x = self.compress(x)                     # (B, D, N_p)
-        return x.transpose(1, 2)                 # (B, N_p, D)
-```
-
-### 3.3 视觉门控模块
-
-```python
-class VisualGate(nn.Module):
-    """根据视觉特征计算先验可信度门控系数 G ∈ (0,1)。"""
-    def __init__(self, token_dim=512):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(token_dim, token_dim // 4),
-            nn.GELU(),
-            nn.Linear(token_dim // 4, 1),
-        )
-
-    def forward(self, rgbd_tokens: Tensor) -> Tensor:
-        """rgbd_tokens: (B, N, D) → G: (B, 1, 1)"""
-        h_vis = rgbd_tokens.mean(dim=1)          # (B, D) 全局平均池化
-        return torch.sigmoid(self.mlp(h_vis)).unsqueeze(-1)  # (B, 1, 1)
-```
-
-### 3.4 BridgeDPNet 主模型（新建）
+## 4. 模型策略：bridgedp_policy.py
 
 **文件**：`internnav/model/basemodel/bridgedp/bridgedp_policy.py`
 
-与 [`NavDPNet`](internnav/model/basemodel/navdp/navdp_policy.py:34) 的差异：
+### 4.1 类结构
 
-| 组件 | NavDPNet | BridgeDPNet |
+```python
+class BridgeDPModelConfig(PretrainedConfig):
+    model_type = 'bridgedp'
+    # 与 NavDPModelConfig 相同的结构
+
+class BridgeDPNet(PreTrainedModel):
+    config_class = BridgeDPModelConfig
+
+    def __init__(self, config):
+        # 复用 NavDP 的编码器（直接 import，不修改）
+        self.rgbd_encoder = RGBDBackbone(...)
+        self.pixel_encoder = PixelGoalBackbone(...)
+        self.image_encoder = ImageGoalBackbone(...)
+        self.point_encoder = nn.Linear(3, token_dim)
+
+        # NavDP 相同的 Transformer Decoder
+        self.decoder = nn.TransformerDecoder(...)
+
+        # ===== Bridge-DP 新增模块 =====
+        self.prior_encoder = PriorEncoder(...)       # 新增
+        self.visual_gate = VisualGate(...)           # 新增
+        self.bridge_scheduler = BridgeScheduler(...) # 替换 DDPMScheduler
+
+        # 位置编码长度：原 (mem×16+4) → (mem×16+4+N_p)
+        self.cond_pos_embed = LearnablePositionalEncoding(
+            token_dim, memory_size * 16 + 4 + self.n_prior_tokens
+        )
+```
+
+### 4.2 与 NavDPNet 的方法对比
+
+| 方法 | NavDPNet | BridgeDPNet |
 |------|---------|-------------|
-| 噪声调度器 | `DDPMScheduler` | `BridgeScheduler` |
-| `sample_noise()` | `torch.randn` + DDPM | 布朗桥前向加噪（含 $\theta_g$） |
-| memory 序列 | `[time, goal×3, rgbd]` | `[time, goal×3, rgbd, G·prior_tokens]` |
-| `cond_pos_embed` | 长度 `mem×16+4` | 长度 `mem×16+4+N_p` |
-| 新增模块 | — | `PriorEncoder`, `VisualGate` |
-| 输出 | 增量×4 | 绝对坐标轨迹 |
+| `sample_noise()` | `DDPMScheduler.add_noise()` | `BridgeScheduler.add_noise(action, goal, theta_g)` |
+| `predict_noise()` | memory = `[time, goal×3, rgbd]` | memory = `[time, goal×3, rgbd, G·prior]` |
+| `predict_critic()` | 不变 | **完全不变**，不引入 prior |
+| `forward()` | DDPM 前向 | 布朗桥前向 + 先验编码 |
+| `predict_pointgoal_batch_action_vel()` | `torch.randn` → 10步去噪 → `cumsum/4` | `N(g, σ²_goal)` → 10步去噪 → 样条平滑 |
 
-**`predict_noise` 改动**（memory 拼接）：
-
-```python
-def predict_noise(self, last_actions, timestep, goal_embed, rgbd_embed, prior_embed):
-    action_embeds = self.input_embed(last_actions)
-    time_embeds = self.time_emb(timestep).unsqueeze(1)
-    G = self.visual_gate(rgbd_embed)              # (B, 1, 1)
-    gated_prior = G * prior_embed                 # (B, N_p, D)
-    cond = torch.cat([time_embeds, goal_embed, goal_embed, goal_embed,
-                      rgbd_embed, gated_prior], dim=1)
-    cond = cond + self.cond_pos_embed(cond)
-    input_embedding = action_embeds + self.out_pos_embed(action_embeds)
-    output = self.decoder(tgt=input_embedding, memory=cond,
-                          tgt_mask=self.tgt_mask)
-    return self.action_head(self.layernorm(output))
-```
-
-**`sample_noise` 改动**（布朗桥前向加噪）：
+### 4.3 推理输出变化
 
 ```python
-def sample_noise(self, action, goal, theta_g):
-    timesteps = torch.randint(0, self.bridge_scheduler.T,
-                              (action.shape[0],), device=action.device).long()
-    time_embeds = self.time_emb(timesteps).unsqueeze(1)
-    noisy_action, noise = self.bridge_scheduler.add_noise(action, goal, theta_g, timesteps)
-    noisy_action_embed = self.input_embed(noisy_action)
-    return noise, time_embeds, noisy_action_embed
+# NavDP 原始推理（增量→轨迹）
+trajectory = torch.cumsum(naction / 4.0, dim=1)
+
+# BridgeDP 推理（绝对坐标→样条平滑）
+trajectory = smooth_trajectory_batch(x0_pred)  # (B, T, 3) 绝对坐标
 ```
 
 ---
 
-## 4. 训练器改动
+## 5. 桥调度器：bridge_scheduler.py
 
-[`navdp_trainer.py`](internnav/trainer/navdp_trainer.py) 中 `compute_loss` 的改动：
+**文件**：`internnav/model/basemodel/bridgedp/bridge_scheduler.py`
 
-```python
-# 新增：从 batch 中取出 prior 轨迹和 theta_g
-prior_traj = inputs["batch_prior"]      # (B, T, 3)
-theta_g = inputs["batch_theta_g"]       # (B,)
-
-# 编码先验
-prior_embed = model.prior_encoder(prior_traj)   # (B, N_p, D)
-
-# 传入 sample_noise（布朗桥加噪）
-goal_point = inputs["batch_pg"]         # (B, 3)
-ng_noise, ng_time_embed, ng_noisy_embed = model.sample_noise(
-    tensor_label_actions, goal_point, theta_g
-)
-```
-
-损失结构**不变**：
+替代 NavDP 的 `DDPMScheduler`，实现方向自适应弹性布朗桥。
 
 ```python
-loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
-action_loss = 0.5 * ng_loss + 0.5 * mg_loss
-```
+class BridgeScheduler:
+    def __init__(self, num_train_timesteps=10, sigma_base=1.0, sigma_goal=0.1):
+        self.T = num_train_timesteps
+        self.sigma_base = sigma_base  # 数据驱动固定常数
+        self.sigma_goal = sigma_goal
 
----
+    def variance(self, t_norm, theta_g):
+        """方向自适应方差：σ²(t; θ_g) = σ²_base · [t(1-t)]^p + t² · σ²_goal"""
+        p = 0.5 + 0.3 * torch.cos(theta_g)
+        f = (t_norm * (1 - t_norm)) ** p
+        return self.sigma_base ** 2 * f + t_norm ** 2 * self.sigma_goal ** 2
 
-## 5. 推理流程改动
+    def add_noise(self, x0, goal, theta_g, timesteps):
+        """前向加噪：x_t = (1-t)x_0 + t·g + σ(t;θ_g)·ε"""
+        ...
 
-[`bridgedp_policy.py`] 中的推理函数（对应 NavDP 的 [`predict_pointgoal_batch_action_vel`](internnav/model/basemodel/navdp/navdp_policy.py:302)）：
-
-```python
-def predict_pointgoal_batch_action_vel(self, goal_point, input_images, input_depths,
-                                        prior_traj=None, sample_num=32):
-    with torch.no_grad():
-        goal = torch.as_tensor(goal_point, dtype=torch.float32, device=self._device)
-        theta_g = torch.atan2(goal[:, 1], goal[:, 0])
-
-        rgbd_embed = self.rgbd_encoder(input_images, input_depths)
-        goal_embed = self.point_encoder(goal).unsqueeze(1)
-
-        # 先验编码（无先验时用零向量）
-        if prior_traj is not None:
-            prior_embed = self.prior_encoder(prior_traj)
-        else:
-            prior_embed = torch.zeros(
-                rgbd_embed.shape[0], self.n_prior_tokens, self.token_dim,
-                device=self._device
-            )
-
-        # 推理起点：从目标附近采样
-        x_t = goal.unsqueeze(1).expand(-1, self.predict_size, -1) + \
-              torch.randn(sample_num, self.predict_size, 3, device=self._device) * \
-              self.bridge_scheduler.sigma_goal
-
-        # 10步反向去噪
-        self.bridge_scheduler.set_timesteps(self.bridge_scheduler.T)
-        for k in reversed(range(1, self.bridge_scheduler.T + 1)):
-            x0_pred = self.predict_noise(x_t, torch.tensor([k], device=self._device),
-                                         goal_embed, rgbd_embed, prior_embed)
-            x_t = self.bridge_scheduler.step(x_t, x0_pred, k)
-
-        # 三次样条后处理
-        trajectories = smooth_trajectory_batch(x0_pred)  # (B, T, 3)
-
-        # Critic 排序
-        critic_values = self.predict_critic(trajectories, rgbd_embed)
-        positive = trajectories[(-critic_values).argsort()[:8]]
-        negative = trajectories[(critic_values).argsort()[:8]]
-        return negative, positive
-```
-
-**样条后处理工具函数**：
-
-```python
-def smooth_trajectory_batch(traj: Tensor) -> Tensor:
-    """traj: (B, T, 3) → 平滑后的 (B, T, 3)，使用三次样条"""
-    from scipy.interpolate import CubicSpline
-    B, T, _ = traj.shape
-    t = np.linspace(0, 1, T)
-    result = traj.clone().cpu().numpy()
-    for b in range(B):
-        for dim in range(3):
-            cs = CubicSpline(t, result[b, :, dim])
-            result[b, :, dim] = cs(t)
-    return torch.from_numpy(result).to(traj.device)
+    def step(self, x_t, x0_pred, t):
+        """DDIM 确定性反向步"""
+        ...
 ```
 
 ---
 
-## 6. 配置文件
+## 6. 训练器：bridgedp_trainer.py
 
-**新建** `internnav/configs/model/bridgedp.py`：
+**文件**：`internnav/trainer/bridgedp_trainer.py`
+
+继承 `BaseTrainer`（与 `NavDPTrainer` 同级），损失结构保持一致：
 
 ```python
-from internnav.configs.model.base_encoders import ModelCfg
+from internnav.trainer.base import BaseTrainer
 
-def get_bridgedp_config():
-    return ModelCfg(
-        policy_name='bridgedp_Policy',
-        # 扩散参数
-        num_train_timesteps=10,
-        sigma_base=1.0,       # 由数据统计确定后更新
-        sigma_goal=0.1,       # PointGoal 时的尾端松弛
-        # 先验编码器
-        n_prior_tokens=4,
-        prior_encoder_layers=2,
-        # 门控
-        use_visual_gate=True,
-        adversarial_prior_prob=0.3,
-        prior_noise_std=0.05,
-        # 后处理
-        use_spline_smooth=True,
+class BridgeDPTrainer(BaseTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # 取出新增字段
+        prior_traj = inputs["batch_prior"]
+        theta_g = inputs["batch_theta_g"]
+
+        # 前向（布朗桥加噪 + 先验注入 + 去噪预测）
+        outputs = model(
+            goal_point=inputs["batch_pg"],
+            goal_image=inputs["batch_ig"],
+            goal_pixel=inputs["batch_tg"],
+            input_images=inputs["batch_rgb"],
+            input_depths=inputs["batch_depth"],
+            output_actions=inputs["batch_labels"],    # 绝对坐标
+            augment_actions=inputs["batch_augments"],
+            prior_traj=prior_traj,
+            theta_g=theta_g,
+        )
+
+        # 损失结构与 NavDP 完全一致
+        # loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
+        # action_loss = 0.5 * ng_loss + 0.5 * mg_loss
+```
+
+---
+
+## 7. 框架注册点
+
+以下文件需要**追加**内容（只加不改原有逻辑）：
+
+### 7.1 模型注册 [`internnav/model/__init__.py`](internnav/model/__init__.py)
+
+```python
+# 在 get_policy() 中追加：
+elif policy_name == 'BridgeDP_Policy':
+    from .basemodel.bridgedp.bridgedp_policy import BridgeDPNet
+    return BridgeDPNet
+
+# 在 get_config() 中追加：
+elif policy_name == 'BridgeDP_Policy':
+    from .basemodel.bridgedp.bridgedp_policy import BridgeDPModelConfig
+    return BridgeDPModelConfig
+```
+
+### 7.2 配置注册 [`internnav/configs/model/__init__.py`](internnav/configs/model/__init__.py)
+
+```python
+from .bridgedp import bridgedp_cfg
+# 在 __all__ 中追加 'bridgedp_cfg'
+```
+
+### 7.3 训练器注册 [`internnav/trainer/__init__.py`](internnav/trainer/__init__.py)
+
+```python
+from .bridgedp_trainer import BridgeDPTrainer
+```
+
+### 7.4 训练配置注册 [`scripts/train/base_train/configs/__init__.py`](scripts/train/base_train/configs/__init__.py)
+
+```python
+from .bridgedp import bridgedp_exp_cfg
+# 在 __all__ 中追加 'bridgedp_exp_cfg'
+```
+
+### 7.5 训练入口 [`scripts/train/base_train/train.py`](scripts/train/base_train/train.py)
+
+需追加的位置（参照 NavDP 的模式）：
+
+**导入区**（约第 23 行后）：
+```python
+from internnav.dataset.bridgedp_lerobot_dataset import BridgeDP_Base_Dataset, bridgedp_collate_fn
+from internnav.trainer import BridgeDPTrainer
+from scripts.train.base_train.configs import bridgedp_exp_cfg
+```
+
+**数据加载分支**（约第 319 行后，`elif config.model_name == "navdp":` 同级）：
+```python
+elif config.model_name == "bridgedp":
+    train_dataset_data = BridgeDP_Base_Dataset(
+        config.il.root_dir,
+        config.il.dataset_navdp,      # 复用 NavDP 的数据索引
+        config.il.memory_size,
+        config.il.predict_size,
+        config.il.batch_size,
+        config.il.image_size,
+        config.il.scene_scale,
+        pixel_channel=config.il.pixel_channel,
+        preload=config.il.preload,
+        random_digit=config.il.random_digit,
+        prior_sample=config.il.prior_sample,
     )
 ```
 
+**Trainer 选择分支**（约第 479 行后）：
+```python
+elif config.model_name == 'bridgedp':
+    policy_trainer = BridgeDPTrainer
+    train_dataset = train_dataset_data
+    collate_fn = bridgedp_collate_fn
+```
+
+**supported_cfg 字典**（约第 574 行后）：
+```python
+'bridgedp': [bridgedp_exp_cfg, "BridgeDP_Policy"],
+```
+
+**分布式初始化条件**（约第 242 行）：
+```python
+if config.model_name in ["navdp", "bridgedp", "flownav_static", ...]:
+```
+
 ---
 
-## 7. v1 实现检查清单
+## 8. 训练配置
 
-| # | 任务 | 文件 | 状态 |
-|---|------|------|------|
-| 1 | 数据集去掉差分×4 | [`navdp_lerobot_dataset.py:760`](internnav/dataset/navdp_lerobot_dataset.py:760) | ⬜ |
-| 2 | 数据集新增 `theta_g` 计算和返回 | [`navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | ⬜ |
-| 3 | 数据集新增先验轨迹生成（含对抗训练） | [`navdp_lerobot_dataset.py`](internnav/dataset/navdp_lerobot_dataset.py) | ⬜ |
-| 4 | 新建 `BridgeScheduler` | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | ⬜ |
-| 5 | 新建 `PriorEncoder` | [`navdp_backbone.py`](internnav/model/encoder/navdp_backbone.py) | ⬜ |
-| 6 | 新建 `VisualGate` | [`navdp_backbone.py`](internnav/model/encoder/navdp_backbone.py) | ⬜ |
-| 7 | 新建 `BridgeDPNet` 主模型 | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | ⬜ |
-| 8 | 更新 `cond_pos_embed` 长度（+N_p） | `bridgedp_policy.py` | ⬜ |
-| 9 | 训练器传入 prior + theta_g | [`navdp_trainer.py`](internnav/trainer/navdp_trainer.py) | ⬜ |
-| 10 | 推理函数加入样条后处理 | `bridgedp_policy.py` | ⬜ |
-| 11 | 新建配置文件 | `internnav/configs/model/bridgedp.py` | ⬜ |
-| 12 | 离线统计 `sigma_base`（脚本） | `scripts/train/base_train/compute_sigma_base.py` | ⬜ |
+### 8.1 模型配置 `internnav/configs/model/bridgedp.py`
+
+```python
+from .base_encoders import ModelCfg
+
+bridgedp_cfg = ModelCfg(
+    policy_name='BridgeDP_Policy',
+    state_encoder=None,
+)
+```
+
+### 8.2 训练超参配置 `scripts/train/base_train/configs/bridgedp.py`
+
+```python
+from internnav.configs.model.bridgedp import bridgedp_cfg
+from internnav.configs.trainer.eval import EvalCfg
+from internnav.configs.trainer.exp import ExpCfg
+from internnav.configs.trainer.il import FilterFailure, IlCfg, Loss
+
+bridgedp_exp_cfg = ExpCfg(
+    name='bridgedp_train',
+    model_name='bridgedp',
+    torch_gpu_id=0,
+    torch_gpu_ids=[0],
+    output_dir='checkpoints/%s/ckpts',
+    tensorboard_dir='checkpoints/%s/tensorboard',
+    checkpoint_folder='checkpoints/%s/ckpts',
+    log_dir='checkpoints/%s/logs',
+    local_rank=0,
+    seed=0,
+    eval=EvalCfg(
+        use_ckpt_config=False, save_results=True, split=['val_seen'],
+        ckpt_to_load='', max_steps=195, sample=False,
+        success_distance=3.0, start_eval_epoch=-1, step_interval=50,
+    ),
+    il=IlCfg(
+        epochs=1000,
+        batch_size=32,
+        lr=1e-4,
+        num_workers=8,
+        weight_decay=1e-4,
+        warmup_ratio=0.05,
+        use_iw=True,
+        inflection_weight_coef=3.2,
+        save_interval_epochs=5,
+        save_filter_frozen_weights=False,
+        load_from_ckpt=False,
+        ckpt_to_load='',
+        lmdb_map_size=1e12,
+        dataset_r2r_root_dir='data/vln_pe/raw_data/r2r',
+        lmdb_features_dir='r2r',
+        lerobot_features_dir='data/vln_pe/traj_data/r2r',
+        camera_name='pano_camera_0',
+        report_to='tensorboard',
+        dataset_navdp='data/datasets/navdp_dataset_lerobot.json',   # 复用 NavDP 索引
+        root_dir='data/datasets/InternData-N1/vln_n1/traj_data',     # 复用 NavDP 数据
+        image_size=224,
+        scene_scale=1.0,
+        preload=False,
+        random_digit=False,
+        prior_sample=False,
+        memory_size=8,
+        predict_size=24,
+        pixel_channel=4,
+        temporal_depth=16,
+        heads=8,
+        token_dim=384,
+        channels=3,
+        dropout=0.1,
+        scratch=False,
+        finetune=False,
+        ddp_find_unused_parameters=True,
+        filter_failure=FilterFailure(use=True, min_rgb_nums=15),
+        loss=Loss(alpha=0.0001, dist_scale=1),
+    ),
+    model=bridgedp_cfg,
+)
+```
+
+---
+
+## 9. 训练入口
+
+训练命令与 NavDP 完全一致，只需将 `--model-name` 改为 `bridgedp`：
+
+```bash
+# 单卡训练
+python scripts/train/base_train/train.py --model-name bridgedp --name bridgedp_v1
+
+# 多卡训练
+torchrun --nproc_per_node=4 scripts/train/base_train/train.py \
+    --model-name bridgedp --name bridgedp_v1_4gpu
+```
+
+---
+
+## 10. v1 实现检查清单
+
+### 新建文件（7 个）
+
+| # | 文件 | 状态 |
+|---|------|------|
+| 1 | `internnav/dataset/bridgedp_lerobot_dataset.py` | ⬜ |
+| 2 | `internnav/model/basemodel/bridgedp/__init__.py` | ⬜ |
+| 3 | `internnav/model/basemodel/bridgedp/bridgedp_policy.py` | ⬜ |
+| 4 | `internnav/model/basemodel/bridgedp/bridge_scheduler.py` | ⬜ |
+| 5 | `internnav/model/basemodel/bridgedp/prior_encoder.py` | ⬜ |
+| 6 | `internnav/trainer/bridgedp_trainer.py` | ⬜ |
+| 7 | `internnav/configs/model/bridgedp.py` | ⬜ |
+
+### 训练配置（1 个新建）
+
+| # | 文件 | 状态 |
+|---|------|------|
+| 8 | `scripts/train/base_train/configs/bridgedp.py` | ⬜ |
+
+### 追加注册（5 个文件追加内容，不修改原有逻辑）
+
+| # | 文件 | 追加内容 | 状态 |
+|---|------|---------|------|
+| 9 | [`internnav/model/__init__.py`](internnav/model/__init__.py) | `BridgeDP_Policy` 分支 | ⬜ |
+| 10 | [`internnav/configs/model/__init__.py`](internnav/configs/model/__init__.py) | `bridgedp_cfg` 导入 | ⬜ |
+| 11 | [`internnav/trainer/__init__.py`](internnav/trainer/__init__.py) | `BridgeDPTrainer` 导入 | ⬜ |
+| 12 | [`scripts/train/base_train/configs/__init__.py`](scripts/train/base_train/configs/__init__.py) | `bridgedp_exp_cfg` 导入 | ⬜ |
+| 13 | [`scripts/train/base_train/train.py`](scripts/train/base_train/train.py) | `bridgedp` 数据/训练分支 | ⬜ |
+
+### 离线脚本（1 个）
+
+| # | 文件 | 状态 |
+|---|------|------|
+| 14 | `scripts/train/base_train/compute_sigma_base.py` | ⬜ |
