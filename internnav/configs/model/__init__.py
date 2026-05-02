@@ -4,7 +4,9 @@ from .seq2seq import seq2seq_cfg, seq2seq_eval_cfg
 from .internvla_n1 import internvla_n1_cfg
 from .navdp import navdp_cfg
 from .flownav import flownav_cfg
+from .bridgedp import bridgedp_cfg
 
-__all__ = ['cma_cfg', 'cma_eval_cfg', 'rdp_cfg', 'rdp_eval_cfg', 
-           'seq2seq_cfg', 'seq2seq_eval_cfg', 
-           'internvla_n1_cfg', 'navdp_cfg', 'flownav_cfg']
+__all__ = ['cma_cfg', 'cma_eval_cfg', 'rdp_cfg', 'rdp_eval_cfg',
+           'seq2seq_cfg', 'seq2seq_eval_cfg',
+           'internvla_n1_cfg', 'navdp_cfg', 'flownav_cfg',
+           'bridgedp_cfg']

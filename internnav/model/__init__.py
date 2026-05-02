@@ -26,6 +26,10 @@ def get_policy(policy_name):
         from .basemodel.navdp.navdp_policy import NavDPNet
 
         return NavDPNet
+    elif policy_name == 'BridgeDP_Policy':
+        from .basemodel.bridgedp.bridgedp_policy import BridgeDPNet
+
+        return BridgeDPNet
     elif policy_name == 'FlowNav_Policy':
         from .basemodel.flownav.flownav_policy import FlowNavNet
 
@@ -62,6 +66,10 @@ def get_config(policy_name):
         from .basemodel.navdp.navdp_policy import NavDPModelConfig
 
         return NavDPModelConfig
+    elif policy_name == 'BridgeDP_Policy':
+        from .basemodel.bridgedp.bridgedp_policy import BridgeDPModelConfig
+
+        return BridgeDPModelConfig
     elif policy_name == 'FlowNav_Policy':
         from .basemodel.flownav.flownav_policy import FlowNavModelConfig
 

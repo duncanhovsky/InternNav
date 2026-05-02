@@ -21,12 +21,14 @@ from internnav.dataset.cma_lerobot_dataset import CMALerobotDataset, cma_collate
 from internnav.dataset.flownav_dyn_lerobot_dataset import FlowNav_Dyn_Lerobot_Dataset, flownav_dyn_collate_fn
 from internnav.dataset.flownav_lerobot_dataset import FlowNav_Base_Datset, flownav_collate_fn
 from internnav.dataset.navdp_lerobot_dataset import NavDP_Base_Datset, navdp_collate_fn
+from internnav.dataset.bridgedp_lerobot_dataset import BridgeDP_Base_Dataset, bridgedp_collate_fn
 from internnav.dataset.rdp_lerobot_dataset import RDP_LerobotDataset, rdp_collate_fn
 from internnav.model import get_config, get_policy
 from internnav.model.utils.logger import MyLogger
 from internnav.model.utils.utils import load_dataset
-from internnav.trainer import CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
+from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
 from scripts.train.base_train.configs import (
+    bridgedp_exp_cfg,
     cma_exp_cfg,
     cma_plus_exp_cfg,
     flownav_dyn_exp_cfg,
@@ -43,7 +45,7 @@ class TrainCfg(BaseModel):
     """Training configuration class"""
 
     name: str = 'cma_train'  # Experiment name
-    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'flownav_static', 'flownav_dyn', 'flownav_mix'
+    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'flownav_static', 'flownav_dyn', 'flownav_mix'
 
 
 class FlowNavMixDataset(Dataset):
@@ -239,7 +241,7 @@ def main(config, model_class, model_config_class):
         print(f"  MASTER_ADDR: {os.getenv('MASTER_ADDR', 'Not set')}")
         print(f"  MASTER_PORT: {os.getenv('MASTER_PORT', 'Not set')}")
 
-        if config.model_name in ["navdp", "flownav_static", "flownav_dyn", "flownav_mix"]:
+        if config.model_name in ["navdp", "bridgedp", "flownav_static", "flownav_dyn", "flownav_mix"]:
             local_rank = int(os.getenv('LOCAL_RANK', '0'))
             world_size = int(os.getenv('WORLD_SIZE', '1'))
             rank = int(os.getenv('RANK', '0'))
@@ -275,7 +277,7 @@ def main(config, model_class, model_config_class):
         if config.il.ckpt_to_load:
             print(f"load model from:{config.il.ckpt_to_load}")
         model = model_class.from_pretrained(pretrained_model_name_or_path=config.il.ckpt_to_load, config=model_cfg)
-        if config.model_name in ["navdp", "flownav_static", "flownav_dyn", "flownav_mix"]:
+        if config.model_name in ["navdp", "bridgedp", "flownav_static", "flownav_dyn", "flownav_mix"]:
             model.to(device)
             for name, param in model.named_parameters():
                 if config.model_name == "navdp" and 'mask_token' in name:
@@ -311,13 +313,27 @@ def main(config, model_class, model_config_class):
         transformers_logger = logging.getLogger("transformers")
         if transformers_logger.hasHandlers():
             transformers_logger.handlers = []
-        if config.model_name in ["navdp", "flownav_static", "flownav_dyn", "flownav_mix"] and local_rank in [0, -1]:  # Only main process or non-distributed
+        if config.model_name in ["navdp", "bridgedp", "flownav_static", "flownav_dyn", "flownav_mix"] and local_rank in [0, -1]:  # Only main process or non-distributed
             transformers_logger.addHandler(train_logger.handlers[0])
         transformers_logger.setLevel(logging.INFO)
 
         # ------------ load dataset ------------
         if config.model_name == "navdp":
             train_dataset_data = NavDP_Base_Datset(
+                config.il.root_dir,
+                config.il.dataset_navdp,
+                config.il.memory_size,
+                config.il.predict_size,
+                config.il.batch_size,
+                config.il.image_size,
+                config.il.scene_scale,
+                pixel_channel=config.il.pixel_channel,
+                preload=config.il.preload,
+                random_digit=config.il.random_digit,
+                prior_sample=config.il.prior_sample,
+            )
+        elif config.model_name == "bridgedp":
+            train_dataset_data = BridgeDP_Base_Dataset(
                 config.il.root_dir,
                 config.il.dataset_navdp,
                 config.il.memory_size,
@@ -480,6 +496,10 @@ def main(config, model_class, model_config_class):
             policy_trainer = NavDPTrainer
             train_dataset = train_dataset_data
             collate_fn = navdp_collate_fn
+        elif config.model_name == 'bridgedp':
+            policy_trainer = BridgeDPTrainer
+            train_dataset = train_dataset_data
+            collate_fn = bridgedp_collate_fn
         elif config.model_name == 'flownav_static':
             policy_trainer = FlowNavTrainer
             train_dataset = train_dataset_data
@@ -578,6 +598,7 @@ if __name__ == '__main__':
         'cma_plus': [cma_plus_exp_cfg, "CMA_Policy"],
         'rdp': [rdp_exp_cfg, "RDP_Policy"],
         'navdp': [navdp_exp_cfg, "NavDP_Policy"],
+        'bridgedp': [bridgedp_exp_cfg, "BridgeDP_Policy"],
         'flownav_static': [flownav_static_exp_cfg, "FlowNav_Policy"],
         'flownav_dyn': [flownav_dyn_exp_cfg, "FlowNav_Policy"],
         'flownav_mix': [flownav_mix_exp_cfg, "FlowNav_Policy"],
