@@ -235,6 +235,10 @@ internnav/model/basemodel/LongCLIP/
 # dataengine 生成产物
 dataengine/out/
 
+# 通用 out 目录
+out/
+**/out/
+
 # Django（历史遗留模板）
 db.sqlite3
 local_settings.py
