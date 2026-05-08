@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 if os.path.isdir('./third_party/diffusion-policy'):
     sys.path.append('./third_party/diffusion-policy')
@@ -211,6 +212,211 @@ class CheckpointFormatCallback(TrainerCallback):
             checkpoint_dir = Path(args.output_dir) / f'checkpoint-{state.global_step}'  # noqa: F841
 
 
+class DetailedProgressCallback(TrainerCallback):
+    """记录详细训练进度到 JSON 文件，供监控面板读取。
+
+    每个 logging_step 写入一次，包含：
+    - 样本级进度（已完成/总样本数）
+    - GPU 显存细分（模型参数、优化器状态、激活值、缓冲区）
+    - 各项 Loss 分量
+    - 每步耗时、吞吐量
+    - 数据集统计信息
+    """
+
+    def __init__(self, log_dir: str, dataset_size: int = 0, batch_size: int = 16):
+        self.log_dir = log_dir
+        self.status_file = os.path.join(log_dir, 'training_status.json')
+        self.dataset_size = dataset_size
+        self.batch_size = batch_size
+        self.step_times = []
+        self.start_time = time.time()
+        self.last_step_time = time.time()
+
+    def _get_gpu_memory_breakdown(self):
+        """获取 GPU 显存使用细分"""
+        if not torch.cuda.is_available():
+            return {}
+        try:
+            allocated = torch.cuda.memory_allocated() / (1024**2)  # MiB
+            reserved = torch.cuda.memory_reserved() / (1024**2)
+            max_allocated = torch.cuda.max_memory_allocated() / (1024**2)
+            total = torch.cuda.get_device_properties(0).total_mem / (1024**2)
+            return {
+                'allocated_mib': round(allocated, 1),
+                'reserved_mib': round(reserved, 1),
+                'max_allocated_mib': round(max_allocated, 1),
+                'total_mib': round(total, 1),
+                'free_mib': round(total - reserved, 1),
+                'fragmentation_pct': round((reserved - allocated) / max(reserved, 1) * 100, 1),
+            }
+        except Exception:
+            return {}
+
+    def _estimate_memory_components(self, model):
+        """估算显存各组件占用"""
+        try:
+            model_ref = model.module if hasattr(model, 'module') else model
+            # 模型参数显存
+            param_mem = sum(p.nelement() * p.element_size() for p in model_ref.parameters()) / (1024**2)
+            # 梯度显存（大约与参数相同）
+            grad_mem = sum(
+                p.grad.nelement() * p.grad.element_size()
+                for p in model_ref.parameters() if p.grad is not None
+            ) / (1024**2)
+            # Buffer 显存
+            buffer_mem = sum(b.nelement() * b.element_size() for b in model_ref.buffers()) / (1024**2)
+            total_allocated = torch.cuda.memory_allocated() / (1024**2) if torch.cuda.is_available() else 0
+            # 激活值 = 总分配 - 参数 - 梯度 - buffer
+            activation_mem = max(0, total_allocated - param_mem - grad_mem - buffer_mem)
+            return {
+                'params_mib': round(param_mem, 1),
+                'gradients_mib': round(grad_mem, 1),
+                'buffers_mib': round(buffer_mem, 1),
+                'activations_mib': round(activation_mem, 1),
+            }
+        except Exception:
+            return {}
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        """训练开始时记录基础信息"""
+        self.start_time = time.time()
+        self.last_step_time = time.time()
+        status = {
+            'phase': 'training_started',
+            'timestamp': datetime.now().isoformat(),
+            'dataset_size': self.dataset_size,
+            'batch_size': self.batch_size,
+            'total_steps': state.max_steps,
+            'total_epochs': args.num_train_epochs,
+            'gpu_memory': self._get_gpu_memory_breakdown(),
+        }
+        if model is not None:
+            status['memory_components'] = self._estimate_memory_components(model)
+            model_ref = model.module if hasattr(model, 'module') else model
+            total_params = sum(p.numel() for p in model_ref.parameters())
+            trainable_params = sum(p.numel() for p in model_ref.parameters() if p.requires_grad)
+            status['model_info'] = {
+                'total_params': total_params,
+                'trainable_params': trainable_params,
+                'frozen_params': total_params - trainable_params,
+                'total_params_m': round(total_params / 1e6, 2),
+            }
+        self._write_status(status)
+
+    def on_log(self, args, state, control, logs=None, model=None, **kwargs):
+        """每个 logging_step 记录详细状态"""
+        now = time.time()
+        step_duration = now - self.last_step_time
+        self.last_step_time = now
+        self.step_times.append(step_duration)
+        # 保留最近100个step的时间
+        if len(self.step_times) > 100:
+            self.step_times = self.step_times[-100:]
+
+        elapsed = now - self.start_time
+        samples_done = state.global_step * self.batch_size
+        total_samples = state.max_steps * self.batch_size
+        samples_per_sec = samples_done / max(elapsed, 1)
+
+        # ETA 估算
+        if state.global_step > 0:
+            avg_step_time = elapsed / state.global_step
+            remaining_steps = state.max_steps - state.global_step
+            eta_seconds = remaining_steps * avg_step_time
+        else:
+            eta_seconds = 0
+
+        status = {
+            'phase': 'training',
+            'timestamp': datetime.now().isoformat(),
+            # 进度信息
+            'global_step': state.global_step,
+            'max_steps': state.max_steps,
+            'epoch': round(state.epoch, 4) if state.epoch else 0,
+            'total_epochs': args.num_train_epochs,
+            'progress_pct': round(state.global_step / max(state.max_steps, 1) * 100, 2),
+            # 样本级进度
+            'samples_completed': samples_done,
+            'total_samples': total_samples,
+            'samples_per_second': round(samples_per_sec, 2),
+            'dataset_size': self.dataset_size,
+            'batch_size': self.batch_size,
+            'steps_per_epoch': self.dataset_size // self.batch_size if self.batch_size > 0 else 0,
+            # 时间统计
+            'elapsed_seconds': round(elapsed, 1),
+            'elapsed_human': self._fmt_duration(elapsed),
+            'eta_seconds': round(eta_seconds, 1),
+            'eta_human': self._fmt_duration(eta_seconds),
+            'avg_step_time': round(elapsed / max(state.global_step, 1), 2),
+            'last_step_time': round(step_duration, 2),
+            # Loss 详情
+            'losses': {},
+            # GPU 显存
+            'gpu_memory': self._get_gpu_memory_breakdown(),
+        }
+
+        # 提取 logs 中的 loss 信息
+        if logs:
+            for k, v in logs.items():
+                if isinstance(v, (int, float)):
+                    status['losses'][k] = round(v, 6) if isinstance(v, float) else v
+
+        # 显存组件估算
+        if model is not None:
+            status['memory_components'] = self._estimate_memory_components(model)
+
+        # 系统内存
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            proc = psutil.Process()
+            status['system_memory'] = {
+                'total_gb': round(mem.total / (1024**3), 1),
+                'used_gb': round(mem.used / (1024**3), 1),
+                'percent': mem.percent,
+                'process_rss_gb': round(proc.memory_info().rss / (1024**3), 2),
+            }
+        except Exception:
+            pass
+
+        self._write_status(status)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """训练结束时记录"""
+        elapsed = time.time() - self.start_time
+        status = {
+            'phase': 'training_completed',
+            'timestamp': datetime.now().isoformat(),
+            'total_steps': state.global_step,
+            'total_time': self._fmt_duration(elapsed),
+            'total_seconds': round(elapsed, 1),
+            'final_epoch': round(state.epoch, 4) if state.epoch else 0,
+        }
+        self._write_status(status)
+
+    def _write_status(self, status):
+        """原子写入状态文件"""
+        try:
+            import json
+            tmp_file = self.status_file + '.tmp'
+            with open(tmp_file, 'w') as f:
+                json.dump(status, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, self.status_file)
+        except Exception as e:
+            print(f"[DetailedProgressCallback] Failed to write status: {e}")
+
+    @staticmethod
+    def _fmt_duration(seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        if h > 0:
+            return f"{h}h {m}m {s}s"
+        elif m > 0:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+
 def _make_dir(config):
     config.tensorboard_dir = config.tensorboard_dir % config.name
     config.checkpoint_folder = config.checkpoint_folder % config.name
@@ -300,7 +506,9 @@ def main(config, model_class, model_config_class):
                 )
         # ------------ load logger ------------
         train_logger_filename = os.path.join(config.log_dir, 'train.log')
-        if dist.is_initialized() and dist.get_rank() == 0:
+        # 无论是否分布式，主进程（rank=0 或单机）都写日志文件
+        is_main = (not dist.is_initialized()) or (dist.is_initialized() and dist.get_rank() == 0)
+        if is_main:
             train_logger = MyLogger(
                 name='train',
                 level=logging.INFO,
@@ -521,6 +729,7 @@ def main(config, model_class, model_config_class):
         # ------------ training args ------------
         training_args = TrainingArguments(
             output_dir=config.output_dir,
+            logging_dir=config.tensorboard_dir,  # TensorBoard 日志目录
             run_name=config.name,
             remove_unused_columns=False,
             deepspeed='',
@@ -559,6 +768,17 @@ def main(config, model_class, model_config_class):
         run_name = config.name
         ckpt_format_callback = CheckpointFormatCallback(run_name=run_name, exp_cfg_dir=config.log_dir)
         trainer.add_callback(ckpt_format_callback)
+
+        # Add detailed progress callback for monitoring dashboard
+        dataset_size = len(train_dataset) if hasattr(train_dataset, '__len__') else 0
+        progress_callback = DetailedProgressCallback(
+            log_dir=config.log_dir,
+            dataset_size=dataset_size,
+            batch_size=config.il.batch_size,
+        )
+        trainer.add_callback(progress_callback)
+        print(f"[Monitor] DetailedProgressCallback registered. Dataset size: {dataset_size}, "
+              f"Status file: {config.log_dir}/training_status.json")
 
         trainer.train()
         if train_logger:

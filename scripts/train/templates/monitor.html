@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bridge-DP 训练监控</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e0e0e0; }
+header { background: #1a1d2e; padding: 14px 24px; border-bottom: 1px solid #2d3148;
+  display: flex; align-items: center; justify-content: space-between; }
+header h1 { font-size: 1.15rem; color: #7c9ef8; display: flex; align-items: center; gap: 8px; }
+#status-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; display: inline-block; }
+#status-dot.running { background: #4caf50; box-shadow: 0 0 6px #4caf50; animation: pulse 1.5s infinite; }
+#status-dot.stopped { background: #f44336; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+#header-right { display: flex; align-items: center; gap: 16px; font-size: .78rem; color: #888; }
+
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 16px 20px; }
+@media (max-width: 1100px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+
+.card { background: #1a1d2e; border-radius: 10px; padding: 16px; border: 1px solid #2d3148;
+  transition: border-color .3s; }
+.card:hover { border-color: #3d4168; }
+.card h2 { font-size: .78rem; color: #7c9ef8; text-transform: uppercase; letter-spacing: .08em;
+  margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+
+.metric { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.metric-label { font-size: .76rem; color: #999; }
+.metric-value { font-size: .82rem; font-weight: 600; color: #e0e0e0; }
+.bar-wrap { background: #0f1117; border-radius: 4px; height: 5px; margin-top: 3px; margin-bottom: 6px; overflow: hidden; }
+.bar { height: 100%; border-radius: 4px; transition: width .6s ease; }
+.bar.gpu-util { background: linear-gradient(90deg, #7c9ef8, #a78bfa); }
+.bar.gpu-mem  { background: linear-gradient(90deg, #34d399, #059669); }
+.bar.cpu      { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.bar.ram      { background: linear-gradient(90deg, #f87171, #ef4444); }
+.bar.progress { background: linear-gradient(90deg, #4ade80, #22c55e); }
+.bar.power    { background: linear-gradient(90deg, #fb923c, #ea580c); }
+.bar.disk     { background: linear-gradient(90deg, #818cf8, #6366f1); }
+
+.big-num { font-size: 1.8rem; font-weight: 700; color: #7c9ef8; line-height: 1.2; }
+.unit { font-size: .7rem; color: #666; margin-left: 2px; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .68rem; font-weight: 600; }
+.tag.green { background: #064e3b; color: #34d399; }
+.tag.red   { background: #450a0a; color: #f87171; }
+.tag.blue  { background: #1e3a5f; color: #7c9ef8; }
+.tag.orange { background: #431407; color: #fb923c; }
+
+.log-box { background: #0f1117; border-radius: 6px; padding: 10px; height: 200px;
+  overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: .7rem;
+  color: #9ca3af; border: 1px solid #2d3148; line-height: 1.6; }
+.log-box p { margin-bottom: 1px; white-space: pre-wrap; word-break: break-all; }
+.log-box p.warn { color: #fbbf24; }
+.log-box p.err  { color: #f87171; }
+
+.proc-row { display: flex; justify-content: space-between; align-items: center; font-size: .75rem;
+  padding: 5px 0; border-bottom: 1px solid #1f2237; }
+.proc-row:last-child { border-bottom: none; }
+
+.section-full { grid-column: 1 / -1; }
+.section-2col { grid-column: span 2; }
+
+.cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+.cfg-item { font-size: .74rem; padding: 3px 0; display: flex; justify-content: space-between; }
+.cfg-key { color: #888; }
+.cfg-val { color: #e0e0e0; font-weight: 500; font-family: monospace; }
+
+canvas { width: 100% !important; height: 160px !important; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>🚀 Bridge-DP 训练监控</h1>
+  <div id="header-right">
+    <span id="status-dot"></span>
+    <span id="status-text">检测中...</span>
+    <span id="last-update"></span>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- GPU -->
+  <div class="card">
+    <h2>🎮 GPU 状态</h2>
+    <div id="gpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- CPU & 内存 -->
+  <div class="card">
+    <h2>💻 系统资源</h2>
+    <div id="cpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- 训练进度 -->
+  <div class="card">
+    <h2>📈 训练进度</h2>
+    <div id="progress-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- Loss 图表 -->
+  <div class="card section-2col">
+    <h2>📉 Loss 曲线</h2>
+    <canvas id="lossChart"></canvas>
+    <div id="loss-no-data" style="display:none;color:#666;font-size:.78rem;text-align:center;padding:40px 0">
+      暂无 Loss 数据（等待 TensorBoard 事件写入）</div>
+  </div>
+
+  <!-- 训练配置 -->
+  <div class="card">
+    <h2>⚙️ 训练配置</h2>
+    <div id="config-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- 训练进程 -->
+  <div class="card section-2col">
+    <h2>🔧 训练进程 &amp; GPU 进程</h2>
+    <div id="proc-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- 磁盘 -->
+  <div class="card">
+    <h2>💾 磁盘</h2>
+    <div id="disk-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
+  </div>
+
+  <!-- 训练日志 -->
+  <div class="card section-full">
+    <h2>📋 训练日志</h2>
+    <div class="log-box" id="log-content"></div>
+  </div>
+</div>
+
+<script>
+// 格式化
+function fmt(v, d=1) { return typeof v === 'number' ? v.toFixed(d) : (v ?? '--'); }
+function pct(a, b) { return b > 0 ? (a / b * 100).toFixed(1) : '0'; }
+
+// GPU History for mini sparklines
+const gpuUtilHistory = [];
+const gpuMemHistory = [];
+const MAX_HIST = 60;
+
+// Loss Chart
+let lossChart = null;
+function initLossChart() {
+  const ctx = document.getElementById('lossChart').getContext('2d');
+  lossChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'Loss', data: [], borderColor: '#7c9ef8', backgroundColor: 'rgba(124,158,248,0.08)',
+      fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { display: true, grid: { color: '#1f2237' }, ticks: { color: '#666', font: { size: 10 }, maxTicksLimit: 8 } },
+        y: { display: true, grid: { color: '#1f2237' }, ticks: { color: '#666', font: { size: 10 } } }
+      },
+      plugins: { legend: { display: false } },
+      animation: { duration: 300 }
+    }
+  });
+}
+
+function renderGPU(gpus) {
+  if (!gpus || gpus.length === 0) return '<p style="color:#666;font-size:.78rem">未检测到 GPU</p>';
+  return gpus.map(g => {
+    if (g.error) return `<p style="color:#f87171">${g.error}</p>`;
+    const memPct = pct(g.mem_used, g.mem_total);
+    const powPct = pct(g.power, g.power_limit);
+    return `
+      <div style="margin-bottom:10px">
+        <div class="metric"><span class="metric-label">${g.name}</span>
+          <span class="tag ${g.temp>80?'red':g.temp>60?'orange':'green'}">${fmt(g.temp,0)}°C</span></div>
+        <div class="metric"><span class="metric-label">GPU 利用率</span>
+          <span class="metric-value">${fmt(g.util,0)}%</span></div>
+        <div class="bar-wrap"><div class="bar gpu-util" style="width:${g.util}%"></div></div>
+        <div class="metric"><span class="metric-label">显存</span>
+          <span class="metric-value">${fmt(g.mem_used,0)} / ${fmt(g.mem_total,0)} MiB (${memPct}%)</span></div>
+        <div class="bar-wrap"><div class="bar gpu-mem" style="width:${memPct}%"></div></div>
+        <div class="metric"><span class="metric-label">功耗</span>
+          <span class="metric-value">${fmt(g.power,0)}W / ${fmt(g.power_limit,0)}W</span></div>
+        <div class="bar-wrap"><div class="bar power" style="width:${powPct}%"></div></div>
+        <div class="metric"><span class="metric-label">风扇</span>
+          <span class="metric-value">${fmt(g.fan,0)}%</span></div>
+      </div>`;
+  }).join('');
+}
+
+function renderCPU(cpu, mem) {
+  return `
+    <div class="metric"><span class="metric-label">CPU 使用率</span>
+      <span class="metric-value">${fmt(cpu.percent,1)}%</span></div>
+    <div class="bar-wrap"><div class="bar cpu" style="width:${cpu.percent}%"></div></div>
+    <div class="metric"><span class="metric-label">核心 / 频率</span>
+      <span class="metric-value">${cpu.count} 核 @ ${fmt(cpu.freq/1000,2)} GHz</span></div>
+    <div style="height:8px"></div>
+    <div class="metric"><span class="metric-label">内存</span>
+      <span class="metric-value">${fmt(mem.used,1)} / ${fmt(mem.total,1)} GB (${fmt(mem.percent,1)}%)</span></div>
+    <div class="bar-wrap"><div class="bar ram" style="width:${mem.percent}%"></div></div>`;
+}
+
+function renderProgress(t) {
+  if (!t || t.status === 'not_started')
+    return `<p style="color:#666;font-size:.78rem">${t?.message || '训练未开始'}</p>`;
+  const s = t.trainer_state;
+  let html = `<div class="metric"><span class="metric-label">状态</span>
+    <span class="tag ${t.status==='running'?'green':'red'}">${t.status==='running'?'● 运行中':'■ 已停止'}</span></div>`;
+  html += `<div class="metric"><span class="metric-label">Checkpoints</span>
+    <span class="metric-value">${t.checkpoints} 个</span></div>`;
+  if (t.latest_checkpoint)
+    html += `<div class="metric"><span class="metric-label">最新 Ckpt</span>
+      <span class="tag blue">${t.latest_checkpoint}</span></div>`;
+  if (s) {
+    const totalSteps = s.max_steps || 1;
+    const stepPct = (s.global_step / totalSteps * 100).toFixed(1);
+    html += `<div style="height:8px"></div>
+      <div class="metric"><span class="metric-label">步数</span>
+        <span class="metric-value">${s.global_step} / ${totalSteps}</span></div>
+      <div class="bar-wrap"><div class="bar progress" style="width:${stepPct}%"></div></div>
+      <div class="metric"><span class="metric-label">Epoch</span>
+        <span class="metric-value">${fmt(s.epoch, 2)}</span></div>`;
+    if (s.log_history && s.log_history.length > 0) {
+      const last = s.log_history[s.log_history.length - 1];
+      if (last.loss !== undefined)
+        html += `<div style="height:6px"></div>
+          <div class="metric"><span class="metric-label">最新 Loss</span>
+            <span class="big-num">${fmt(last.loss,4)}</span></div>`;
+      if (last.learning_rate !== undefined)
+        html += `<div class="metric"><span class="metric-label">学习率</span>
+          <span class="metric-value">${last.learning_rate.toExponential(3)}</span></div>`;
+    }
+  }
+  return html;
+}
+
+function renderConfig(cfg) {
+  if (!cfg || Object.keys(cfg).length === 0)
+    return '<p style="color:#666;font-size:.78rem">未加载配置</p>';
+  let html = '<div class="cfg-grid">';
+  for (const [k, v] of Object.entries(cfg)) {
+    html += `<div class="cfg-item"><span class="cfg-key">${k}</span><span class="cfg-val">${v}</span></div>`;
+  }
+  return html + '</div>';
+}
+
+function renderProcs(procs, gpuProcs) {
+  let html = '';
+  if (!procs || procs.length === 0) {
+    html += '<p style="color:#f87171;font-size:.78rem;margin-bottom:10px">⚠️ 未检测到训练进程</p>';
+  } else {
+    html += '<div style="margin-bottom:10px;font-size:.72rem;color:#666">训练进程</div>';
+    procs.forEach(p => {
+      html += `<div class="proc-row">
+        <span style="color:#7c9ef8;min-width:65px">PID ${p.pid}</span>
+        <span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">${p.cmdline}</span>
+        <span style="white-space:nowrap">CPU ${fmt(p.cpu)}% · RAM ${fmt(p.mem,2)}G · ⏱ ${p.uptime}</span>
+      </div>`;
+    });
+  }
+  if (gpuProcs && gpuProcs.length > 0) {
+    html += '<div style="margin-top:10px;margin-bottom:6px;font-size:.72rem;color:#666">GPU 计算进程</div>';
+    gpuProcs.forEach(p => {
+      html += `<div class="proc-row">
+        <span style="color:#34d399;min-width:65px">PID ${p.pid}</span>
+        <span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">${p.name}</span>
+        <span style="white-space:nowrap">GPU 显存: ${fmt(p.gpu_mem,0)} MiB</span>
+      </div>`;
+    });
+  }
+  return html;
+}
+
+function renderDisk(disk) {
+  return `
+    <div class="metric"><span class="metric-label">磁盘使用</span>
+      <span class="metric-value">${fmt(disk.used,1)} / ${fmt(disk.total,1)} GB</span></div>
+    <div class="bar-wrap"><div class="bar disk" style="width:${disk.percent}%"></div></div>
+    <div class="metric"><span class="metric-label">使用率</span>
+      <span class="metric-value">${fmt(disk.percent,1)}%</span></div>`;
+}
+
+function renderLog(lines) {
+  if (!lines || lines.length === 0) return '<p style="color:#666">暂无日志</p>';
+  return lines.map(l => {
+    const cls = /error|Error|ERROR|exception|Exception/.test(l) ? 'err'
+      : /warn|Warn|WARN|Warning/.test(l) ? 'warn' : '';
+    return `<p class="${cls}">${l.replace(/</g,'&lt;').replace(/>/g,'&gt;').trimEnd()}</p>`;
+  }).join('');
+}
+
+function updateLossChart(lossHistory, trainerState) {
+  if (!lossChart) return;
+  const noData = document.getElementById('loss-no-data');
+  const canvas = document.getElementById('lossChart');
+
+  // 优先使用 TensorBoard 数据
+  if (lossHistory && lossHistory.length > 0) {
+    canvas.style.display = 'block';
+    noData.style.display = 'none';
+    lossChart.data.labels = lossHistory.map(d => d.step);
+    lossChart.data.datasets[0].data = lossHistory.map(d => d.value);
+    lossChart.update('none');
+  } else if (trainerState && trainerState.log_history) {
+    // 回退到 trainer_state log_history
+    const pts = trainerState.log_history.filter(e => e.loss !== undefined);
+    if (pts.length > 0) {
+      canvas.style.display = 'block';
+      noData.style.display = 'none';
+      lossChart.data.labels = pts.map(d => d.step);
+      lossChart.data.datasets[0].data = pts.map(d => d.loss);
+      lossChart.update('none');
+    } else {
+      canvas.style.display = 'none';
+      noData.style.display = 'block';
+    }
+  } else {
+    canvas.style.display = 'none';
+    noData.style.display = 'block';
+  }
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+
+    document.getElementById('gpu-content').innerHTML = renderGPU(d.gpu);
+    document.getElementById('cpu-content').innerHTML = renderCPU(d.cpu, d.memory);
+    document.getElementById('progress-content').innerHTML = renderProgress(d.training);
+    document.getElementById('config-content').innerHTML = renderConfig(d.config);
+    document.getElementById('proc-content').innerHTML = renderProcs(d.processes, d.gpu_procs);
+    document.getElementById('disk-content').innerHTML = renderDisk(d.disk);
+
+    const logBox = document.getElementById('log-content');
+    const atBottom = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
+    logBox.innerHTML = renderLog(d.training?.log_lines);
+    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+
+    updateLossChart(d.training?.loss_history, d.training?.trainer_state);
+
+    const running = d.processes && d.processes.length > 0;
+    document.getElementById('status-dot').className = running ? 'running' : 'stopped';
+    document.getElementById('status-text').textContent = running ? '训练运行中' : '训练已停止';
+    document.getElementById('last-update').textContent = '更新: ' + new Date().toLocaleTimeString('zh-CN');
+  } catch(e) {
+    document.getElementById('last-update').textContent = '❌ 连接失败: ' + e.message;
+  }
+}
+
+initLossChart();
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

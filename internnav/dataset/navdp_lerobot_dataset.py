@@ -122,42 +122,76 @@ class NavDP_Base_Datset(Dataset):
                 ]
 
                 for scene_dir in tqdm(select_scene_dirs):
-                    chunk_name = os.listdir(os.path.join(root_dirs, group_dir, scene_dir, 'data'))[0]
-                    data_dir = os.path.join(root_dirs, group_dir, scene_dir, f'data/{chunk_name}')
-                    afford_dir = os.path.join(root_dirs, group_dir, scene_dir, 'meta/pointcloud.ply')
-                    with jsonlines.open(
-                        os.path.join(root_dirs, group_dir, scene_dir, 'meta/episodes_stats.jsonl'), 'r'
-                    ) as reader:
-                        episode_info = list(reader)
-                    rgb_dir = os.path.join(
-                        root_dirs, group_dir, scene_dir, f"videos/{chunk_name}/observation.images.rgb/"
-                    )
-                    rgb_paths = [os.path.join(rgb_dir, p) for p in sorted(os.listdir(rgb_dir))]
+                    scene_path = os.path.join(root_dirs, group_dir, scene_dir)
+                    # 检查是否有 trajectory_XX 子目录
+                    subdirs = [d for d in os.listdir(scene_path) if os.path.isdir(os.path.join(scene_path, d))]
+                    trajectory_dirs = [d for d in subdirs if d.startswith('trajectory_')]
 
-                    depth_dir = os.path.join(
-                        root_dirs, group_dir, scene_dir, f"videos/{chunk_name}/observation.images.depth/"
-                    )
-                    depth_paths = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))]
-
-                    data_paths = [os.path.join(data_dir, p) for p in sorted(os.listdir(data_dir))]
-
-                    for episode_idx, episode in enumerate(episode_info):
-                        # 每个 episode 使用 image_index 对齐 RGB 与 Depth 帧范围。
-                        image_start_index = episode['image_index']['min']
-                        image_end_index = episode['image_index']['max']
-                        episode_rgb_path = np.array(rgb_paths)[image_start_index : image_end_index + 1].tolist()
-                        episode_depth_path = np.array(depth_paths)[image_start_index : image_end_index + 1].tolist()
-
+                    if trajectory_dirs:
+                        # 新格式：scene/trajectory_XX/data
+                        # 每个 trajectory_XX 是独立的单 episode 数据单元
+                        for traj_dir in trajectory_dirs:
+                            traj_path = os.path.join(scene_path, traj_dir)
+                            try:
+                                data_subdir = os.path.join(traj_path, 'data')
+                                if not os.path.isdir(data_subdir):
+                                    continue
+                                chunk_name = os.listdir(data_subdir)[0]
+                                data_dir = os.path.join(traj_path, f'data/{chunk_name}')
+                                # pointcloud.ply 可能在 meta/ 或 data/chunk-000/ 下
+                                afford_ply = os.path.join(traj_path, 'meta/pointcloud.ply')
+                                if not os.path.exists(afford_ply):
+                                    afford_ply = os.path.join(data_dir, 'path.ply')
+                                rgb_dir = os.path.join(traj_path, f"videos/{chunk_name}/observation.images.rgb/")
+                                if not os.path.isdir(rgb_dir):
+                                    continue
+                                rgb_paths = [os.path.join(rgb_dir, p) for p in sorted(os.listdir(rgb_dir))]
+                                depth_dir = os.path.join(traj_path, f"videos/{chunk_name}/observation.images.depth/")
+                                depth_paths = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))] if os.path.isdir(depth_dir) else []
+                                data_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.parquet')])
+                                data_paths = [os.path.join(data_dir, p) for p in data_files]
+                                if not data_paths or not rgb_paths:
+                                    continue
+                                # 新格式每个 trajectory 只有 1 个 episode，直接使用全部帧
+                                self.trajectory_data_dir.append(data_paths[0])
+                                self.trajectory_rgb_path.append(rgb_paths)
+                                self.trajectory_depth_path.append(depth_paths)
+                                self.trajectory_afford_path.append(afford_ply)
+                            except Exception as e:
+                                print(f"Error processing {traj_dir}: {e}")
+                    else:
+                        # 旧格式：scene/data（向后兼容，使用 image_index 切分）
                         try:
-                            self.trajectory_data_dir.append(data_paths[episode_idx])
-                            self.trajectory_rgb_path.append(episode_rgb_path)
-                            self.trajectory_depth_path.append(episode_depth_path)
-                            self.trajectory_afford_path.append(afford_dir)
+                            chunk_name = os.listdir(os.path.join(scene_path, 'data'))[0]
+                            data_dir = os.path.join(scene_path, f'data/{chunk_name}')
+                            afford_dir = os.path.join(scene_path, 'meta/pointcloud.ply')
+                            with jsonlines.open(os.path.join(scene_path, 'meta/episodes_stats.jsonl'), 'r') as reader:
+                                episode_info = list(reader)
+                            rgb_dir = os.path.join(scene_path, f"videos/{chunk_name}/observation.images.rgb/")
+                            rgb_paths = [os.path.join(rgb_dir, p) for p in sorted(os.listdir(rgb_dir))]
+                            depth_dir = os.path.join(scene_path, f"videos/{chunk_name}/observation.images.depth/")
+                            depth_paths = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))]
+                            data_paths = [os.path.join(data_dir, p) for p in sorted(os.listdir(data_dir))]
+                            for episode_idx, episode in enumerate(episode_info):
+                                if 'image_index' in episode:
+                                    # 每个 episode 使用 image_index 对齐 RGB 与 Depth 帧范围。
+                                    image_start_index = episode['image_index']['min']
+                                    image_end_index = episode['image_index']['max']
+                                    episode_rgb_path = np.array(rgb_paths)[image_start_index : image_end_index + 1].tolist()
+                                    episode_depth_path = np.array(depth_paths)[image_start_index : image_end_index + 1].tolist()
+                                else:
+                                    # 没有 image_index 字段，使用全部帧
+                                    episode_rgb_path = rgb_paths
+                                    episode_depth_path = depth_paths
+                                try:
+                                    self.trajectory_data_dir.append(data_paths[episode_idx])
+                                    self.trajectory_rgb_path.append(episode_rgb_path)
+                                    self.trajectory_depth_path.append(episode_depth_path)
+                                    self.trajectory_afford_path.append(afford_dir)
+                                except Exception as e:
+                                    print(f"Error processing episode {episode_idx}: {e}")
                         except Exception as e:
-                            import pdb
-
-                            print(f"Error processing episode {episode_idx}: {e}")
-                            pdb.set_trace()
+                            print(f"Error processing scene {scene_dir}: {e}")
 
             # 将扫描结果保存为索引文件，后续可跳过目录扫描加速启动。
             save_dict = {
