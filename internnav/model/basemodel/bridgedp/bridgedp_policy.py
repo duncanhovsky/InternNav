@@ -20,6 +20,8 @@
 
 import os
 
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -301,6 +303,7 @@ class BridgeDPNet(PreTrainedModel):
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
         noise = torch.randn_like(x0)
         noisy_action = self.bridge_scheduler.add_noise(x0, goal, theta_g, timesteps, noise)
+        noisy_action[:, 0, :] = 0.0  # 起点固定为归一化原点，不参与加噪
         noisy_action_embed = self.input_embed(noisy_action)
         return x0, time_embeds, noisy_action_embed, timesteps
 
@@ -661,6 +664,14 @@ class BridgeDPNet(PreTrainedModel):
                 (sample_num * B, self.predict_size, 3),
                 self._device,
             )
+            # 方案C：方向扰动——将 sample_num 条轨迹均匀分布在目标周围不同方向
+            angles = torch.linspace(0, 2 * math.pi, sample_num, device=self._device)
+            dir_bias = torch.stack(
+                [torch.cos(angles), torch.sin(angles), torch.zeros(sample_num, device=self._device)], dim=-1
+            )  # (S, 3)
+            dir_bias = dir_bias.unsqueeze(1).expand(-1, self.predict_size, -1)  # (S, T, 3)
+            dir_bias = dir_bias.repeat(B, 1, 1) if B > 1 else dir_bias  # (S*B, T, 3)
+            naction = naction + dir_bias * 0.3
 
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
             endpoint_expanded = bridge_endpoint.unsqueeze(1).expand(-1, self.predict_size, -1)
@@ -676,6 +687,7 @@ class BridgeDPNet(PreTrainedModel):
                     x0_pred, naction, k,
                     endpoint_expanded, theta_expanded,
                 )
+                naction[:, 0, :] = 0.0  # 每步保持起点为归一化原点
 
             # Critic 排序
             critic_values = self.predict_critic(naction, rgbd_embed)
@@ -739,6 +751,14 @@ class BridgeDPNet(PreTrainedModel):
                 (sample_num * B, self.predict_size, 3),
                 self._device,
             )
+            # 方案C：方向扰动（NoGoal 模式同步应用）
+            angles = torch.linspace(0, 2 * math.pi, sample_num, device=self._device)
+            dir_bias = torch.stack(
+                [torch.cos(angles), torch.sin(angles), torch.zeros(sample_num, device=self._device)], dim=-1
+            )  # (S, 3)
+            dir_bias = dir_bias.unsqueeze(1).expand(-1, self.predict_size, -1)
+            dir_bias = dir_bias.repeat(B, 1, 1) if B > 1 else dir_bias
+            naction = naction + dir_bias * 0.3
 
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
             goal_expanded = zero_goal.unsqueeze(1).expand(-1, self.predict_size, -1).repeat(sample_num, 1, 1)
@@ -753,6 +773,7 @@ class BridgeDPNet(PreTrainedModel):
                     x0_pred, naction, k,
                     goal_expanded, theta_expanded,
                 )
+                naction[:, 0, :] = 0.0  # 每步保持起点为归一化原点
 
             critic_values = self.predict_critic(naction, rgbd_embed)
 

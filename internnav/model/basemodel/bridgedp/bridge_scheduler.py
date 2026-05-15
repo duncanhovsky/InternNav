@@ -65,7 +65,7 @@ class BridgeScheduler:
         self,
         num_train_timesteps: int = 100,
         sigma_base: float = 1.0,
-        sigma_goal: float = 0.1,
+        sigma_goal: float = 0.5,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
@@ -250,12 +250,14 @@ class BridgeScheduler:
         timestep: torch.Tensor,
         goal: torch.Tensor,
         theta_g: torch.Tensor,
+        eta: float = 0.5,
     ) -> torch.Tensor:
-        """布朗桥 DDIM 确定性反向去噪一步。
+        """布朗桥 DDIM + 随机扰动反向去噪一步。
 
-        x_{t-Δt} = (t-Δt)/t · x_t + Δt/t · x̂_0
+        x_{t-Δt} = (t-Δt)/t · x_t + Δt/t · x̂_0 + η · σ(t_prev; θ_g) · ε
 
-        保留 x_t，轨迹形状灵活（可绕障），起终点约束由训练时的桥端点隐式保证。
+        Args:
+            eta: 随机扰动强度。0 为纯 DDIM 确定性；1 为完整随机扰动。
         """
         t_norm = self._normalized_time(timestep).float()
         dt = 1.0 / self.num_train_timesteps
@@ -271,7 +273,15 @@ class BridgeScheduler:
             coeff_xt = coeff_xt.unsqueeze(-1)
             coeff_x0 = coeff_x0.unsqueeze(-1)
 
-        return coeff_xt * x_t + coeff_x0 * x0_pred
+        x_det = coeff_xt * x_t + coeff_x0 * x0_pred
+
+        if eta > 0.0:
+            # theta_g: (B*S,) → 取第一个元素用于方差估算（各样本共享同一目标方向）
+            theta_scalar = theta_g.view(-1)[0:1].view(1, 1, 1)
+            sigma = self.std(t_prev.view(1, 1, 1), theta_scalar) * eta
+            x_det = x_det + sigma * torch.randn_like(x_det)
+
+        return x_det
 
     # ------------------------------------------------------------------
     # 推理初始噪声

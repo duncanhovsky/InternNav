@@ -134,7 +134,9 @@ class BridgeDPTrainer(BaseTrainer):
 
         # ── 动作分支损失：SNR 加权 + 有效步掩码 MSE ────────────────────
         # valid_mask: (B, T)，0 表示静止填充步，不参与损失
-        valid_mask = inputs_on_device["batch_valid_mask"]  # (B, T)
+        # 位置0是已知起点（干净锚点），不参与预测损失
+        valid_mask = inputs_on_device["batch_valid_mask"].clone()  # (B, T)
+        valid_mask[:, 0] = 0.0  # 起点是已知量，不预测
         ng_pointwise = (x0_pred_ng - x0_target_ng).square().mean(dim=-1)   # (B, T)
         mg_pointwise = (x0_pred_mg - x0_target_mg).square().mean(dim=-1)   # (B, T)
         snr_w = snr_weight.squeeze(-1)  # (B, T) or (B, 1) → broadcast
@@ -148,10 +150,7 @@ class BridgeDPTrainer(BaseTrainer):
         x0_pred_avg = 0.5 * x0_pred_ng + 0.5 * x0_pred_mg
         x0_target_avg = 0.5 * x0_target_ng + 0.5 * x0_target_mg
 
-        # 1. 起点约束：预测轨迹第一个点与真值第一个点对齐
-        start_loss = (x0_pred_avg[:, 0, :2] - x0_target_avg[:, 0, :2]).square().mean()
-
-        # 2. 终点约束：与真值末端对齐（比 batch_pg 更稳定）
+        # 1. 终点约束：与真值末端对齐（比 batch_pg 更稳定）
         terminal_loss = (x0_pred_avg[:, -1, :2] - x0_target_avg[:, -1, :2]).square().mean()
 
         # 3. 动量惯性惩罚：线加速度 + 角加速度，约束轨迹符合有质量物体的自然运动
@@ -199,7 +198,6 @@ class BridgeDPTrainer(BaseTrainer):
         loss = (0.8  * action_loss
                 + 0.2  * critic_loss
                 + 0.5  * aux_loss
-                + 0.3  * start_loss           # 起点对齐
                 + 0.2  * terminal_loss        # 终点对齐
                 + 0.1  * momentum_loss        # 动量惯性（线加速度 + 角加速度）
                 + 0.05 * global_forward_loss  # 全局前进（软约束）
@@ -217,7 +215,7 @@ class BridgeDPTrainer(BaseTrainer):
             if self._log_step_count % 50 == 1:
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f}, "
-                      f"start={start_loss.item():.4f}, term={terminal_loss.item():.4f}, "
+                      f"term={terminal_loss.item():.4f}, "
                       f"momentum={momentum_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
                       f"path_ratio={path_ratio_loss.item():.4f}, "
                       f"valid_frac={valid_mask.mean().item():.2f}, "
@@ -235,7 +233,6 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/mg_action":    mg_action_loss.item(),
                 "loss/critic":       critic_loss.item(),
                 "loss/aux":          aux_loss.item(),
-                "loss/start":        start_loss.item(),
                 "loss/terminal":     terminal_loss.item(),
                 "loss/momentum":     momentum_loss.item(),
                 "loss/global_fwd":   global_forward_loss.item(),
@@ -269,7 +266,6 @@ class BridgeDPTrainer(BaseTrainer):
             'mg_action_loss': mg_action_loss,
             'aux_loss': aux_loss,
             'critic_loss': critic_loss,
-            'start_loss': start_loss,
             'terminal_loss': terminal_loss,
             'momentum_loss': momentum_loss,
             'global_forward_loss': global_forward_loss,
