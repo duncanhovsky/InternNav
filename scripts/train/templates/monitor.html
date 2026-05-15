@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bridge-DP 训练监控</title>
+<title>训练监控</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e0e0e0; }
@@ -15,17 +15,19 @@ header h1 { font-size: 1.15rem; color: #7c9ef8; display: flex; align-items: cent
 #status-dot.stopped { background: #f44336; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 #header-right { display: flex; align-items: center; gap: 16px; font-size: .78rem; color: #888; }
-
+#exp-controls { display: flex; align-items: center; gap: 8px; }
+select, button { background: #0f1117; color: #e0e0e0; border: 1px solid #2d3148; border-radius: 6px;
+  padding: 5px 8px; font-size: .74rem; cursor: pointer; }
+button:hover { border-color: #3d4168; }
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 16px 20px; }
 @media (max-width: 1100px) { .grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
-
-.card { background: #1a1d2e; border-radius: 10px; padding: 16px; border: 1px solid #2d3148;
-  transition: border-color .3s; }
+.card { background: #1a1d2e; border-radius: 10px; padding: 16px; border: 1px solid #2d3148; transition: border-color .3s; }
 .card:hover { border-color: #3d4168; }
 .card h2 { font-size: .78rem; color: #7c9ef8; text-transform: uppercase; letter-spacing: .08em;
   margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
-
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.card-header h2 { margin-bottom: 0; }
 .metric { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .metric-label { font-size: .76rem; color: #999; }
 .metric-value { font-size: .82rem; font-weight: 600; color: #e0e0e0; }
@@ -38,42 +40,44 @@ header h1 { font-size: 1.15rem; color: #7c9ef8; display: flex; align-items: cent
 .bar.progress { background: linear-gradient(90deg, #4ade80, #22c55e); }
 .bar.power    { background: linear-gradient(90deg, #fb923c, #ea580c); }
 .bar.disk     { background: linear-gradient(90deg, #818cf8, #6366f1); }
-
 .big-num { font-size: 1.8rem; font-weight: 700; color: #7c9ef8; line-height: 1.2; }
-.unit { font-size: .7rem; color: #666; margin-left: 2px; }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .68rem; font-weight: 600; }
 .tag.green { background: #064e3b; color: #34d399; }
 .tag.red   { background: #450a0a; color: #f87171; }
 .tag.blue  { background: #1e3a5f; color: #7c9ef8; }
 .tag.orange { background: #431407; color: #fb923c; }
-
 .log-box { background: #0f1117; border-radius: 6px; padding: 10px; height: 200px;
   overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: .7rem;
   color: #9ca3af; border: 1px solid #2d3148; line-height: 1.6; }
 .log-box p { margin-bottom: 1px; white-space: pre-wrap; word-break: break-all; }
 .log-box p.warn { color: #fbbf24; }
 .log-box p.err  { color: #f87171; }
-
 .proc-row { display: flex; justify-content: space-between; align-items: center; font-size: .75rem;
   padding: 5px 0; border-bottom: 1px solid #1f2237; }
 .proc-row:last-child { border-bottom: none; }
-
 .section-full { grid-column: 1 / -1; }
 .section-2col { grid-column: span 2; }
-
 .cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
 .cfg-item { font-size: .74rem; padding: 3px 0; display: flex; justify-content: space-between; }
 .cfg-key { color: #888; }
 .cfg-val { color: #e0e0e0; font-weight: 500; font-family: monospace; }
-
-canvas { width: 100% !important; height: 160px !important; }
+canvas.chart { width: 100% !important; height: 180px !important; }
+.ctrl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctrl-row label { font-size: .72rem; color: #888; }
+#traj-canvas { border: 1px solid #2d3148; border-radius: 6px; background: #0f1117; }
+.legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+.traj-legend { display: flex; gap: 16px; font-size: .72rem; color: #aaa; margin-top: 8px; flex-wrap: wrap; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 <header>
-  <h1>🚀 Bridge-DP 训练监控</h1>
+  <h1>🚀 训练监控</h1>
   <div id="header-right">
+    <div id="exp-controls">
+      <select id="exp-select"></select>
+      <button id="exp-refresh" type="button">刷新实验</button>
+    </div>
     <span id="status-dot"></span>
     <span id="status-text">检测中...</span>
     <span id="last-update"></span>
@@ -81,167 +85,370 @@ canvas { width: 100% !important; height: 160px !important; }
 </header>
 
 <div class="grid">
-  <!-- GPU -->
-  <div class="card">
-    <h2>🎮 GPU 状态</h2>
-    <div id="gpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
-  </div>
+  <div class="card"><h2>🎮 GPU 状态</h2><div id="gpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div></div>
+  <div class="card"><h2>💻 系统资源</h2><div id="cpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div></div>
+  <div class="card"><h2>📈 训练进度</h2><div id="progress-content"><p style="color:#666;font-size:.78rem">加载中...</p></div></div>
 
-  <!-- CPU & 内存 -->
-  <div class="card">
-    <h2>💻 系统资源</h2>
-    <div id="cpu-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
-  </div>
-
-  <!-- 训练进度 -->
-  <div class="card">
-    <h2>📈 训练进度</h2>
-    <div id="progress-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
-  </div>
-
-  <!-- Loss 图表 -->
+  <!-- Loss 曲线（多子项 + Epoch 切换 + EMA 平滑） -->
   <div class="card section-2col">
-    <h2>📉 Loss 曲线</h2>
-    <canvas id="lossChart"></canvas>
-    <div id="loss-no-data" style="display:none;color:#666;font-size:.78rem;text-align:center;padding:40px 0">
-      暂无 Loss 数据（等待 TensorBoard 事件写入）</div>
+    <div class="card-header">
+      <h2>📉 Loss 曲线（子项细化）</h2>
+      <div class="ctrl-row">
+        <label>Epoch:</label>
+        <select id="epoch-select"><option value="all">全部</option></select>
+        <label>平滑:</label>
+        <input type="range" id="smooth-slider" min="0" max="0.99" step="0.01" value="0" style="width:70px">
+        <span id="smooth-val" style="font-size:.72rem;color:#888">0</span>
+        <button id="loss-refresh" type="button">刷新</button>
+      </div>
+    </div>
+    <canvas id="lossChart" class="chart"></canvas>
+    <div id="loss-no-data" style="display:none;color:#666;font-size:.78rem;text-align:center;padding:40px 0">暂无 Loss 数据</div>
   </div>
 
-  <!-- 训练配置 -->
-  <div class="card">
-    <h2>⚙️ 训练配置</h2>
-    <div id="config-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
-  </div>
+  <div class="card"><h2>⚙️ 训练配置</h2><div id="config-content"><p style="color:#666;font-size:.78rem">加载中...</p></div></div>
 
-  <!-- 训练进程 -->
+  <!-- 轨迹可视化 -->
   <div class="card section-2col">
-    <h2>🔧 训练进程 &amp; GPU 进程</h2>
+    <div class="card-header">
+      <h2>🗺️ 轨迹可视化</h2>
+      <div class="ctrl-row">
+        <button id="batch-prev" type="button">◀ 上一Batch</button>
+        <span id="batch-label" style="font-size:.72rem;color:#888;min-width:120px;text-align:center">Batch --</span>
+        <button id="batch-next" type="button">下一Batch ▶</button>
+        <span style="color:#444">|</span>
+        <button id="sample-prev" type="button">◀ 上一样本</button>
+        <span id="sample-label" style="font-size:.72rem;color:#888;min-width:80px;text-align:center">样本 --/--</span>
+        <button id="sample-next" type="button">下一样本 ▶</button>
+        <button id="traj-refresh" type="button">刷新</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+      <canvas id="traj-canvas" width="420" height="320"></canvas>
+      <div>
+        <div class="traj-legend">
+          <span><span class="legend-dot" style="background:#555;border:1px dashed #888"></span>先验轨迹</span>
+          <span><span class="legend-dot" style="background:#4ade80"></span>真值轨迹</span>
+          <span><span class="legend-dot" style="background:#7c9ef8"></span>预测轨迹</span>
+        </div>
+        <div id="traj-meta" style="font-size:.72rem;color:#888;margin-top:12px;line-height:1.8"></div>
+      </div>
+    </div>
+    <div id="traj-no-data" style="display:none;color:#666;font-size:.78rem;text-align:center;padding:30px 0">暂无轨迹数据（等待训练写入）</div>
+  </div>
+
+  <div class="card section-2col">
+    <h2>🔧 训练进程 & GPU 进程</h2>
     <div id="proc-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
   </div>
-
-  <!-- 磁盘 -->
-  <div class="card">
-    <h2>💾 磁盘</h2>
-    <div id="disk-content"><p style="color:#666;font-size:.78rem">加载中...</p></div>
-  </div>
-
-  <!-- 训练日志 -->
-  <div class="card section-full">
-    <h2>📋 训练日志</h2>
-    <div class="log-box" id="log-content"></div>
-  </div>
+  <div class="card"><h2>💾 磁盘</h2><div id="disk-content"><p style="color:#666;font-size:.78rem">加载中...</p></div></div>
+  <div class="card section-full"><h2>📋 训练日志</h2><div class="log-box" id="log-content"></div></div>
 </div>
 
 <script>
-// 格式化
+// ── 工具函数 ──
 function fmt(v, d=1) { return typeof v === 'number' ? v.toFixed(d) : (v ?? '--'); }
 function pct(a, b) { return b > 0 ? (a / b * 100).toFixed(1) : '0'; }
 
-// GPU History for mini sparklines
-const gpuUtilHistory = [];
-const gpuMemHistory = [];
-const MAX_HIST = 60;
+// EMA 平滑
+function emaSmooth(data, alpha) {
+  if (!alpha || alpha <= 0 || data.length === 0) return data;
+  const out = [data[0]];
+  for (let i = 1; i < data.length; i++) {
+    out.push(alpha * out[i-1] + (1 - alpha) * data[i]);
+  }
+  return out;
+}
 
-// Loss Chart
+// ── 全局状态 ──
 let lossChart = null;
+let currentExp = 'bridgedp_train';
+let currentEpoch = 'all';
+let smoothAlpha = 0;
+
+// Loss 颜色映射
+const LOSS_COLORS = {
+  'loss/total':      '#7c9ef8',
+  'loss/action':     '#4ade80',
+  'loss/ng_action':  '#34d399',
+  'loss/mg_action':  '#a78bfa',
+  'loss/critic':     '#fb923c',
+  'loss/aux':        '#f87171',
+  'loss/prior_gt_mse': '#fbbf24',
+};
+
+// ── Loss 图表初始化 ──
 function initLossChart() {
   const ctx = document.getElementById('lossChart').getContext('2d');
   lossChart = new Chart(ctx, {
     type: 'line',
-    data: { labels: [], datasets: [{
-      label: 'Loss', data: [], borderColor: '#7c9ef8', backgroundColor: 'rgba(124,158,248,0.08)',
-      fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5
-    }]},
+    data: { labels: [], datasets: [] },
     options: {
       responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { display: true, grid: { color: '#1f2237' }, ticks: { color: '#666', font: { size: 10 }, maxTicksLimit: 8 } },
+        x: { display: true, grid: { color: '#1f2237' }, ticks: { color: '#666', font: { size: 10 }, maxTicksLimit: 10 } },
         y: { display: true, grid: { color: '#1f2237' }, ticks: { color: '#666', font: { size: 10 } } }
       },
-      plugins: { legend: { display: false } },
-      animation: { duration: 300 }
+      plugins: {
+        legend: { display: true, labels: { color: '#aaa', font: { size: 10 }, usePointStyle: true, pointStyle: 'line' } },
+        tooltip: { backgroundColor: '#1a1d2e', titleColor: '#7c9ef8', bodyColor: '#e0e0e0', borderColor: '#2d3148', borderWidth: 1 }
+      },
+      animation: { duration: 200 }
     }
   });
 }
 
+// ── 加载并渲染 Loss 详情 ──
+async function refreshLossDetail() {
+  try {
+    const r = await fetch(`/api/loss_detail?exp=${encodeURIComponent(currentExp)}&epoch=${currentEpoch}`);
+    const d = await r.json();
+    if (!d.available || !d.history || d.history.length === 0) {
+      document.getElementById('lossChart').style.display = 'none';
+      document.getElementById('loss-no-data').style.display = 'block';
+      return;
+    }
+    document.getElementById('lossChart').style.display = 'block';
+    document.getElementById('loss-no-data').style.display = 'none';
+
+    // 更新 epoch 选择器
+    const epochSelect = document.getElementById('epoch-select');
+    const prevEpoch = epochSelect.value;
+    epochSelect.innerHTML = '<option value="all">全部</option>';
+    (d.epochs || []).forEach(ep => {
+      const opt = document.createElement('option');
+      opt.value = ep; opt.textContent = `Epoch ${ep}`;
+      epochSelect.appendChild(opt);
+    });
+    epochSelect.value = (d.epochs || []).includes(prevEpoch) ? prevEpoch : 'all';
+
+    // 检测可用的 loss key
+    const allKeys = new Set();
+    d.history.forEach(rec => { Object.keys(rec).forEach(k => { if (k.startsWith('loss/')) allKeys.add(k); }); });
+    const lossKeys = Array.from(allKeys).sort();
+
+    // 构建 datasets
+    const labels = d.history.map(rec => rec.step);
+    const datasets = lossKeys.map(key => {
+      const rawData = d.history.map(rec => rec[key] ?? null);
+      const smoothed = emaSmooth(rawData.map(v => v ?? 0), smoothAlpha);
+      return {
+        label: key.replace('loss/', ''),
+        data: smoothed,
+        borderColor: LOSS_COLORS[key] || '#888',
+        backgroundColor: 'transparent',
+        borderWidth: key === 'loss/total' ? 2.5 : 1.5,
+        pointRadius: 0,
+        tension: 0.3,
+        hidden: key === 'loss/prior_gt_mse',
+      };
+    });
+
+    lossChart.data.labels = labels;
+    lossChart.data.datasets = datasets;
+    lossChart.update('none');
+  } catch(e) {
+    console.error('Loss detail fetch failed:', e);
+  }
+}
+
+// ── 轨迹可视化（翻页） ──
+let batchList = [];
+let curBatchPos = -1;
+let curSampleIdx = 0;
+
+async function loadBatchList() {
+  try {
+    const r = await fetch(`/api/traj_batches?exp=${encodeURIComponent(currentExp)}`);
+    const d = await r.json();
+    batchList = d.batches || [];
+    if (curBatchPos < 0 && batchList.length > 0) curBatchPos = batchList.length - 1;
+  } catch(e) { console.error('traj_batches fetch failed:', e); }
+}
+
+async function loadCurrentSample() {
+  const canvas = document.getElementById('traj-canvas');
+  const noData = document.getElementById('traj-no-data');
+  const meta = document.getElementById('traj-meta');
+  if (batchList.length === 0) {
+    canvas.style.display = 'none'; noData.style.display = 'block'; meta.innerHTML = '';
+    document.getElementById('batch-label').textContent = 'Batch --';
+    document.getElementById('sample-label').textContent = '样本 --/--';
+    return;
+  }
+  try {
+    const b = batchList[curBatchPos];
+    const r = await fetch(
+      `/api/traj_batch_detail?exp=${encodeURIComponent(currentExp)}&batch_idx=${b.batch_idx}&sample_idx=${curSampleIdx}`
+    );
+    const d = await r.json();
+    if (!d.available) { canvas.style.display = 'none'; noData.style.display = 'block'; return; }
+    canvas.style.display = 'block'; noData.style.display = 'none';
+    document.getElementById('batch-label').textContent = `Batch ${b.batch_idx}  Step ${b.step}`;
+    document.getElementById('sample-label').textContent = `样本 ${d.sample_idx + 1} / ${d.n_samples}`;
+    drawTrajectory(canvas, d.gt_traj, d.pred_traj, d.prior_traj);
+    if (d.gt_traj && d.pred_traj && d.gt_traj.length === d.pred_traj.length) {
+      let mse = 0, maxErr = 0;
+      for (let i = 0; i < d.gt_traj.length; i++) {
+        const gt = d.gt_traj[i], pr = d.pred_traj[i];
+        if (Array.isArray(gt) && Array.isArray(pr)) {
+          let se = (gt[0]-pr[0])**2 + (gt[1]-pr[1])**2;
+          mse += se; maxErr = Math.max(maxErr, Math.sqrt(se));
+        }
+      }
+      mse /= d.gt_traj.length;
+      meta.innerHTML = `序列长度: ${d.gt_traj.length}<br>XY MSE: ${mse.toFixed(6)}<br>最大点误差: ${maxErr.toFixed(4)}`;
+    }
+  } catch(e) { console.error('traj_batch_detail fetch failed:', e); }
+}
+
+async function refreshTraj() {
+  await loadBatchList();
+  await loadCurrentSample();
+}
+
+function drawTrajectory(canvas, gtTraj, predTraj, priorTraj) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // 提取 x,y 坐标（取前两维）
+  const toXY = (traj) => {
+    if (!traj || traj.length === 0) return [];
+    return traj.map(p => Array.isArray(p) ? [p[0], p[1]] : [p, 0]);
+  };
+  const gt = toXY(gtTraj), pred = toXY(predTraj), prior = toXY(priorTraj);
+  const all = [...gt, ...pred, ...prior];
+  if (all.length === 0) return;
+
+  // 计算边界
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  all.forEach(([x,y]) => { minX = Math.min(minX,x); maxX = Math.max(maxX,x); minY = Math.min(minY,y); maxY = Math.max(maxY,y); });
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const pad = 30;
+
+  const tx = (x) => pad + (x - minX) / rangeX * (W - 2*pad);
+  const ty = (y) => H - pad - (y - minY) / rangeY * (H - 2*pad);
+
+  // 绘制网格
+  ctx.strokeStyle = '#1f2237'; ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const gx = pad + i * (W-2*pad)/4, gy = pad + i * (H-2*pad)/4;
+    ctx.beginPath(); ctx.moveTo(gx, pad); ctx.lineTo(gx, H-pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W-pad, gy); ctx.stroke();
+  }
+
+  // 绘制先验轨迹（虚线灰色）
+  if (prior.length > 1) {
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
+    ctx.beginPath();
+    prior.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  // 绘制真值轨迹（绿色实线）
+  if (gt.length > 1) {
+    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    gt.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
+    ctx.stroke();
+    // 起终点
+    ctx.fillStyle = '#4ade80'; ctx.beginPath(); ctx.arc(tx(gt[0][0]),ty(gt[0][1]),4,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(tx(gt[gt.length-1][0]),ty(gt[gt.length-1][1]),5,0,Math.PI*2); ctx.fill();
+  }
+
+  // 绘制预测轨迹（蓝色实线）
+  if (pred.length > 1) {
+    ctx.strokeStyle = '#7c9ef8'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    pred.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
+    ctx.stroke();
+    ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
+  }
+
+  // 轴标签
+  ctx.fillStyle = '#666'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('x', W/2, H-5);
+  ctx.save(); ctx.translate(10, H/2); ctx.rotate(-Math.PI/2); ctx.fillText('y', 0, 0); ctx.restore();
+}
+
+// ── 原有渲染函数 ──
 function renderGPU(gpus) {
   if (!gpus || gpus.length === 0) return '<p style="color:#666;font-size:.78rem">未检测到 GPU</p>';
   return gpus.map(g => {
-    if (g.error) return `<p style="color:#f87171">${g.error}</p>`;
-    const memPct = pct(g.mem_used, g.mem_total);
-    const powPct = pct(g.power, g.power_limit);
-    return `
-      <div style="margin-bottom:10px">
-        <div class="metric"><span class="metric-label">${g.name}</span>
-          <span class="tag ${g.temp>80?'red':g.temp>60?'orange':'green'}">${fmt(g.temp,0)}°C</span></div>
-        <div class="metric"><span class="metric-label">GPU 利用率</span>
-          <span class="metric-value">${fmt(g.util,0)}%</span></div>
-        <div class="bar-wrap"><div class="bar gpu-util" style="width:${g.util}%"></div></div>
-        <div class="metric"><span class="metric-label">显存</span>
-          <span class="metric-value">${fmt(g.mem_used,0)} / ${fmt(g.mem_total,0)} MiB (${memPct}%)</span></div>
-        <div class="bar-wrap"><div class="bar gpu-mem" style="width:${memPct}%"></div></div>
-        <div class="metric"><span class="metric-label">功耗</span>
-          <span class="metric-value">${fmt(g.power,0)}W / ${fmt(g.power_limit,0)}W</span></div>
-        <div class="bar-wrap"><div class="bar power" style="width:${powPct}%"></div></div>
-        <div class="metric"><span class="metric-label">风扇</span>
-          <span class="metric-value">${fmt(g.fan,0)}%</span></div>
-      </div>`;
+    if (g.error) return '<p style="color:#f87171">' + g.error + '</p>';
+    const memPct = pct(g.mem_used, g.mem_total), powPct = pct(g.power, g.power_limit);
+    return '<div style="margin-bottom:10px">' +
+      '<div class="metric"><span class="metric-label">' + g.name + '</span>' +
+      '<span class="tag ' + (g.temp>80?'red':g.temp>60?'orange':'green') + '">' + fmt(g.temp,0) + '°C</span></div>' +
+      '<div class="metric"><span class="metric-label">GPU 利用率</span><span class="metric-value">' + fmt(g.util,0) + '%</span></div>' +
+      '<div class="bar-wrap"><div class="bar gpu-util" style="width:' + g.util + '%"></div></div>' +
+      '<div class="metric"><span class="metric-label">显存</span><span class="metric-value">' + fmt(g.mem_used,0) + ' / ' + fmt(g.mem_total,0) + ' MiB (' + memPct + '%)</span></div>' +
+      '<div class="bar-wrap"><div class="bar gpu-mem" style="width:' + memPct + '%"></div></div>' +
+      '<div class="metric"><span class="metric-label">功耗</span><span class="metric-value">' + fmt(g.power,0) + 'W / ' + fmt(g.power_limit,0) + 'W</span></div>' +
+      '<div class="bar-wrap"><div class="bar power" style="width:' + powPct + '%"></div></div>' +
+      '<div class="metric"><span class="metric-label">风扇</span><span class="metric-value">' + fmt(g.fan,0) + '%</span></div></div>';
   }).join('');
 }
 
 function renderCPU(cpu, mem) {
-  return `
-    <div class="metric"><span class="metric-label">CPU 使用率</span>
-      <span class="metric-value">${fmt(cpu.percent,1)}%</span></div>
-    <div class="bar-wrap"><div class="bar cpu" style="width:${cpu.percent}%"></div></div>
-    <div class="metric"><span class="metric-label">核心 / 频率</span>
-      <span class="metric-value">${cpu.count} 核 @ ${fmt(cpu.freq/1000,2)} GHz</span></div>
-    <div style="height:8px"></div>
-    <div class="metric"><span class="metric-label">内存</span>
-      <span class="metric-value">${fmt(mem.used,1)} / ${fmt(mem.total,1)} GB (${fmt(mem.percent,1)}%)</span></div>
-    <div class="bar-wrap"><div class="bar ram" style="width:${mem.percent}%"></div></div>`;
+  return '<div class="metric"><span class="metric-label">CPU 使用率</span><span class="metric-value">' + fmt(cpu.percent,1) + '%</span></div>' +
+    '<div class="bar-wrap"><div class="bar cpu" style="width:' + cpu.percent + '%"></div></div>' +
+    '<div class="metric"><span class="metric-label">核心 / 频率</span><span class="metric-value">' + cpu.count + ' 核 @ ' + fmt(cpu.freq/1000,2) + ' GHz</span></div>' +
+    '<div style="height:8px"></div>' +
+    '<div class="metric"><span class="metric-label">内存</span><span class="metric-value">' + fmt(mem.used,1) + ' / ' + fmt(mem.total,1) + ' GB (' + fmt(mem.percent,1) + '%)</span></div>' +
+    '<div class="bar-wrap"><div class="bar ram" style="width:' + mem.percent + '%"></div></div>';
 }
 
 function renderProgress(t) {
-  if (!t || t.status === 'not_started')
-    return `<p style="color:#666;font-size:.78rem">${t?.message || '训练未开始'}</p>`;
+  if (!t || t.status === 'not_started') return '<p style="color:#666;font-size:.78rem">' + (t&&t.message || '训练未开始') + '</p>';
   const s = t.trainer_state;
-  let html = `<div class="metric"><span class="metric-label">状态</span>
-    <span class="tag ${t.status==='running'?'green':'red'}">${t.status==='running'?'● 运行中':'■ 已停止'}</span></div>`;
-  html += `<div class="metric"><span class="metric-label">Checkpoints</span>
-    <span class="metric-value">${t.checkpoints} 个</span></div>`;
-  if (t.latest_checkpoint)
-    html += `<div class="metric"><span class="metric-label">最新 Ckpt</span>
-      <span class="tag blue">${t.latest_checkpoint}</span></div>`;
-  if (s) {
+  let html = '<div class="metric"><span class="metric-label">状态</span>' +
+    '<span class="tag ' + (t.status==='running'?'green':'red') + '">' + (t.status==='running'?'● 运行中':'■ 已停止') + '</span></div>' +
+    '<div class="metric"><span class="metric-label">Checkpoints</span><span class="metric-value">' + t.checkpoints + ' 个</span></div>';
+  if (t.latest_checkpoint) html += '<div class="metric"><span class="metric-label">最新 Ckpt</span><span class="tag blue">' + t.latest_checkpoint + '</span></div>';
+
+  // 从 detailed 状态获取详细进度
+  const dt = t.detailed;
+  if (dt && dt.phase === 'training') {
+    const stepPct = dt.progress_pct || 0;
+    html += '<div style="height:8px"></div>' +
+      '<div class="metric"><span class="metric-label">步数</span><span class="metric-value">' + dt.global_step + ' / ' + dt.max_steps + '</span></div>' +
+      '<div class="bar-wrap"><div class="bar progress" style="width:' + stepPct + '%"></div></div>' +
+      '<div class="metric"><span class="metric-label">Epoch</span><span class="metric-value">' + fmt(dt.epoch,2) + ' / ' + dt.total_epochs + '</span></div>' +
+      '<div class="metric"><span class="metric-label">ETA</span><span class="metric-value">' + (dt.eta_human || '--') + '</span></div>' +
+      '<div class="metric"><span class="metric-label">吞吐</span><span class="metric-value">' + (dt.samples_per_second || '--') + ' samples/s</span></div>';
+    if (dt.losses && dt.losses['loss/total'] !== undefined) {
+      html += '<div style="height:6px"></div><div class="metric"><span class="metric-label">当前 Total Loss</span><span class="big-num">' + fmt(dt.losses['loss/total'],4) + '</span></div>';
+    } else if (dt.losses && dt.losses.loss !== undefined) {
+      html += '<div style="height:6px"></div><div class="metric"><span class="metric-label">当前 Loss</span><span class="big-num">' + fmt(dt.losses.loss,4) + '</span></div>';
+    }
+    if (dt.losses && dt.losses.learning_rate !== undefined)
+      html += '<div class="metric"><span class="metric-label">学习率</span><span class="metric-value">' + dt.losses.learning_rate.toExponential(3) + '</span></div>';
+    if (dt.losses && dt.losses['debug/grad_norm'] !== undefined)
+      html += '<div class="metric"><span class="metric-label">梯度范数</span><span class="metric-value">' + fmt(dt.losses['debug/grad_norm'],4) + '</span></div>';
+  } else if (s) {
     const totalSteps = s.max_steps || 1;
     const stepPct = (s.global_step / totalSteps * 100).toFixed(1);
-    html += `<div style="height:8px"></div>
-      <div class="metric"><span class="metric-label">步数</span>
-        <span class="metric-value">${s.global_step} / ${totalSteps}</span></div>
-      <div class="bar-wrap"><div class="bar progress" style="width:${stepPct}%"></div></div>
-      <div class="metric"><span class="metric-label">Epoch</span>
-        <span class="metric-value">${fmt(s.epoch, 2)}</span></div>`;
+    html += '<div style="height:8px"></div>' +
+      '<div class="metric"><span class="metric-label">步数</span><span class="metric-value">' + s.global_step + ' / ' + totalSteps + '</span></div>' +
+      '<div class="bar-wrap"><div class="bar progress" style="width:' + stepPct + '%"></div></div>' +
+      '<div class="metric"><span class="metric-label">Epoch</span><span class="metric-value">' + fmt(s.epoch,2) + '</span></div>';
     if (s.log_history && s.log_history.length > 0) {
       const last = s.log_history[s.log_history.length - 1];
-      if (last.loss !== undefined)
-        html += `<div style="height:6px"></div>
-          <div class="metric"><span class="metric-label">最新 Loss</span>
-            <span class="big-num">${fmt(last.loss,4)}</span></div>`;
-      if (last.learning_rate !== undefined)
-        html += `<div class="metric"><span class="metric-label">学习率</span>
-          <span class="metric-value">${last.learning_rate.toExponential(3)}</span></div>`;
+      if (last.loss !== undefined) html += '<div style="height:6px"></div><div class="metric"><span class="metric-label">最新 Loss</span><span class="big-num">' + fmt(last.loss,4) + '</span></div>';
+      if (last.learning_rate !== undefined) html += '<div class="metric"><span class="metric-label">学习率</span><span class="metric-value">' + last.learning_rate.toExponential(3) + '</span></div>';
     }
   }
   return html;
 }
 
 function renderConfig(cfg) {
-  if (!cfg || Object.keys(cfg).length === 0)
-    return '<p style="color:#666;font-size:.78rem">未加载配置</p>';
+  if (!cfg || Object.keys(cfg).length === 0) return '<p style="color:#666;font-size:.78rem">未加载配置</p>';
   let html = '<div class="cfg-grid">';
   for (const [k, v] of Object.entries(cfg)) {
-    html += `<div class="cfg-item"><span class="cfg-key">${k}</span><span class="cfg-val">${v}</span></div>`;
+    html += '<div class="cfg-item"><span class="cfg-key">' + k + '</span><span class="cfg-val">' + v + '</span></div>';
   }
   return html + '</div>';
 }
@@ -253,78 +460,40 @@ function renderProcs(procs, gpuProcs) {
   } else {
     html += '<div style="margin-bottom:10px;font-size:.72rem;color:#666">训练进程</div>';
     procs.forEach(p => {
-      html += `<div class="proc-row">
-        <span style="color:#7c9ef8;min-width:65px">PID ${p.pid}</span>
-        <span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">${p.cmdline}</span>
-        <span style="white-space:nowrap">CPU ${fmt(p.cpu)}% · RAM ${fmt(p.mem,2)}G · ⏱ ${p.uptime}</span>
-      </div>`;
+      html += '<div class="proc-row"><span style="color:#7c9ef8;min-width:65px">PID ' + p.pid + '</span>' +
+        '<span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">' + p.cmdline + '</span>' +
+        '<span style="white-space:nowrap">CPU ' + fmt(p.cpu) + '% · RAM ' + fmt(p.mem,2) + 'G · ⏱ ' + p.uptime + '</span></div>';
     });
   }
   if (gpuProcs && gpuProcs.length > 0) {
     html += '<div style="margin-top:10px;margin-bottom:6px;font-size:.72rem;color:#666">GPU 计算进程</div>';
     gpuProcs.forEach(p => {
-      html += `<div class="proc-row">
-        <span style="color:#34d399;min-width:65px">PID ${p.pid}</span>
-        <span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">${p.name}</span>
-        <span style="white-space:nowrap">GPU 显存: ${fmt(p.gpu_mem,0)} MiB</span>
-      </div>`;
+      html += '<div class="proc-row"><span style="color:#34d399;min-width:65px">PID ' + p.pid + '</span>' +
+        '<span style="color:#999;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 8px">' + p.name + '</span>' +
+        '<span style="white-space:nowrap">GPU 显存: ' + fmt(p.gpu_mem,0) + ' MiB</span></div>';
     });
   }
   return html;
 }
 
 function renderDisk(disk) {
-  return `
-    <div class="metric"><span class="metric-label">磁盘使用</span>
-      <span class="metric-value">${fmt(disk.used,1)} / ${fmt(disk.total,1)} GB</span></div>
-    <div class="bar-wrap"><div class="bar disk" style="width:${disk.percent}%"></div></div>
-    <div class="metric"><span class="metric-label">使用率</span>
-      <span class="metric-value">${fmt(disk.percent,1)}%</span></div>`;
+  return '<div class="metric"><span class="metric-label">磁盘使用</span><span class="metric-value">' + fmt(disk.used,1) + ' / ' + fmt(disk.total,1) + ' GB</span></div>' +
+    '<div class="bar-wrap"><div class="bar disk" style="width:' + disk.percent + '%"></div></div>' +
+    '<div class="metric"><span class="metric-label">使用率</span><span class="metric-value">' + fmt(disk.percent,1) + '%</span></div>';
 }
 
 function renderLog(lines) {
   if (!lines || lines.length === 0) return '<p style="color:#666">暂无日志</p>';
   return lines.map(l => {
-    const cls = /error|Error|ERROR|exception|Exception/.test(l) ? 'err'
-      : /warn|Warn|WARN|Warning/.test(l) ? 'warn' : '';
-    return `<p class="${cls}">${l.replace(/</g,'&lt;').replace(/>/g,'&gt;').trimEnd()}</p>`;
+    const cls = /error|Error|ERROR|exception|Exception/.test(l) ? 'err' : /warn|Warn|WARN|Warning/.test(l) ? 'warn' : '';
+    return '<p class="' + cls + '">' + l.replace(/</g,'<').replace(/>/g,'>').trimEnd() + '</p>';
   }).join('');
 }
 
-function updateLossChart(lossHistory, trainerState) {
-  if (!lossChart) return;
-  const noData = document.getElementById('loss-no-data');
-  const canvas = document.getElementById('lossChart');
-
-  // 优先使用 TensorBoard 数据
-  if (lossHistory && lossHistory.length > 0) {
-    canvas.style.display = 'block';
-    noData.style.display = 'none';
-    lossChart.data.labels = lossHistory.map(d => d.step);
-    lossChart.data.datasets[0].data = lossHistory.map(d => d.value);
-    lossChart.update('none');
-  } else if (trainerState && trainerState.log_history) {
-    // 回退到 trainer_state log_history
-    const pts = trainerState.log_history.filter(e => e.loss !== undefined);
-    if (pts.length > 0) {
-      canvas.style.display = 'block';
-      noData.style.display = 'none';
-      lossChart.data.labels = pts.map(d => d.step);
-      lossChart.data.datasets[0].data = pts.map(d => d.loss);
-      lossChart.update('none');
-    } else {
-      canvas.style.display = 'none';
-      noData.style.display = 'block';
-    }
-  } else {
-    canvas.style.display = 'none';
-    noData.style.display = 'block';
-  }
-}
-
+// ── 主刷新函数 ──
 async function refresh() {
   try {
-    const r = await fetch('/api/status');
+    const r = await fetch('/api/status?exp=' + encodeURIComponent(currentExp));
     const d = await r.json();
 
     document.getElementById('gpu-content').innerHTML = renderGPU(d.gpu);
@@ -336,10 +505,8 @@ async function refresh() {
 
     const logBox = document.getElementById('log-content');
     const atBottom = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
-    logBox.innerHTML = renderLog(d.training?.log_lines);
+    logBox.innerHTML = renderLog(d.training && d.training.log_lines);
     if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-
-    updateLossChart(d.training?.loss_history, d.training?.trainer_state);
 
     const running = d.processes && d.processes.length > 0;
     document.getElementById('status-dot').className = running ? 'running' : 'stopped';
@@ -350,9 +517,70 @@ async function refresh() {
   }
 }
 
+async function refreshExperiments() {
+  try {
+    const r = await fetch('/api/experiments');
+    const d = await r.json();
+    const list = d.experiments || [];
+    const select = document.getElementById('exp-select');
+    const previous = currentExp;
+    select.innerHTML = '';
+    list.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      select.appendChild(opt);
+    });
+    if (list.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = ''; opt.textContent = '未发现实验';
+      select.appendChild(opt);
+      currentExp = ''; return;
+    }
+    currentExp = list.includes(previous) ? previous : list[0];
+    select.value = currentExp;
+  } catch(e) {
+    document.getElementById('exp-select').innerHTML = '<option value="">加载失败</option>';
+  }
+}
+
+// ── 事件绑定 ──
+document.getElementById('exp-select').addEventListener('change', (e) => {
+  currentExp = e.target.value;
+  refresh(); refreshLossDetail(); refreshTraj();
+});
+document.getElementById('exp-refresh').addEventListener('click', async () => {
+  await refreshExperiments(); refresh(); refreshLossDetail(); refreshTraj();
+});
+document.getElementById('epoch-select').addEventListener('change', (e) => {
+  currentEpoch = e.target.value; refreshLossDetail();
+});
+document.getElementById('smooth-slider').addEventListener('input', (e) => {
+  smoothAlpha = parseFloat(e.target.value);
+  document.getElementById('smooth-val').textContent = smoothAlpha.toFixed(2);
+  refreshLossDetail();
+});
+document.getElementById('loss-refresh').addEventListener('click', () => refreshLossDetail());
+document.getElementById('batch-prev').addEventListener('click', async () => {
+  if (curBatchPos > 0) { curBatchPos--; curSampleIdx = 0; await loadCurrentSample(); }
+});
+document.getElementById('batch-next').addEventListener('click', async () => {
+  if (curBatchPos < batchList.length - 1) { curBatchPos++; curSampleIdx = 0; await loadCurrentSample(); }
+});
+document.getElementById('sample-prev').addEventListener('click', async () => {
+  if (curSampleIdx > 0) { curSampleIdx--; await loadCurrentSample(); }
+});
+document.getElementById('sample-next').addEventListener('click', async () => {
+  const b = batchList[curBatchPos];
+  if (b && curSampleIdx < b.n_samples - 1) { curSampleIdx++; await loadCurrentSample(); }
+});
+document.getElementById('traj-refresh').addEventListener('click', refreshTraj);
+
+// ── 启动 ──
 initLossChart();
-refresh();
+refreshExperiments().then(() => { refresh(); refreshLossDetail(); refreshTraj(); });
 setInterval(refresh, 3000);
+setInterval(refreshLossDetail, 5000);
+setInterval(refreshTraj, 10000);
 </script>
 </body>
 </html>

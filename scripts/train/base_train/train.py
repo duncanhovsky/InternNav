@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 
 if os.path.isdir('./third_party/diffusion-policy'):
     sys.path.append('./third_party/diffusion-policy')
@@ -218,19 +219,31 @@ class DetailedProgressCallback(TrainerCallback):
     每个 logging_step 写入一次，包含：
     - 样本级进度（已完成/总样本数）
     - GPU 显存细分（模型参数、优化器状态、激活值、缓冲区）
-    - 各项 Loss 分量
+    - 各项 Loss 分量（含子 loss 折线图数据）
     - 每步耗时、吞吐量
     - 数据集统计信息
+    - loss_history：全部 loss 历史（含子 loss），供前端绘制折线图
+    - loss_by_epoch：按 epoch 分桶的 loss 历史，支持 epoch 切换查看
     """
+
+    # loss_history 最大保留数据点数（防止文件过大）
+    MAX_LOSS_HISTORY = 5000
 
     def __init__(self, log_dir: str, dataset_size: int = 0, batch_size: int = 16):
         self.log_dir = log_dir
         self.status_file = os.path.join(log_dir, 'training_status.json')
+        self.loss_history_file = os.path.join(log_dir, 'loss_history.json')
         self.dataset_size = dataset_size
         self.batch_size = batch_size
         self.step_times = []
         self.start_time = time.time()
         self.last_step_time = time.time()
+        # loss 历史数据（列表，每个元素为 {step, epoch, loss/total, loss/action, ...}）
+        self.loss_history = []
+        # 按 epoch 分桶（key=epoch_int, value=list of loss records）
+        self.loss_by_epoch = {}
+        # 加载已有历史（支持断点续训）
+        self._load_loss_history()
 
     def _get_gpu_memory_breakdown(self):
         """获取 GPU 显存使用细分"""
@@ -356,10 +369,35 @@ class DetailedProgressCallback(TrainerCallback):
         }
 
         # 提取 logs 中的 loss 信息
+        loss_record = {}
         if logs:
             for k, v in logs.items():
                 if isinstance(v, (int, float)):
-                    status['losses'][k] = round(v, 6) if isinstance(v, float) else v
+                    val = round(v, 6) if isinstance(v, float) else v
+                    status['losses'][k] = val
+                    # 收集所有 loss/ 开头和 debug/ 开头的指标
+                    if k.startswith('loss/') or k.startswith('debug/') or k in ('loss', 'learning_rate'):
+                        loss_record[k] = val
+
+        # ── 累积 loss 历史并按 epoch 分桶 ──
+        if loss_record:
+            current_epoch = int(state.epoch) if state.epoch else 0
+            record = {
+                'step': state.global_step,
+                'epoch': current_epoch,
+                **loss_record,
+            }
+            self.loss_history.append(record)
+            # 按 epoch 分桶
+            epoch_key = str(current_epoch)
+            if epoch_key not in self.loss_by_epoch:
+                self.loss_by_epoch[epoch_key] = []
+            self.loss_by_epoch[epoch_key].append(record)
+            # 防止内存爆炸：截断最早的记录
+            if len(self.loss_history) > self.MAX_LOSS_HISTORY:
+                self.loss_history = self.loss_history[-self.MAX_LOSS_HISTORY:]
+            # 持久化 loss 历史
+            self._save_loss_history()
 
         # 显存组件估算
         if model is not None:
@@ -378,6 +416,9 @@ class DetailedProgressCallback(TrainerCallback):
             }
         except Exception:
             pass
+
+        # 将可用 epoch 列表写入 status，供前端下拉菜单
+        status['available_epochs'] = sorted(self.loss_by_epoch.keys(), key=lambda x: int(x))
 
         self._write_status(status)
 
@@ -404,6 +445,34 @@ class DetailedProgressCallback(TrainerCallback):
             os.replace(tmp_file, self.status_file)
         except Exception as e:
             print(f"[DetailedProgressCallback] Failed to write status: {e}")
+
+    def _load_loss_history(self):
+        """从磁盘加载已有 loss 历史（支持断点续训）。"""
+        try:
+            if os.path.exists(self.loss_history_file):
+                with open(self.loss_history_file, 'r') as f:
+                    data = json.load(f)
+                self.loss_history = data.get('history', [])
+                self.loss_by_epoch = data.get('by_epoch', {})
+                print(f"[DetailedProgressCallback] Loaded {len(self.loss_history)} loss history records")
+        except Exception as e:
+            print(f"[DetailedProgressCallback] Failed to load loss history: {e}")
+            self.loss_history = []
+            self.loss_by_epoch = {}
+
+    def _save_loss_history(self):
+        """原子写入 loss 历史到独立文件（与 status 文件分离，避免单文件过大）。"""
+        try:
+            data = {
+                'history': self.loss_history,
+                'by_epoch': self.loss_by_epoch,
+            }
+            tmp_file = self.loss_history_file + '.tmp'
+            with open(tmp_file, 'w') as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_file, self.loss_history_file)
+        except Exception as e:
+            print(f"[DetailedProgressCallback] Failed to save loss history: {e}")
 
     @staticmethod
     def _fmt_duration(seconds):
@@ -747,7 +816,7 @@ def main(config, model_class, model_config_class):
             num_train_epochs=config.il.epochs,
             save_strategy='epoch',  # no
             save_steps=config.il.save_interval_epochs,
-            save_total_limit=8,
+            save_total_limit=1000,
             report_to=config.il.report_to,
             seed=0,
             do_eval=False,

@@ -140,6 +140,12 @@ class BridgeDPNet(PreTrainedModel):
         self.n_prior_tokens = il.get('n_prior_tokens', 4)
         self.sigma_base = il.get('sigma_base', 1.0)
         self.sigma_goal = il.get('sigma_goal', 0.1)
+        self.num_train_timesteps = il.get('num_train_timesteps', 100)
+        self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
+
+        # 动作空间归一化参数（必须与 bridgedp_lerobot_dataset.py 保持一致）
+        self.action_scale_xy = 5.0
+        self.action_scale_theta = 3.14159
 
         # ── 共享视觉编码器（与 NavDP 相同，直接 import，不修改）──────────
         self.rgbd_encoder = RGBDBackbone(
@@ -199,7 +205,7 @@ class BridgeDPNet(PreTrainedModel):
         )
         self.visual_gate = VisualGate(gate_dim=self.token_dim)
         self.bridge_scheduler = BridgeScheduler(
-            num_train_timesteps=10,
+            num_train_timesteps=self.num_train_timesteps,
             sigma_base=self.sigma_base,
             sigma_goal=self.sigma_goal,
         )
@@ -230,10 +236,42 @@ class BridgeDPNet(PreTrainedModel):
         return self
 
     # ------------------------------------------------------------------
+    # 归一化 / 反归一化工具
+    # ------------------------------------------------------------------
+
+    def _normalize_action(self, action):
+        """将原始绝对坐标归一化到训练空间。
+
+        Args:
+            action: (..., 3) 原始坐标 (x, y, θ)。
+
+        Returns:
+            归一化后的坐标。
+        """
+        normed = action.clone()
+        normed[..., 0:2] = normed[..., 0:2] / self.action_scale_xy
+        normed[..., 2] = normed[..., 2] / self.action_scale_theta
+        return normed
+
+    def _denormalize_action(self, action):
+        """将归一化坐标反归一化到原始物理空间。
+
+        Args:
+            action: (..., 3) 归一化坐标。
+
+        Returns:
+            原始物理坐标 (x, y, θ)。
+        """
+        denormed = action.clone()
+        denormed[..., 0:2] = denormed[..., 0:2] * self.action_scale_xy
+        denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
+        return denormed
+
+    # ------------------------------------------------------------------
     # 前向加噪（训练专用）
     # ------------------------------------------------------------------
 
-    def sample_bridge_noise(self, x0, goal, theta_g):
+    def sample_bridge_noise(self, x0, goal, theta_g, timesteps=None):
         """布朗桥前向加噪，替代 NavDP 的 sample_noise()。
 
         NavDP 使用 DDPMScheduler.add_noise(action, noise, timesteps)；
@@ -243,6 +281,7 @@ class BridgeDPNet(PreTrainedModel):
             x0: 干净轨迹 (B, T_pred, 3)，绝对坐标。
             goal: 目标位置 (B, 3)。
             theta_g: 目标方位角 (B,)。
+            timesteps: 可选的预生成时间步 (B,)，用于 ng/mg 共享时间步。
 
         Returns:
             x0: 原始干净轨迹（训练目标）。
@@ -252,10 +291,11 @@ class BridgeDPNet(PreTrainedModel):
         """
         device = x0.device
         B = x0.shape[0]
-        timesteps = torch.randint(
-            0, self.bridge_scheduler.config.num_train_timesteps,
-            (B,), device=device
-        ).long()
+        if timesteps is None:
+            timesteps = torch.randint(
+                0, self.bridge_scheduler.config.num_train_timesteps,
+                (B,), device=device
+            ).long()
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
         noise = torch.randn_like(x0)
         noisy_action = self.bridge_scheduler.add_noise(x0, goal, theta_g, timesteps, noise)
@@ -389,11 +429,18 @@ class BridgeDPNet(PreTrainedModel):
         input_depths = input_depths.to(device)
 
         # ── 布朗桥加噪（替代 NavDP 的 DDPM 加噪）───────────────────────
-        x0_ng, ng_time_embed, ng_noisy_embed, _ = self.sample_bridge_noise(
-            tensor_label_actions, tensor_point_goal, tensor_theta_g
+        # 桥端点：x_0 = 起点(零向量) ↔ g = 轨迹最后一个真值点（非 goal_point）
+        # goal_point 仅作为网络条件输入，不参与桥的端点约束
+        traj_endpoint = tensor_label_actions[:, -1, :]  # (B, 3) 轨迹末端真值点
+        shared_timesteps = torch.randint(
+            0, self.bridge_scheduler.config.num_train_timesteps,
+            (tensor_label_actions.shape[0],), device=device
+        ).long()
+        x0_ng, ng_time_embed, ng_noisy_embed, shared_timesteps = self.sample_bridge_noise(
+            tensor_label_actions, traj_endpoint, tensor_theta_g, timesteps=shared_timesteps
         )
         x0_mg, mg_time_embed, mg_noisy_embed, _ = self.sample_bridge_noise(
-            tensor_label_actions, tensor_point_goal, tensor_theta_g
+            tensor_label_actions, traj_endpoint, tensor_theta_g, timesteps=shared_timesteps
         )
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
@@ -495,6 +542,8 @@ class BridgeDPNet(PreTrainedModel):
             x0_mg,             # (B, T_pred, 3) 训练目标（mg 分支）
             imagegoal_aux_pred,  # (B, 3) 辅助预测
             pixelgoal_aux_pred,  # (B, 3) 辅助预测
+            shared_timesteps,    # (B,) 共享时间步（用于 SNR 加权）
+            tensor_theta_g,      # (B,) 目标方位角（用于 SNR 加权）
         )
 
     # ------------------------------------------------------------------
@@ -558,40 +607,50 @@ class BridgeDPNet(PreTrainedModel):
         """
         with torch.no_grad():
             tensor_point_goal = torch.as_tensor(goal_point, dtype=torch.float32, device=self._device)
-            rgbd_embed = self.rgbd_encoder(input_images, input_depths)
-            pointgoal_embed = self.point_encoder(tensor_point_goal).unsqueeze(1)
 
-            # 先验处理
-            if prior_traj is not None:
-                tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32, device=self._device)
-            else:
-                tensor_prior = torch.zeros(
-                    tensor_point_goal.shape[0], self.predict_size, 3, device=self._device
-                )
+            # 计算 theta_g（在归一化之前，使用原始坐标）
             if theta_g is not None:
                 tensor_theta_g = torch.as_tensor(theta_g, dtype=torch.float32, device=self._device)
             else:
                 tensor_theta_g = torch.atan2(tensor_point_goal[:, 1], tensor_point_goal[:, 0])
+
+            # ── 归一化：将物理坐标映射到训练空间 ──
+            tensor_point_goal_n = self._normalize_action(tensor_point_goal)
+
+            rgbd_embed = self.rgbd_encoder(input_images, input_depths)
+            pointgoal_embed = self.point_encoder(tensor_point_goal_n).unsqueeze(1)
+
+            # 先验处理（归一化后编码）
+            if prior_traj is not None:
+                tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32, device=self._device)
+                tensor_prior = self._normalize_action(tensor_prior)
+            else:
+                tensor_prior = torch.zeros(
+                    tensor_point_goal.shape[0], self.predict_size, 3, device=self._device
+                )
 
             prior_tokens = self.prior_encoder(tensor_prior)
             vis_global = rgbd_embed.mean(dim=1)
             gate = self.visual_gate(vis_global)
             gated_prior = gate * prior_tokens
 
-            # 从目标附近采样初始噪声
-            # 修复 B>1 时的维度广播问题：goal 需要 repeat 到 sample_num*B
-            B = tensor_point_goal.shape[0]
-            goal_for_init = tensor_point_goal.repeat(sample_num, 1)  # (sample_num*B, 3)
+            # 推理时桥端点：用归一化目标方向上的轨迹末端估计作为桥终点
+            # 取目标方向上 predict_size 步能到达的位置（归一化空间中约 1.0 单位/步）
+            # 实际上用 goal_point 的方向单位向量 × predict_size × 平均步长
+            B = tensor_point_goal_n.shape[0]
+            # 桥终点 = 轨迹末端估计（归一化空间中，沿目标方向的合理终点）
+            # 用 goal_point 本身作为桥终点（归一化后量级与轨迹末端接近）
+            bridge_endpoint = tensor_point_goal_n  # (B, 3)，归一化后量级合理
+            endpoint_for_init = bridge_endpoint.repeat(sample_num, 1)
             naction = self.bridge_scheduler.sample_initial_noise(
-                goal_for_init,
+                endpoint_for_init,
                 (sample_num * B, self.predict_size, 3),
                 self._device,
             )
 
-            # 10 步去噪
-            self.bridge_scheduler.set_timesteps(self.bridge_scheduler.config.num_train_timesteps)
-            goal_expanded = tensor_point_goal.unsqueeze(1).expand(-1, self.predict_size, -1)
-            goal_expanded = goal_expanded.repeat(sample_num, 1, 1)
+            self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
+            endpoint_expanded = bridge_endpoint.unsqueeze(1).expand(-1, self.predict_size, -1)
+            endpoint_expanded = endpoint_expanded.repeat(sample_num, 1, 1)
             theta_expanded = tensor_theta_g.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
@@ -601,13 +660,14 @@ class BridgeDPNet(PreTrainedModel):
                 )
                 naction = self.bridge_scheduler.step(
                     x0_pred, naction, k,
-                    goal_expanded, theta_expanded,
+                    endpoint_expanded, theta_expanded,
                 )
 
             # Critic 排序
             critic_values = self.predict_critic(naction, rgbd_embed)
 
-            # 三次样条平滑（替代 NavDP 的 cumsum/4）
+            # ── 反归一化 + 三次样条平滑 ──
+            naction = self._denormalize_action(naction)
             trajectory = smooth_trajectory_batch(naction)
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
@@ -640,12 +700,13 @@ class BridgeDPNet(PreTrainedModel):
             nogoal_embed = torch.zeros_like(rgbd_embed[:, 0:1])
             B = rgbd_embed.shape[0]
 
-            # NoGoal: goal = 0, theta_g = 0
+            # NoGoal: goal = 0, theta_g = 0（归一化空间中 0 仍然是 0）
             zero_goal = torch.zeros(B, 3, device=self._device)
             zero_theta = torch.zeros(B, device=self._device)
 
             if prior_traj is not None:
                 tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32, device=self._device)
+                tensor_prior = self._normalize_action(tensor_prior)
             else:
                 tensor_prior = torch.zeros(B, self.predict_size, 3, device=self._device)
 
@@ -660,7 +721,7 @@ class BridgeDPNet(PreTrainedModel):
                 self._device,
             )
 
-            self.bridge_scheduler.set_timesteps(self.bridge_scheduler.config.num_train_timesteps)
+            self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
             goal_expanded = zero_goal.unsqueeze(1).expand(-1, self.predict_size, -1).repeat(sample_num, 1, 1)
             theta_expanded = zero_theta.repeat(sample_num)
 
@@ -675,6 +736,9 @@ class BridgeDPNet(PreTrainedModel):
                 )
 
             critic_values = self.predict_critic(naction, rgbd_embed)
+
+            # ── 反归一化 + 平滑 ──
+            naction = self._denormalize_action(naction)
             trajectory = smooth_trajectory_batch(naction)
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]

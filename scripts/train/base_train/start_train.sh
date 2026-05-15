@@ -45,8 +45,8 @@ case $MODEL in
         NUM_GPUS=1
         ;;
     "navdp")
-        export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-        NUM_GPUS=8
+        export CUDA_VISIBLE_DEVICES=0
+        NUM_GPUS=1
         ;;
     "flownav_static")
         export CUDA_VISIBLE_DEVICES=0
@@ -57,6 +57,10 @@ case $MODEL in
         NUM_GPUS=1
         ;;
     "flownav_mix")
+        export CUDA_VISIBLE_DEVICES=0
+        NUM_GPUS=1
+        ;;
+    "bridgedp")
         export CUDA_VISIBLE_DEVICES=0
         NUM_GPUS=1
         ;;
@@ -78,14 +82,15 @@ export TORCH_CPP_LOG_LEVEL=INFO
 export NCCL_DEBUG=INFO
 
 # navdp/flownav family use torchrun for consistent distributed launch behavior
-if [[ "$MODEL" == "navdp" || "$MODEL" == "flownav_static" || "$MODEL" == "flownav_dyn" || "$MODEL" == "flownav_mix" ]]; then
+if [[ "$MODEL" == "navdp" || "$MODEL" == "bridgedp" || "$MODEL" == "flownav_static" || "$MODEL" == "flownav_dyn" || "$MODEL" == "flownav_mix" ]]; then
     echo "Using torchrun to start $MODEL training, using $NUM_GPUS GPUs (CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES)"
+    # 注意：如果在多机环境下运行，需要修改master_addr和master_port以确保正确通信
     torchrun \
         --nproc_per_node=$NUM_GPUS \
         --nnodes=1 \
         --node_rank=0 \
         --master_addr=localhost \
-        --master_port=12345 \   # 注意：如果在多机环境下运行，需要修改master_addr和master_port以确保正确通信
+        --master_port=12345 \
         scripts/train/base_train/train.py \
         --name "$NAME" \
         --model-name "$MODEL"

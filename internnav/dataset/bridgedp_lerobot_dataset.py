@@ -107,6 +107,12 @@ class BridgeDP_Base_Dataset(Dataset):
         self.debug = debug
         self.sigma_base = sigma_base
 
+        # ── 动作空间归一化参数 ──────────────────────────────────────────
+        # 将绝对坐标从 [0, ~10m] 归一化到 [-2, 2]，使训练目标尺度与 NavDP 的
+        # 噪声预测目标 ε ~ N(0,1) 对齐。详见 TRAINING_CONVERGENCE_ANALYSIS.md。
+        self.action_scale_xy = 5.0    # x,y 分量除以此值
+        self.action_scale_theta = 3.14159  # θ 分量除以 π
+
         self.trajectory_data_dir = []
         self.trajectory_rgb_path = []
         self.trajectory_depth_path = []
@@ -269,6 +275,11 @@ class BridgeDP_Base_Dataset(Dataset):
     def process_data_parquet(self, index):
         """解析 Parquet 轨迹数据。与 NavDP process_data_parquet 保持一致。
 
+        重要修复（2026-05-13）：
+        旧代码从 `observation.camera_extrinsic` 读取位姿序列，但该列存储的是
+        **固定的相机安装矩阵**（camera-to-body transform），每帧完全相同。
+        正确的逐帧世界位姿存储在 `action` 列中，与 NavDP 一致。
+
         注意：Parquet 中 camera_intrinsic/camera_extrinsic 存储为嵌套 list，
         需要用 .tolist()[0] + np.vstack() 才能正确展开为 (3,3) / (4,4)。
         直接用 .iloc[0] 会导致 np.array() 只拿到外层元素数（如 3 或 4），
@@ -280,8 +291,10 @@ class BridgeDP_Base_Dataset(Dataset):
         df = pd.read_parquet(data_path)
         camera_intrinsic = np.vstack(np.array(df['observation.camera_intrinsic'].tolist()[0])).reshape(3, 3)
         base_extrinsic = np.vstack(np.array(df['observation.camera_extrinsic'].tolist()[0])).reshape(4, 4)
+        # 修复：从 action 列读取逐帧世界位姿（4x4 矩阵），而非 camera_extrinsic（固定安装矩阵）
+        # 与 NavDP navdp_lerobot_dataset.py:342 保持一致
         extrinsics = np.array(
-            [np.stack(frame) for frame in df['observation.camera_extrinsic']], dtype=np.float64
+            [np.stack(frame) for frame in df['action']], dtype=np.float64
         ).reshape(-1, 4, 4)
         trajectory_length = len(df)
         return camera_intrinsic, base_extrinsic, extrinsics, trajectory_length
@@ -419,9 +432,9 @@ class BridgeDP_Base_Dataset(Dataset):
             local_augment_points.append(Tg)
         local_label_points = np.array(local_label_points)
         local_augment_points = np.array(local_augment_points)
-        action_indexes = np.clip(
-            np.arange(self.predict_size + 1) * pred_digit, 0, label_actions.shape[0] - 2
-        )
+        # 动态采样：均匀分布 predict_size+1 个索引，避免暴力 clip 导致轨迹退化
+        max_idx = label_actions.shape[0] - 1
+        action_indexes = np.linspace(0, max_idx, self.predict_size + 1, dtype=int)
         return local_label_points, local_augment_points, origin_world_points, result_augment_points, action_indexes
 
     def rank_steps(self, extrinsics, obstacle_points, pred_digit=4):
@@ -448,43 +461,35 @@ class BridgeDP_Base_Dataset(Dataset):
         target_choice = np.random.choice(target_candidates, p=target_p)
         return start_choice, target_choice
 
-    def generate_prior_trajectory(self, pred_actions, point_goal):
-        """生成先验轨迹（70%正确 + 30%对抗）。
+    def generate_prior_trajectory(self, pred_actions, is_task_start=False):
+        """生成先验轨迹，三种情况：
 
-        正确先验：从起点到目标的直线插值 + 小幅高斯噪声。
-        对抗先验：随机旋转或缩放的错误轨迹。
+        1. 任务开始（is_task_start=True）：全零，无先验。
+        2. 任务中正确先验（50%）：起点到轨迹末端直线插值 + 0.5% 噪声。
+        3. 任务中错误先验（50%）：随机旋转 60-300° 的错误轨迹。
 
         Args:
-            pred_actions: 标签轨迹 (T, 3)，绝对坐标。
-            point_goal: 目标位置 (3,)。
-
-        Returns:
-            prior_traj: 先验轨迹 (T, 3)。
-
-        场景自检：
-            1. 正确先验 + 静态场景 → VisualGate G高 → 先验有用。
-            2. 对抗先验 (30%) → 网络学会不盲信先验。
-            3. 长距离目标 → 直线插值偏差大 → 但方差允许偏离。
+            pred_actions: 标签轨迹 (T, 3)，已归一化绝对坐标。
+            is_task_start: 是否为任务开始帧（无先验）。
         """
         T = pred_actions.shape[0]
-        if np.random.random() < 0.3:
-            # 对抗先验：随机旋转标签轨迹 60-300 度
+        if is_task_start:
+            return np.zeros((T, 3), dtype=np.float32)
+
+        if np.random.random() < 0.5:
+            # 正确先验：起点到轨迹末端直线插值 + 极小噪声
+            traj_end = pred_actions[-1].copy()
+            t_interp = np.linspace(0, 1, T).reshape(-1, 1)
+            prior = t_interp * traj_end
+            noise_std = 0.005 * np.linalg.norm(traj_end)
+            prior += np.random.randn(T, 3).astype(np.float32) * noise_std
+        else:
+            # 错误先验：随机旋转 60-300°
             angle = np.random.uniform(np.pi / 3, 5 * np.pi / 3)
             rot = np.array([[np.cos(angle), -np.sin(angle)],
-                            [np.sin(angle), np.cos(angle)]], dtype=np.float32)
+                            [np.sin(angle),  np.cos(angle)]], dtype=np.float32)
             prior = pred_actions.copy()
             prior[:, 0:2] = (rot @ pred_actions[:, 0:2].T).T
-            # 随机缩放
-            scale = np.random.uniform(0.3, 2.0)
-            prior *= scale
-        else:
-            # 正确先验：起点到目标的直线插值 + 噪声
-            start = np.zeros(3, dtype=np.float32)
-            goal = point_goal.copy()
-            t_interp = np.linspace(0, 1, T).reshape(-1, 1)
-            prior = start * (1 - t_interp) + goal * t_interp
-            noise_std = 0.05 * np.linalg.norm(goal - start)
-            prior += np.random.randn(T, 3).astype(np.float32) * noise_std
         return prior.astype(np.float32)
 
     def __getitem__(self, index):
@@ -602,11 +607,22 @@ class BridgeDP_Base_Dataset(Dataset):
             mode='constant', constant_values=0,
         )
 
-        # 2. 生成先验轨迹（含对抗训练）
-        prior_traj = self.generate_prior_trajectory(pred_actions, point_goal)
-
-        # 3. 计算目标方位角
+        # 2. 计算目标方位角（在归一化之前，使用原始坐标）
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
+
+        # 3. 动作空间归一化：将绝对坐标从 [0,~10m] 映射到 [-2,2]
+        #    使训练目标尺度与 NavDP 的噪声 ε ~ N(0,1) 对齐。
+        #    详见 TRAINING_CONVERGENCE_ANALYSIS.md §4 方案 A。
+        pred_actions[:, 0:2] = pred_actions[:, 0:2] / self.action_scale_xy
+        pred_actions[:, 2] = pred_actions[:, 2] / self.action_scale_theta
+        augment_actions[:, 0:2] = augment_actions[:, 0:2] / self.action_scale_xy
+        augment_actions[:, 2] = augment_actions[:, 2] / self.action_scale_theta
+        point_goal[0:2] = point_goal[0:2] / self.action_scale_xy
+        point_goal[2] = point_goal[2] / self.action_scale_theta
+
+        # 4. 生成先验轨迹（三种情况：任务开始/正确先验/错误先验）
+        is_task_start = (memory_start_choice == pixel_start_choice)
+        prior_traj = self.generate_prior_trajectory(pred_actions, is_task_start=is_task_start)
 
         # 日志
         end_time = time.time()
@@ -631,18 +647,18 @@ class BridgeDP_Base_Dataset(Dataset):
         theta_g = torch.tensor(theta_g, dtype=torch.float32)
 
         return (
-            point_goal,       # 0: (3,)
+            point_goal,       # 0: (3,) 已归一化
             image_goal,       # 1: (H, W, 6)
             pixel_goal,       # 2: (H, W, C)
             memory_images,    # 3: (mem, H, W, 3)
             depth_image,      # 4: (H, W, 1)
-            pred_actions,     # 5: (T_pred, 3) 绝对坐标
-            augment_actions,  # 6: (T_pred, 3) 绝对坐标
+            pred_actions,     # 5: (T_pred, 3) 已归一化绝对坐标
+            augment_actions,  # 6: (T_pred, 3) 已归一化绝对坐标
             pred_critic,      # 7: scalar
             augment_critic,   # 8: scalar
             float(pixel_flag),  # 9: float
-            prior_traj,       # 10: (T_pred, 3) 先验轨迹
-            theta_g,          # 11: scalar 目标方位角
+            prior_traj,       # 10: (T_pred, 3) 已归一化先验轨迹
+            theta_g,          # 11: scalar 目标方位角（原始值，未归一化）
         )
 
 

@@ -14,7 +14,7 @@ import glob
 import psutil
 import subprocess
 from pathlib import Path
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 from datetime import datetime
 
 app = Flask(__name__)
@@ -168,6 +168,19 @@ def _fmt_duration(seconds):
         return f"{s}s"
 
 
+def list_experiments():
+    """List experiment folders under checkpoints."""
+    if not CHECKPOINT_BASE.exists():
+        return []
+    exp_names = []
+    for entry in CHECKPOINT_BASE.iterdir():
+        if not entry.is_dir():
+            continue
+        if (entry / "logs").exists() or (entry / "ckpts").exists():
+            exp_names.append(entry.name)
+    return sorted(exp_names)
+
+
 def get_training_status(exp_name='bridgedp_train'):
     """获取训练状态"""
     exp_dir = CHECKPOINT_BASE / exp_name
@@ -310,9 +323,26 @@ def _parse_config_from_source(config_path: Path) -> dict:
     return result
 
 
+def _resolve_config_file(exp_name: str) -> Path:
+    name = (exp_name or "").lower()
+    if "navdp" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'navdp.py'
+    if "bridgedp" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'bridgedp.py'
+    if "flownav" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'flownav.py'
+    if "rdp" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'rdp.py'
+    if "cma" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'cma.py'
+    if "seq2seq" in name:
+        return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'seq2seq.py'
+    return PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'bridgedp.py'
+
+
 def get_training_config(exp_name='bridgedp_train'):
     """动态读取训练配置参数（通过 AST 解析配置源文件，无需导入依赖）"""
-    config_file = PROJECT_ROOT / 'scripts' / 'train' / 'base_train' / 'configs' / 'bridgedp.py'
+    config_file = _resolve_config_file(exp_name)
 
     # 默认值（作为 fallback）
     defaults = {
@@ -350,9 +380,16 @@ def index():
     return render_template('monitor.html')
 
 
+@app.route('/api/experiments')
+def api_experiments():
+    """API: 列出可用实验"""
+    return jsonify({'experiments': list_experiments()})
+
+
 @app.route('/api/status')
 def api_status():
     """API: 获取所有状态信息"""
+    exp = request.args.get('exp') or 'bridgedp_train'
     return jsonify({
         'timestamp': datetime.now().isoformat(),
         'gpu': get_gpu_info(),
@@ -361,9 +398,116 @@ def api_status():
         'memory': get_memory_info(),
         'disk': get_disk_info(),
         'processes': find_training_processes(),
-        'training': get_training_status(),
-        'config': get_training_config(),
+        'training': get_training_status(exp),
+        'config': get_training_config(exp),
+        'exp': exp,
+        'experiments': list_experiments(),
     })
+
+
+@app.route('/api/loss_detail')
+def api_loss_detail():
+    """API: 获取完整 loss 历史（含子 loss），支持按 epoch 过滤。
+
+    参数:
+        exp: 实验名称（默认 bridgedp_train）
+        epoch: 指定 epoch 编号（默认 all = 全部）
+    """
+    exp = request.args.get('exp') or 'bridgedp_train'
+    epoch = request.args.get('epoch', 'all')
+
+    loss_history_file = CHECKPOINT_BASE / exp / 'logs' / 'loss_history.json'
+
+    if not loss_history_file.exists():
+        # 回退：尝试从 training_status.json 获取
+        status_file = CHECKPOINT_BASE / exp / 'logs' / 'training_status.json'
+        if status_file.exists():
+            try:
+                with open(status_file, 'r') as f:
+                    data = json.load(f)
+                return jsonify({
+                    'available': True,
+                    'history': [],
+                    'epochs': data.get('available_epochs', []),
+                    'source': 'status_fallback',
+                })
+            except Exception:
+                pass
+        return jsonify({'available': False, 'history': [], 'epochs': []})
+
+    try:
+        with open(loss_history_file, 'r') as f:
+            data = json.load(f)
+
+        all_history = data.get('history', [])
+        by_epoch = data.get('by_epoch', {})
+        epochs = sorted(by_epoch.keys(), key=lambda x: int(x))
+
+        if epoch == 'all':
+            history = all_history
+        else:
+            history = by_epoch.get(str(epoch), [])
+
+        return jsonify({
+            'available': True,
+            'history': history,
+            'epochs': epochs,
+            'total_records': len(all_history),
+        })
+    except Exception as e:
+        return jsonify({'available': False, 'error': str(e), 'history': [], 'epochs': []})
+
+
+@app.route('/api/traj_batches')
+def api_traj_batches():
+    """API: 返回所有已记录的 batch 索引列表。"""
+    exp = request.args.get('exp') or 'bridgedp_train'
+    f = CHECKPOINT_BASE / exp / 'logs' / 'traj_batches.jsonl'
+    if not f.exists():
+        return jsonify({'batches': []})
+    batches = []
+    with open(f) as fp:
+        for line in fp:
+            try:
+                rec = json.loads(line)
+                batches.append({
+                    'batch_idx': rec['batch_idx'],
+                    'step': rec['step'],
+                    'n_samples': len(rec['samples']),
+                })
+            except Exception:
+                pass
+    return jsonify({'batches': batches})
+
+
+@app.route('/api/traj_batch_detail')
+def api_traj_batch_detail():
+    """API: 返回指定 batch 的指定样本数据。"""
+    exp = request.args.get('exp') or 'bridgedp_train'
+    batch_idx = int(request.args.get('batch_idx', 0))
+    sample_idx = int(request.args.get('sample_idx', 0))
+    f = CHECKPOINT_BASE / exp / 'logs' / 'traj_batches.jsonl'
+    if not f.exists():
+        return jsonify({'available': False})
+    with open(f) as fp:
+        for line in fp:
+            try:
+                rec = json.loads(line)
+                if rec['batch_idx'] == batch_idx:
+                    samples = rec['samples']
+                    sample_idx = min(sample_idx, len(samples) - 1)
+                    s = samples[sample_idx]
+                    return jsonify({
+                        'available': True,
+                        'batch_idx': batch_idx,
+                        'sample_idx': sample_idx,
+                        'n_samples': len(samples),
+                        'step': rec['step'],
+                        **s,
+                    })
+            except Exception:
+                pass
+    return jsonify({'available': False})
 
 
 if __name__ == '__main__':

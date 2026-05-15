@@ -63,7 +63,7 @@ class BridgeScheduler:
 
     def __init__(
         self,
-        num_train_timesteps: int = 10,
+        num_train_timesteps: int = 100,
         sigma_base: float = 1.0,
         sigma_goal: float = 0.1,
     ) -> None:
@@ -253,46 +253,20 @@ class BridgeScheduler:
     ) -> torch.Tensor:
         """布朗桥 DDIM 确定性反向去噪一步。
 
-        更新公式（docs/Bridge-DP推导.md §8.1）：
-            x_{t-Δt} = (t-Δt)/t · x_t + Δt/t · x̂_0
+        x_{t-Δt} = (t-Δt)/t · x_t + Δt/t · x̂_0
 
-        当 t 到达最后一步（t_norm = 1/T），直接返回 x̂_0。
-
-        对比 NavDP 的 ``DDPMScheduler.step(model_output, timestep, sample)``：
-        - NavDP: model_output 是预测噪声 ε，内部做 DDPM 反向
-        - Bridge-DP: x0_pred 是直接预测的干净轨迹 x̂_0，做布朗桥后验更新
-
-        Args:
-            x0_pred: 网络预测的干净轨迹 x̂_0，形状 (B, T_pred, 3)。
-            x_t: 当前含噪轨迹，形状 (B, T_pred, 3)。
-            timestep: 当前离散时间步（标量或形状 (1,)）。
-            goal: 目标位置，形状 (B, 1, 3) 或 (B, T_pred, 3)。
-            theta_g: 目标方位角，形状 (B,)。
-
-        Returns:
-            去噪后的轨迹 x_{t-Δt}，形状 (B, T_pred, 3)。
-
-        场景自检 — 确定性采样的合理性：
-            DDIM 确定性采样不引入额外随机噪声，好处：
-            1. 推理结果可复现（给定相同 x_T 和 model weights）
-            2. 导航策略更稳定（避免每帧输出轨迹抖动）
-            3. 多样性由初始噪声 x_T ~ N(g, σ²_goal) 提供
+        保留 x_t，轨迹形状灵活（可绕障），起终点约束由训练时的桥端点隐式保证。
         """
-        # 归一化当前时间和步长
         t_norm = self._normalized_time(timestep).float()
-        dt = 1.0 / self.num_train_timesteps  # Δt = 1/T
+        dt = 1.0 / self.num_train_timesteps
 
-        # 如果已经是最后一步，直接返回预测结果
         if t_norm.item() <= dt + 1e-6:
             return x0_pred
 
-        # 确定性 DDIM 桥更新
         t_prev = t_norm - dt
-        # x_{t-Δt} = (t-Δt)/t · x_t + Δt/t · x̂_0
         coeff_xt = t_prev / t_norm
         coeff_x0 = dt / t_norm
 
-        # 广播标量系数到张量维度
         while coeff_xt.dim() < x_t.dim():
             coeff_xt = coeff_xt.unsqueeze(-1)
             coeff_x0 = coeff_x0.unsqueeze(-1)

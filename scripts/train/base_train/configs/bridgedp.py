@@ -74,15 +74,25 @@ bridgedp_exp_cfg = ExpCfg(
         scratch=False,
         finetune=False,
         ddp_find_unused_parameters=True,
-        filter_failure=FilterFailure(use=True, min_rgb_nums=15),
-        loss=Loss(alpha=0.0001, dist_scale=1),
+        filter_failure=FilterFailure(
+            use=True, 
+            min_rgb_nums=15
+        ),
+        loss=Loss(
+            alpha=0.0001, 
+            dist_scale=1, 
+        ),
         # ── Bridge-DP 专有超参数 ──
         # sigma_base: 数据驱动固定常数（由 compute_sigma_base.py 离线计算）
         # sigma_goal: 弹性尾端松弛方差
         # n_prior_tokens: PriorEncoder 输出 token 数量
-        sigma_base=1.0,
-        sigma_goal=0.1,
+        # num_train_timesteps: 训练时扩散步数（增大以提供足够的噪声水平覆盖）
+        # num_inference_timesteps: 推理时 DDIM 去噪步数
+        sigma_base=0.0813,
+        sigma_goal=0.001,
         n_prior_tokens=4,
+        num_train_timesteps=100,
+        num_inference_timesteps=10,
     ),
     model=bridgedp_cfg,
 )

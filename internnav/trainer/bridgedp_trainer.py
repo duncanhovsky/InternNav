@@ -15,10 +15,13 @@
     - docs/Bridge-DP推导.md §6（训练目标）
 """
 
+import json
 import os
 import time
+from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
@@ -93,14 +96,16 @@ class BridgeDPTrainer(BaseTrainer):
         }
         torch.cuda.synchronize(model_device)
 
-        batch_label_critic = inputs["batch_label_critic"]
-        batch_augment_critic = inputs["batch_augment_critic"]
+        batch_label_critic = inputs_on_device["batch_label_critic"]
+        batch_augment_critic = inputs_on_device["batch_augment_critic"]
 
         # 前向传播（Bridge-DP 新增 prior_traj 和 theta_g 参数）
+        # 返回值新增 shared_timesteps 和 tensor_theta_g 用于 SNR 加权
         (x0_pred_ng, x0_pred_mg,
          critic_pred, augment_pred,
          x0_target_ng, x0_target_mg,
-         imagegoal_aux_pred, pixelgoal_aux_pred) = model(
+         imagegoal_aux_pred, pixelgoal_aux_pred,
+         shared_timesteps, tensor_theta_g) = model(
             inputs_on_device["batch_pg"],
             inputs_on_device["batch_ig"],
             inputs_on_device["batch_tg"],
@@ -112,12 +117,53 @@ class BridgeDPTrainer(BaseTrainer):
             inputs_on_device["batch_theta_g"],
         )
 
-        # 动作分支损失：预测 x̂_0 vs 真实 x_0 的 MSE
-        # （NavDP 是 pred_noise vs noise 的 MSE）
-        ng_action_loss = (x0_pred_ng - x0_target_ng).square().mean()
-        mg_action_loss = (x0_pred_mg - x0_target_mg).square().mean()
+        # ── SNR 加权：w(t) = 1 / σ²(t; θ_g) ──────────────────────────
+        # 获取 bridge_scheduler 引用
+        model_ref = model.module if hasattr(model, 'module') else model
+        t_norm = model_ref.bridge_scheduler._normalized_time(shared_timesteps)  # (B,)
+        theta_g_for_var = tensor_theta_g.view(-1)
+        # 计算方差 σ²(t; θ_g)，形状 (B, 1, 1)
+        variance = model_ref.bridge_scheduler.variance(
+            t_norm.view(-1, 1, 1), theta_g_for_var.view(-1, 1, 1)
+        )  # (B, 1, 1)
+        # SNR 权重 w(t) = 1/σ²(t)，clamp 防止数值爆炸
+        snr_weight = (1.0 / variance.clamp(min=0.01))  # (B, 1, 1)
+        # 归一化使权重均值为 1（不改变总体损失量级）
+        snr_weight = snr_weight / snr_weight.mean().clamp(min=1e-6)
 
-        # 辅助损失（与 NavDP 一致）
+        # ── 动作分支损失：SNR 加权 MSE ─────────────────────────────────
+        ng_pointwise = (x0_pred_ng - x0_target_ng).square()  # (B, T, 3)
+        mg_pointwise = (x0_pred_mg - x0_target_mg).square()  # (B, T, 3)
+        ng_action_loss = (snr_weight * ng_pointwise).mean()
+        mg_action_loss = (snr_weight * mg_pointwise).mean()
+
+        # ── 轨迹结构正则化 ──────────────────────────────────────────────
+        x0_pred_avg = 0.5 * x0_pred_ng + 0.5 * x0_pred_mg
+        x0_target_avg = 0.5 * x0_target_ng + 0.5 * x0_target_mg
+
+        # 1. 起点约束：预测轨迹第一个点与真值第一个点对齐
+        start_loss = (x0_pred_avg[:, 0, :2] - x0_target_avg[:, 0, :2]).square().mean()
+
+        # 2. 终点约束：与真值末端对齐（比 batch_pg 更稳定）
+        terminal_loss = (x0_pred_avg[:, -1, :2] - x0_target_avg[:, -1, :2]).square().mean()
+
+        # 3. 二阶方向平滑：惩罚方向突变而非绝对位移差
+        pred_step = x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]  # (B, T-1, 2)
+        smooth_loss = (pred_step[:, 1:, :] - pred_step[:, :-1, :]).square().mean() if pred_step.shape[1] > 1 else torch.tensor(0.0, device=model_device)
+
+        # 4. 全局前进约束：只惩罚末端比起点更远离目标（允许绕行，不允许整体反转）
+        goal_2d = inputs_on_device["batch_pg"][:, :2].unsqueeze(1)  # (B, 1, 2)
+        start_dist = (x0_pred_avg[:, 0:1, :2] - goal_2d).norm(dim=-1)
+        end_dist   = (x0_pred_avg[:, -1:, :2] - goal_2d).norm(dim=-1)
+        global_forward_loss = torch.relu(end_dist - start_dist + 0.1).mean()
+
+        # 5. 方向一致性约束
+        pred_dir = pred_step
+        gt_dir = x0_target_avg[:, 1:, :2] - x0_target_avg[:, :-1, :2]
+        cos_sim = F.cosine_similarity(pred_dir + 1e-8, gt_dir + 1e-8, dim=-1)
+        dir_loss = (1.0 - cos_sim).mean()
+
+        # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
         aux_loss = (
             0.5 * (inputs_on_device["batch_pg"] - imagegoal_aux_pred).square().mean()
             + 0.5 * (inputs_on_device["batch_pg"] - pixelgoal_aux_pred).square().mean()
@@ -132,8 +178,66 @@ class BridgeDPTrainer(BaseTrainer):
             + (augment_pred - batch_augment_critic).square().mean()
         )
 
-        # 总损失（配比与 NavDP 一致）
-        loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
+        # ── 总损失 ──────────────────────────────────────────────────────
+        loss = (0.8  * action_loss
+                + 0.2  * critic_loss
+                + 0.5  * aux_loss
+                + 0.3  * start_loss           # 起点对齐
+                + 0.2  * terminal_loss        # 终点对齐
+                + 0.05 * smooth_loss          # 二阶方向平滑
+                + 0.05 * global_forward_loss  # 全局前进（软约束）
+                + 0.1  * dir_loss)            # 方向一致性
+
+        # 先验 vs 真值偏差（量化先验质量）
+        prior_gt_mse = (inputs_on_device["batch_prior"] - inputs_on_device["batch_labels"]).square().mean()
+
+        # 收敛监控日志
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0 and not hasattr(self, '_log_step_count'):
+            self._log_step_count = 0
+        if rank == 0:
+            self._log_step_count += 1
+            if self._log_step_count % 50 == 1:
+                print(f"[Step {self._log_step_count}] "
+                      f"loss={loss.item():.4f}, action={action_loss.item():.4f}, "
+                      f"start={start_loss.item():.4f}, term={terminal_loss.item():.4f}, "
+                      f"smooth={smooth_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
+                      f"dir={dir_loss.item():.4f}, "
+                      f"snr_w=[{snr_weight.min().item():.2f},{snr_weight.max().item():.2f}]")
+
+        # ── 监控增强：上报子 loss 到 HuggingFace log 系统 ──
+        if rank == 0:
+            # 计算梯度范数（在反向传播之前为上一步的梯度）
+            grad_norm = self._compute_grad_norm(model)
+
+            self._monitor_logs = {
+                "loss/total":        loss.item(),
+                "loss/action":       action_loss.item(),
+                "loss/ng_action":    ng_action_loss.item(),
+                "loss/mg_action":    mg_action_loss.item(),
+                "loss/critic":       critic_loss.item(),
+                "loss/aux":          aux_loss.item(),
+                "loss/start":        start_loss.item(),
+                "loss/terminal":     terminal_loss.item(),
+                "loss/smooth":       smooth_loss.item(),
+                "loss/global_fwd":   global_forward_loss.item(),
+                "loss/direction":    dir_loss.item(),
+                "loss/prior_gt_mse": prior_gt_mse.item(),
+                "debug/snr_w_min":   snr_weight.min().item(),
+                "debug/snr_w_max":   snr_weight.max().item(),
+                "debug/x0_pred_min":   x0_pred_ng.min().item(),
+                "debug/x0_pred_max":   x0_pred_ng.max().item(),
+                "debug/x0_target_min": x0_target_ng.min().item(),
+                "debug/x0_target_max": x0_target_ng.max().item(),
+                "debug/grad_norm":   grad_norm,
+            }
+
+            # 每 N 步写入轨迹可视化数据（最后一个样本）
+            self._write_traj_snapshot(
+                x0_target_ng, x0_pred_ng,
+                inputs_on_device["batch_prior"],
+                inputs_on_device["batch_labels"],
+            )
 
         outputs = {
             'x0_pred_ng': x0_pred_ng,
@@ -145,9 +249,68 @@ class BridgeDPTrainer(BaseTrainer):
             'mg_action_loss': mg_action_loss,
             'aux_loss': aux_loss,
             'critic_loss': critic_loss,
+            'start_loss': start_loss,
+            'terminal_loss': terminal_loss,
+            'smooth_loss': smooth_loss,
+            'global_forward_loss': global_forward_loss,
+            'dir_loss': dir_loss,
         }
 
         return (loss, outputs) if return_outputs else loss
+
+    def _compute_grad_norm(self, model):
+        """计算当前梯度的 L2 范数（用于监控梯度爆炸/消失）。"""
+        try:
+            model_ref = model.module if hasattr(model, 'module') else model
+            total_norm = 0.0
+            count = 0
+            for p in model_ref.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+                    count += 1
+            if count == 0:
+                return 0.0
+            return total_norm ** 0.5
+        except Exception:
+            return 0.0
+
+    def _write_traj_snapshot(self, x0_target, x0_pred, prior_traj, gt_labels):
+        """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。
+
+        每 10 步写一次，避免 I/O 过于频繁。
+        """
+        if not hasattr(self, '_log_step_count') or self._log_step_count % 10 != 0:
+            return
+        try:
+            log_dir = Path(self.args.output_dir).parent / 'logs'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            batch_file = log_dir / 'traj_batches.jsonl'
+
+            B = x0_target.shape[0]
+            record = {
+                "batch_idx": self._log_step_count,
+                "step": self._log_step_count,
+                "samples": [
+                    {
+                        "gt_traj":    x0_target[i].detach().cpu().tolist(),
+                        "pred_traj":  x0_pred[i].detach().cpu().tolist(),
+                        "prior_traj": prior_traj[i].detach().cpu().tolist(),
+                        "gt_labels":  gt_labels[i].detach().cpu().tolist(),
+                    }
+                    for i in range(B)
+                ],
+            }
+            with open(batch_file, 'a') as f:
+                f.write(json.dumps(record) + '\n')
+        except Exception as e:
+            print(f"[TrajectoryVis] Failed to write traj snapshot: {e}")
+
+    def log(self, logs, *args, **kwargs):
+        """重写 log 方法，注入子 loss 指标到 HuggingFace 日志系统。"""
+        if hasattr(self, '_monitor_logs') and self._monitor_logs:
+            logs.update(self._monitor_logs)
+            self._monitor_logs = {}
+        return super().log(logs, *args, **kwargs)
 
     def create_optimizer(self):
         """创建优化器。仿照 NavDPTrainer.create_optimizer。"""
