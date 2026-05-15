@@ -237,6 +237,7 @@ class BridgeDPTrainer(BaseTrainer):
                 x0_target_ng, x0_pred_ng,
                 inputs_on_device["batch_prior"],
                 inputs_on_device["batch_labels"],
+                inputs_on_device["batch_theta_g"],
             )
 
         outputs = {
@@ -274,7 +275,7 @@ class BridgeDPTrainer(BaseTrainer):
         except Exception:
             return 0.0
 
-    def _write_traj_snapshot(self, x0_target, x0_pred, prior_traj, gt_labels):
+    def _write_traj_snapshot(self, x0_target, x0_pred, prior_traj, gt_labels, batch_theta_g=None):
         """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。
 
         每 10 步写一次，避免 I/O 过于频繁。
@@ -287,6 +288,7 @@ class BridgeDPTrainer(BaseTrainer):
             batch_file = log_dir / 'traj_batches.jsonl'
 
             B = x0_target.shape[0]
+            theta_g_list = batch_theta_g.detach().cpu().view(-1).tolist() if batch_theta_g is not None else [None] * B
             record = {
                 "batch_idx": self._log_step_count,
                 "step": self._log_step_count,
@@ -296,6 +298,7 @@ class BridgeDPTrainer(BaseTrainer):
                         "pred_traj":  x0_pred[i].detach().cpu().tolist(),
                         "prior_traj": prior_traj[i].detach().cpu().tolist(),
                         "gt_labels":  gt_labels[i].detach().cpu().tolist(),
+                        "theta_g":    theta_g_list[i],
                     }
                     for i in range(B)
                 ],

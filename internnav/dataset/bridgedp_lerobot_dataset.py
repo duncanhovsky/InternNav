@@ -521,9 +521,15 @@ class BridgeDP_Base_Dataset(Dataset):
             )
             memory_start_choice = np.random.randint(pixel_start_choice, target_choice)
         else:
-            pixel_start_choice = np.random.randint(0, trajectory_length // 2)
-            target_choice = np.random.randint(pixel_start_choice + 1, trajectory_length - 1)
-            memory_start_choice = np.random.randint(pixel_start_choice, target_choice)
+            # 方案A：强制最小帧间距 = predict_size/2 * 4，防止轨迹退化为静止样本
+            min_gap = self.predict_size // 2 * 4  # = 48 帧
+            pixel_start_choice = np.random.randint(0, max(1, trajectory_length // 2))
+            target_min = pixel_start_choice + min_gap
+            if target_min >= trajectory_length - 1:
+                target_choice = min(pixel_start_choice + 1, trajectory_length - 1)
+            else:
+                target_choice = np.random.randint(target_min, trajectory_length - 1)
+            memory_start_choice = np.random.randint(pixel_start_choice, max(pixel_start_choice + 1, target_choice))
 
         if self.random_digit:
             memory_digit = np.random.randint(2, 8)
