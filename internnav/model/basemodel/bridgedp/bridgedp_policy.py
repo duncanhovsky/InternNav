@@ -303,7 +303,6 @@ class BridgeDPNet(PreTrainedModel):
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
         noise = torch.randn_like(x0)
         noisy_action = self.bridge_scheduler.add_noise(x0, goal, theta_g, timesteps, noise)
-        noisy_action[:, 0, :] = 0.0  # 起点固定为归一化原点，不参与加噪
         noisy_action_embed = self.input_embed(noisy_action)
         return x0, time_embeds, noisy_action_embed, timesteps
 
@@ -687,7 +686,6 @@ class BridgeDPNet(PreTrainedModel):
                     x0_pred, naction, k,
                     endpoint_expanded, theta_expanded,
                 )
-                naction[:, 0, :] = 0.0  # 每步保持起点为归一化原点
 
             # Critic 排序
             critic_values = self.predict_critic(naction, rgbd_embed)
@@ -773,7 +771,6 @@ class BridgeDPNet(PreTrainedModel):
                     x0_pred, naction, k,
                     goal_expanded, theta_expanded,
                 )
-                naction[:, 0, :] = 0.0  # 每步保持起点为归一化原点
 
             critic_values = self.predict_critic(naction, rgbd_embed)
 

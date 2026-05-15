@@ -325,67 +325,116 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
 
-  // 提取 x,y 坐标（取前两维）
-  const toXY = (traj) => {
+  // 提取 x,y,theta（前三维）；在轨迹前端插入公共起点 (0,0,0)
+  const toXYT = (traj) => {
     if (!traj || traj.length === 0) return [];
-    return traj.map(p => Array.isArray(p) ? [p[0], p[1]] : [p, 0]);
+    const pts = traj.map(p => Array.isArray(p) ? [p[0], p[1], p[2] ?? 0] : [p, 0, 0]);
+    return [[0, 0, 0], ...pts];  // 插入起点
   };
-  const gt = toXY(gtTraj), pred = toXY(predTraj), prior = toXY(priorTraj);
-  const all = [...gt, ...pred, ...prior];
+  const gt = toXYT(gtTraj), pred = toXYT(predTraj), prior = toXYT(priorTraj);
+  const all = [...gt, ...pred, ...prior, [0,0,0]];
   if (all.length === 0) return;
 
-  // 计算边界
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  // 计算边界（含原点）
+  let minX = 0, maxX = 0, minY = 0, maxY = 0;
   all.forEach(([x,y]) => { minX = Math.min(minX,x); maxX = Math.max(maxX,x); minY = Math.min(minY,y); maxY = Math.max(maxY,y); });
   const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
-  const pad = 30;
+  const pad = 38;
 
   const tx = (x) => pad + (x - minX) / rangeX * (W - 2*pad);
   const ty = (y) => H - pad - (y - minY) / rangeY * (H - 2*pad);
 
-  // 绘制网格
+  // ── 刻度 ──
+  const TICKS = 5;
   ctx.strokeStyle = '#1f2237'; ctx.lineWidth = 0.5;
-  for (let i = 0; i <= 4; i++) {
-    const gx = pad + i * (W-2*pad)/4, gy = pad + i * (H-2*pad)/4;
+  ctx.fillStyle = '#555'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+  for (let i = 0; i <= TICKS; i++) {
+    const xv = minX + i * rangeX / TICKS;
+    const gx = tx(xv);
     ctx.beginPath(); ctx.moveTo(gx, pad); ctx.lineTo(gx, H-pad); ctx.stroke();
+    ctx.fillText(xv.toFixed(2), gx, H - pad + 12);
+  }
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= TICKS; i++) {
+    const yv = minY + i * rangeY / TICKS;
+    const gy = ty(yv);
     ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W-pad, gy); ctx.stroke();
+    ctx.fillText(yv.toFixed(2), pad - 3, gy + 3);
   }
 
-  // 绘制先验轨迹（虚线灰色）
+  // 轴标签
+  ctx.fillStyle = '#666'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('x', W/2, H - 2);
+  ctx.save(); ctx.translate(10, H/2); ctx.rotate(-Math.PI/2); ctx.fillText('y', 0, 0); ctx.restore();
+
+  // ── 朝向箭头辅助函数 ──
+  function drawArrow(cx, cy, angle, len, color) {
+    // canvas y轴朝下，翻转y分量
+    const ex = cx + len * Math.cos(angle), ey = cy - len * Math.sin(angle);
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+    // 箭头头部
+    const hw = 3, ha = Math.atan2(cy - ey, ex - cx);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - hw*Math.cos(ha-0.4), ey - hw*Math.sin(ha-0.4));
+    ctx.lineTo(ex - hw*Math.cos(ha+0.4), ey - hw*Math.sin(ha+0.4));
+    ctx.closePath(); ctx.fill();
+  }
+
+  // ── 先验轨迹（虚线灰色，无朝向箭头） ──
   if (prior.length > 1) {
-    ctx.strokeStyle = '#666'; ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
     ctx.beginPath();
     prior.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
     ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // 绘制真值轨迹（绿色实线）
+  // ── 真值轨迹（绿色实线 + 朝向箭头） ──
   if (gt.length > 1) {
-    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2; ctx.setLineDash([]);
     ctx.beginPath();
     gt.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
     ctx.stroke();
-    // 起终点
-    ctx.fillStyle = '#4ade80'; ctx.beginPath(); ctx.arc(tx(gt[0][0]),ty(gt[0][1]),4,0,Math.PI*2); ctx.fill();
+    // 每个航点朝向箭头（跳过起点，起点用圆圈标记）
+    gt.forEach(([x,y,theta], i) => {
+      if (i === 0) {
+        // 起点：白色圆圈
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(tx(x),ty(y),5,0,Math.PI*2); ctx.stroke();
+      } else {
+        drawArrow(tx(x), ty(y), theta, 8, '#4ade80');
+      }
+    });
+    // 终点大圆
     ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(tx(gt[gt.length-1][0]),ty(gt[gt.length-1][1]),5,0,Math.PI*2); ctx.fill();
   }
 
-  // 绘制预测轨迹（蓝色实线）
+  // ── 预测轨迹（蓝色实线 + 朝向箭头） ──
   if (pred.length > 1) {
-    ctx.strokeStyle = '#7c9ef8'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#7c9ef8'; ctx.lineWidth = 2; ctx.setLineDash([]);
     ctx.beginPath();
     pred.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
     ctx.stroke();
+    pred.forEach(([x,y,theta], i) => {
+      if (i > 0) drawArrow(tx(x), ty(y), theta, 8, '#7c9ef8');
+    });
     ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
   }
 
-  // 绘制 theta_g 方向箭头（存储值=绿，计算值=橙）
-  if (gt.length > 0 && thetaG != null) {
-    const ox = tx(gt[0][0]), oy = ty(gt[0][1]);
-    const arrowLen = 40;
+  // ── 起点标记（公共原点 0,0） ──
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(tx(0),ty(0),6,0,Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('O', tx(0)+8, ty(0)+4);
+
+  // ── theta_g 方向箭头（从原点出发） ──
+  if (thetaG != null && gt.length > 0) {
+    const ox = tx(0), oy = ty(0);
+    const arrowLen = 36;
     const thetaCalc = Math.atan2(gt[gt.length-1][1], gt[gt.length-1][0]);
     [[thetaG, '#22c55e', 'θ_g存储'], [thetaCalc, '#fb923c', 'θ_g计算']].forEach(([angle, color, label]) => {
-      // canvas y轴朝下，需翻转y分量
       const ex = ox + arrowLen * Math.cos(angle), ey = oy - arrowLen * Math.sin(angle);
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([3,2]);
       ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
@@ -394,11 +443,6 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
       ctx.fillText(label, ex + 3, ey);
     });
   }
-
-  // 轴标签
-  ctx.fillStyle = '#666'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('x', W/2, H-5);
-  ctx.save(); ctx.translate(10, H/2); ctx.rotate(-Math.PI/2); ctx.fillText('y', 0, 0); ctx.restore();
 }
 
 // ── 原有渲染函数 ──

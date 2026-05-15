@@ -154,22 +154,26 @@ class BridgeDPTrainer(BaseTrainer):
         terminal_loss = (x0_pred_avg[:, -1, :2] - x0_target_avg[:, -1, :2]).square().mean()
 
         # 3. 动量惯性惩罚：线加速度 + 角加速度，约束轨迹符合有质量物体的自然运动
-        pred_step = x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]  # (B, T-1, 2) 速度向量
+        # 拼接起点 (0,0,0)，使"起点→第1航点"的初始速度也参与加速度惩罚
+        origin_2d = torch.zeros(x0_pred_avg.shape[0], 1, x0_pred_avg.shape[2], device=model_device)
+        pred_with_origin = torch.cat([origin_2d, x0_pred_avg], dim=1)  # (B, T+1, 3)
+        pred_step = pred_with_origin[:, 1:, :2] - pred_with_origin[:, :-1, :2]  # (B, T, 2) 速度向量
         if pred_step.shape[1] > 1:
             # 线加速度惩罚：惩罚速度幅度的突变
-            linear_accel = pred_step[:, 1:, :] - pred_step[:, :-1, :]  # (B, T-2, 2)
+            linear_accel = pred_step[:, 1:, :] - pred_step[:, :-1, :]  # (B, T-1, 2)
             linear_accel_loss = linear_accel.square().mean()
             # 角加速度惩罚：惩罚方向变化率的突变（用单位方向向量的二阶差分近似）
-            pred_dir_norm = F.normalize(pred_step + 1e-8, dim=-1)       # (B, T-1, 2)
-            angular_accel = pred_dir_norm[:, 1:, :] - pred_dir_norm[:, :-1, :]  # (B, T-2, 2)
+            pred_dir_norm = F.normalize(pred_step + 1e-8, dim=-1)       # (B, T, 2)
+            angular_accel = pred_dir_norm[:, 1:, :] - pred_dir_norm[:, :-1, :]  # (B, T-1, 2)
             angular_accel_loss = angular_accel.square().mean()
             momentum_loss = linear_accel_loss + angular_accel_loss
         else:
             momentum_loss = torch.tensor(0.0, device=model_device)
 
         # 4. 全局前进约束：只惩罚末端比起点更远离目标（允许绕行，不允许整体反转）
+        # 起点固定为 (0,0)，到目标的距离是常数，不依赖预测值
         goal_2d = inputs_on_device["batch_pg"][:, :2].unsqueeze(1)  # (B, 1, 2)
-        start_dist = (x0_pred_avg[:, 0:1, :2] - goal_2d).norm(dim=-1)
+        start_dist = goal_2d.norm(dim=-1)  # (B, 1)，起点 (0,0) 到目标的距离
         end_dist   = (x0_pred_avg[:, -1:, :2] - goal_2d).norm(dim=-1)
         global_forward_loss = torch.relu(end_dist - start_dist + 0.1).mean()
 

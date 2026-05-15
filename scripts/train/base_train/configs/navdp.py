@@ -69,7 +69,6 @@ navdp_exp_cfg = ExpCfg(
         filter_failure=FilterFailure(
             use=True,  # 是否过滤失败轨迹样本。
             min_rgb_nums=15,  # 最少 RGB 帧数阈值
-最大点误差: 0.0689，小于该值的轨迹会被过滤。
         ),
         loss=Loss(
             alpha=0.0001,  # 损失项权重超参（由模型内部读取）。
