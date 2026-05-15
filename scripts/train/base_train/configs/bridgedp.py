@@ -92,7 +92,7 @@ bridgedp_exp_cfg = ExpCfg(
         sigma_goal=0.001,
         n_prior_tokens=4,
         num_train_timesteps=100,
-        num_inference_timesteps=10,
+        num_inference_timesteps=100,
         use_prior_traj=False,
     ),
     model=bridgedp_cfg,

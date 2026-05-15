@@ -93,6 +93,7 @@ class BridgeDPTrainer(BaseTrainer):
             "batch_augment_critic": inputs["batch_augment_critic"].to(model_device),
             "batch_prior": inputs["batch_prior"].to(model_device),
             "batch_theta_g": inputs["batch_theta_g"].to(model_device),
+            "batch_valid_mask": inputs["batch_valid_mask"].to(model_device),
         }
         torch.cuda.synchronize(model_device)
 
@@ -131,11 +132,17 @@ class BridgeDPTrainer(BaseTrainer):
         # 归一化使权重均值为 1（不改变总体损失量级）
         snr_weight = snr_weight / snr_weight.mean().clamp(min=1e-6)
 
-        # ── 动作分支损失：SNR 加权 MSE ─────────────────────────────────
-        ng_pointwise = (x0_pred_ng - x0_target_ng).square()  # (B, T, 3)
-        mg_pointwise = (x0_pred_mg - x0_target_mg).square()  # (B, T, 3)
-        ng_action_loss = (snr_weight * ng_pointwise).mean()
-        mg_action_loss = (snr_weight * mg_pointwise).mean()
+        # ── 动作分支损失：SNR 加权 + 有效步掩码 MSE ────────────────────
+        # valid_mask: (B, T)，0 表示静止填充步，不参与损失
+        valid_mask = inputs_on_device["batch_valid_mask"]  # (B, T)
+        ng_pointwise = (x0_pred_ng - x0_target_ng).square().mean(dim=-1)   # (B, T)
+        mg_pointwise = (x0_pred_mg - x0_target_mg).square().mean(dim=-1)   # (B, T)
+        snr_w = snr_weight.squeeze(-1)  # (B, T) or (B, 1) → broadcast
+        weighted_ng = snr_w * valid_mask * ng_pointwise
+        weighted_mg = snr_w * valid_mask * mg_pointwise
+        valid_count = valid_mask.sum().clamp(min=1.0)
+        ng_action_loss = weighted_ng.sum() / valid_count
+        mg_action_loss = weighted_mg.sum() / valid_count
 
         # ── 轨迹结构正则化 ──────────────────────────────────────────────
         x0_pred_avg = 0.5 * x0_pred_ng + 0.5 * x0_pred_mg
@@ -167,6 +174,12 @@ class BridgeDPTrainer(BaseTrainer):
         end_dist   = (x0_pred_avg[:, -1:, :2] - goal_2d).norm(dim=-1)
         global_forward_loss = torch.relu(end_dist - start_dist + 0.1).mean()
 
+        # 5. 路径长度比约束（方案B）：惩罚预测路径比真值路径长超过 50%
+        #    权重极小（0.02），不干扰 Critic 的避障学习
+        gt_len = (x0_target_avg[:, 1:, :2] - x0_target_avg[:, :-1, :2]).norm(dim=-1).sum(dim=-1)    # (B,)
+        pred_len = (x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]).norm(dim=-1).sum(dim=-1)      # (B,)
+        path_ratio_loss = torch.relu(pred_len / (gt_len + 0.01) - 1.5).mean()
+
         # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
         aux_loss = (
             0.5 * (inputs_on_device["batch_pg"] - imagegoal_aux_pred).square().mean()
@@ -189,7 +202,8 @@ class BridgeDPTrainer(BaseTrainer):
                 + 0.3  * start_loss           # 起点对齐
                 + 0.2  * terminal_loss        # 终点对齐
                 + 0.1  * momentum_loss        # 动量惯性（线加速度 + 角加速度）
-                + 0.05 * global_forward_loss) # 全局前进（软约束）
+                + 0.05 * global_forward_loss  # 全局前进（软约束）
+                + 0.02 * path_ratio_loss)     # 路径长度比（方案B，极小权重）
 
         # 先验 vs 真值偏差（量化先验质量）
         prior_gt_mse = (inputs_on_device["batch_prior"] - inputs_on_device["batch_labels"]).square().mean()
@@ -205,6 +219,8 @@ class BridgeDPTrainer(BaseTrainer):
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f}, "
                       f"start={start_loss.item():.4f}, term={terminal_loss.item():.4f}, "
                       f"momentum={momentum_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
+                      f"path_ratio={path_ratio_loss.item():.4f}, "
+                      f"valid_frac={valid_mask.mean().item():.2f}, "
                       f"snr_w=[{snr_weight.min().item():.2f},{snr_weight.max().item():.2f}]")
 
         # ── 监控增强：上报子 loss 到 HuggingFace log 系统 ──
@@ -223,7 +239,9 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/terminal":     terminal_loss.item(),
                 "loss/momentum":     momentum_loss.item(),
                 "loss/global_fwd":   global_forward_loss.item(),
+                "loss/path_ratio":   path_ratio_loss.item(),
                 "loss/prior_gt_mse": prior_gt_mse.item(),
+                "debug/valid_frac":  valid_mask.mean().item(),
                 "debug/snr_w_min":   snr_weight.min().item(),
                 "debug/snr_w_max":   snr_weight.max().item(),
                 "debug/x0_pred_min":   x0_pred_ng.min().item(),

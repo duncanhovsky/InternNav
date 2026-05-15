@@ -68,7 +68,8 @@ navdp_exp_cfg = ExpCfg(
         ddp_find_unused_parameters=True,  # DDP 未使用参数检查开关；复杂分支模型建议开启。
         filter_failure=FilterFailure(
             use=True,  # 是否过滤失败轨迹样本。
-            min_rgb_nums=15,  # 最少 RGB 帧数阈值，小于该值的轨迹会被过滤。
+            min_rgb_nums=15,  # 最少 RGB 帧数阈值
+最大点误差: 0.0689，小于该值的轨迹会被过滤。
         ),
         loss=Loss(
             alpha=0.0001,  # 损失项权重超参（由模型内部读取）。

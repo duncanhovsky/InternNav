@@ -640,6 +640,11 @@ class BridgeDP_Base_Dataset(Dataset):
             mode='constant', constant_values=0,
         )
 
+        # 方案A：计算有效步数掩码（归一化前，用原始坐标判断是否为重复填充点）
+        # 相邻步位移 > 阈值则为有效运动步；第 0 步（第 1 个航点）始终有效
+        step_diffs = np.linalg.norm(pred_actions[1:, :2] - pred_actions[:-1, :2], axis=-1)  # (T-1,)
+        valid_mask = np.concatenate([[1.0], (step_diffs > 1e-4).astype(np.float32)])         # (T,)
+
         # 2. 计算目标方位角（在归一化之前，使用原始坐标）
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
 
@@ -678,6 +683,7 @@ class BridgeDP_Base_Dataset(Dataset):
         augment_critic = torch.tensor(augment_critic, dtype=torch.float32)
         prior_traj = torch.tensor(prior_traj, dtype=torch.float32)
         theta_g = torch.tensor(theta_g, dtype=torch.float32)
+        valid_mask = torch.tensor(valid_mask, dtype=torch.float32)
 
         return (
             point_goal,       # 0: (3,) 已归一化
@@ -692,6 +698,7 @@ class BridgeDP_Base_Dataset(Dataset):
             float(pixel_flag),  # 9: float
             prior_traj,       # 10: (T_pred, 3) 已归一化先验轨迹
             theta_g,          # 11: scalar 目标方位角（原始值，未归一化）
+            valid_mask,       # 12: (T_pred,) 有效步掩码（1=真实运动，0=填充静止）
         )
 
 
@@ -714,5 +721,6 @@ def bridgedp_collate_fn(batch):
         # pixel_flag (item[9]) 与 NavDP 一致，不进 collate
         "batch_prior": torch.stack([item[10] for item in batch]),
         "batch_theta_g": torch.stack([item[11] for item in batch]),
+        "batch_valid_mask": torch.stack([item[12] for item in batch]),
     }
     return collated
