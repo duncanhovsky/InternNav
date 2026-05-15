@@ -147,21 +147,25 @@ class BridgeDPTrainer(BaseTrainer):
         # 2. 终点约束：与真值末端对齐（比 batch_pg 更稳定）
         terminal_loss = (x0_pred_avg[:, -1, :2] - x0_target_avg[:, -1, :2]).square().mean()
 
-        # 3. 二阶方向平滑：惩罚方向突变而非绝对位移差
-        pred_step = x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]  # (B, T-1, 2)
-        smooth_loss = (pred_step[:, 1:, :] - pred_step[:, :-1, :]).square().mean() if pred_step.shape[1] > 1 else torch.tensor(0.0, device=model_device)
+        # 3. 动量惯性惩罚：线加速度 + 角加速度，约束轨迹符合有质量物体的自然运动
+        pred_step = x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]  # (B, T-1, 2) 速度向量
+        if pred_step.shape[1] > 1:
+            # 线加速度惩罚：惩罚速度幅度的突变
+            linear_accel = pred_step[:, 1:, :] - pred_step[:, :-1, :]  # (B, T-2, 2)
+            linear_accel_loss = linear_accel.square().mean()
+            # 角加速度惩罚：惩罚方向变化率的突变（用单位方向向量的二阶差分近似）
+            pred_dir_norm = F.normalize(pred_step + 1e-8, dim=-1)       # (B, T-1, 2)
+            angular_accel = pred_dir_norm[:, 1:, :] - pred_dir_norm[:, :-1, :]  # (B, T-2, 2)
+            angular_accel_loss = angular_accel.square().mean()
+            momentum_loss = linear_accel_loss + angular_accel_loss
+        else:
+            momentum_loss = torch.tensor(0.0, device=model_device)
 
         # 4. 全局前进约束：只惩罚末端比起点更远离目标（允许绕行，不允许整体反转）
         goal_2d = inputs_on_device["batch_pg"][:, :2].unsqueeze(1)  # (B, 1, 2)
         start_dist = (x0_pred_avg[:, 0:1, :2] - goal_2d).norm(dim=-1)
         end_dist   = (x0_pred_avg[:, -1:, :2] - goal_2d).norm(dim=-1)
         global_forward_loss = torch.relu(end_dist - start_dist + 0.1).mean()
-
-        # 5. 方向一致性约束
-        pred_dir = pred_step
-        gt_dir = x0_target_avg[:, 1:, :2] - x0_target_avg[:, :-1, :2]
-        cos_sim = F.cosine_similarity(pred_dir + 1e-8, gt_dir + 1e-8, dim=-1)
-        dir_loss = (1.0 - cos_sim).mean()
 
         # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
         aux_loss = (
@@ -184,9 +188,8 @@ class BridgeDPTrainer(BaseTrainer):
                 + 0.5  * aux_loss
                 + 0.3  * start_loss           # 起点对齐
                 + 0.2  * terminal_loss        # 终点对齐
-                + 0.05 * smooth_loss          # 二阶方向平滑
-                + 0.05 * global_forward_loss  # 全局前进（软约束）
-                + 0.1  * dir_loss)            # 方向一致性
+                + 0.1  * momentum_loss        # 动量惯性（线加速度 + 角加速度）
+                + 0.05 * global_forward_loss) # 全局前进（软约束）
 
         # 先验 vs 真值偏差（量化先验质量）
         prior_gt_mse = (inputs_on_device["batch_prior"] - inputs_on_device["batch_labels"]).square().mean()
@@ -201,8 +204,7 @@ class BridgeDPTrainer(BaseTrainer):
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f}, "
                       f"start={start_loss.item():.4f}, term={terminal_loss.item():.4f}, "
-                      f"smooth={smooth_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
-                      f"dir={dir_loss.item():.4f}, "
+                      f"momentum={momentum_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
                       f"snr_w=[{snr_weight.min().item():.2f},{snr_weight.max().item():.2f}]")
 
         # ── 监控增强：上报子 loss 到 HuggingFace log 系统 ──
@@ -219,9 +221,8 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/aux":          aux_loss.item(),
                 "loss/start":        start_loss.item(),
                 "loss/terminal":     terminal_loss.item(),
-                "loss/smooth":       smooth_loss.item(),
+                "loss/momentum":     momentum_loss.item(),
                 "loss/global_fwd":   global_forward_loss.item(),
-                "loss/direction":    dir_loss.item(),
                 "loss/prior_gt_mse": prior_gt_mse.item(),
                 "debug/snr_w_min":   snr_weight.min().item(),
                 "debug/snr_w_max":   snr_weight.max().item(),
@@ -252,9 +253,8 @@ class BridgeDPTrainer(BaseTrainer):
             'critic_loss': critic_loss,
             'start_loss': start_loss,
             'terminal_loss': terminal_loss,
-            'smooth_loss': smooth_loss,
+            'momentum_loss': momentum_loss,
             'global_forward_loss': global_forward_loss,
-            'dir_loss': dir_loss,
         }
 
         return (loss, outputs) if return_outputs else loss
