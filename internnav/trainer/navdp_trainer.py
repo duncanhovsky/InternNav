@@ -1,5 +1,7 @@
+import json
 import os
 import time
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -157,6 +159,22 @@ class NavDPTrainer(BaseTrainer):
         # 注意这并非概率归一权重，而是经验加权系数。
         loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
 
+        # ── 监控增强：上报子 loss 到 HuggingFace log 系统 ──
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            if not hasattr(self, '_log_step_count'):
+                self._log_step_count = 0
+            self._log_step_count += 1
+            self._monitor_logs = {
+                "loss/total":      loss.item(),
+                "loss/action":     action_loss.item(),
+                "loss/ng_action":  ng_action_loss.item(),
+                "loss/mg_action":  mg_action_loss.item(),
+                "loss/critic":     critic_loss.item(),
+                "loss/aux":        aux_loss.item(),
+            }
+            self._write_traj_snapshot(ng_noise, pred_ng, inputs_on_device["batch_labels"])
+
         # 将关键中间量暴露给上游 Trainer，便于日志、可视化和离线排障。
         outputs = {
             'pred_ng': pred_ng,
@@ -181,6 +199,40 @@ class NavDPTrainer(BaseTrainer):
         # 与 HuggingFace Trainer 风格保持一致：
         # return_outputs 控制是否同时返回可分析字典。
         return (loss, outputs) if return_outputs else loss
+
+    def _write_traj_snapshot(self, noise_target, pred, gt_labels):
+        """每 10 步将 batch 轨迹数据追加写入 JSONL，供前端翻页可视化。"""
+        if not hasattr(self, '_log_step_count') or self._log_step_count % 10 != 0:
+            return
+        try:
+            log_dir = Path(self.args.output_dir).parent / 'logs'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            B = noise_target.shape[0]
+            record = {
+                "batch_idx": self._log_step_count,
+                "step": self._log_step_count,
+                "samples": [
+                    {
+                        "gt_traj":    noise_target[i].detach().cpu().tolist(),
+                        "pred_traj":  pred[i].detach().cpu().tolist(),
+                        "prior_traj": gt_labels[i].detach().cpu().tolist(),
+                        "gt_labels":  gt_labels[i].detach().cpu().tolist(),
+                        "theta_g":    None,
+                    }
+                    for i in range(B)
+                ],
+            }
+            with open(log_dir / 'traj_batches.jsonl', 'a') as f:
+                f.write(json.dumps(record) + '\n')
+        except Exception as e:
+            print(f"[TrajectoryVis] Failed to write traj snapshot: {e}")
+
+    def log(self, logs, *args, **kwargs):
+        """注入子 loss 指标到 HuggingFace 日志系统。"""
+        if hasattr(self, '_monitor_logs') and self._monitor_logs:
+            logs.update(self._monitor_logs)
+            self._monitor_logs = {}
+        return super().log(logs, *args, **kwargs)
 
     def create_optimizer(self):
         """创建并返回优化器。
