@@ -432,9 +432,14 @@ class BridgeDP_Base_Dataset(Dataset):
             local_augment_points.append(Tg)
         local_label_points = np.array(local_label_points)
         local_augment_points = np.array(local_augment_points)
-        # 动态采样：均匀分布 predict_size+1 个索引，避免暴力 clip 导致轨迹退化
+        # 动态采样：短轨迹用 clip（保证末端指向真实目标，修复 theta_g 污染）；
+        # 长轨迹用 linspace（均匀覆盖全程，避免只采前 96 帧）。
         max_idx = label_actions.shape[0] - 1
-        action_indexes = np.linspace(0, max_idx, self.predict_size + 1, dtype=int)
+        if max_idx < self.predict_size:
+            # 短轨迹：固定步长 clip，末端重复点在绝对坐标下是合法的 hold-last
+            action_indexes = np.clip(np.arange(self.predict_size + 1) * 4, 0, max_idx)
+        else:
+            action_indexes = np.linspace(0, max_idx, self.predict_size + 1, dtype=int)
         return local_label_points, local_augment_points, origin_world_points, result_augment_points, action_indexes
 
     def rank_steps(self, extrinsics, obstacle_points, pred_digit=4):
