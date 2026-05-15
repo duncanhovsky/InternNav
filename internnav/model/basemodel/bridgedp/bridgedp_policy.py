@@ -142,6 +142,8 @@ class BridgeDPNet(PreTrainedModel):
         self.sigma_goal = il.get('sigma_goal', 0.1)
         self.num_train_timesteps = il.get('num_train_timesteps', 100)
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
+        # use_prior_traj=False 时完全忽略先验轨迹输入（等价于全零先验）
+        self.use_prior_traj = il.get('use_prior_traj', False)
 
         # 动作空间归一化参数（必须与 bridgedp_lerobot_dataset.py 保持一致）
         self.action_scale_xy = 5.0
@@ -429,18 +431,17 @@ class BridgeDPNet(PreTrainedModel):
         input_depths = input_depths.to(device)
 
         # ── 布朗桥加噪（替代 NavDP 的 DDPM 加噪）───────────────────────
-        # 桥端点：x_0 = 起点(零向量) ↔ g = 轨迹最后一个真值点（非 goal_point）
-        # goal_point 仅作为网络条件输入，不参与桥的端点约束
-        traj_endpoint = tensor_label_actions[:, -1, :]  # (B, 3) 轨迹末端真值点
+        # 修复：桥终点统一使用 goal_point（与辅助损失目标一致），
+        # 避免 traj_endpoint 与 batch_pg 方向不对齐导致梯度冲突。
         shared_timesteps = torch.randint(
             0, self.bridge_scheduler.config.num_train_timesteps,
             (tensor_label_actions.shape[0],), device=device
         ).long()
         x0_ng, ng_time_embed, ng_noisy_embed, shared_timesteps = self.sample_bridge_noise(
-            tensor_label_actions, traj_endpoint, tensor_theta_g, timesteps=shared_timesteps
+            tensor_label_actions, tensor_point_goal, tensor_theta_g, timesteps=shared_timesteps
         )
         x0_mg, mg_time_embed, mg_noisy_embed, _ = self.sample_bridge_noise(
-            tensor_label_actions, traj_endpoint, tensor_theta_g, timesteps=shared_timesteps
+            tensor_label_actions, tensor_point_goal, tensor_theta_g, timesteps=shared_timesteps
         )
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
@@ -455,10 +456,17 @@ class BridgeDPNet(PreTrainedModel):
         pixelgoal_aux_pred = self.pixel_aux_head(pixelgoal_embed[:, 0])
 
         # ── 先验编码 + 视觉门控（Bridge-DP 新增）─────────────────────────
-        prior_tokens = self.prior_encoder(tensor_prior)  # (B, N_p, d)
-        vis_global = rgbd_embed.mean(dim=1)  # (B, d) mean pooling
-        gate = self.visual_gate(vis_global)  # (B, 1, 1)
-        gated_prior = gate * prior_tokens  # (B, N_p, d)
+        if self.use_prior_traj:
+            prior_tokens = self.prior_encoder(tensor_prior)  # (B, N_p, d)
+            vis_global = rgbd_embed.mean(dim=1)  # (B, d) mean pooling
+            gate = self.visual_gate(vis_global)  # (B, 1, 1)
+            gated_prior = gate * prior_tokens  # (B, N_p, d)
+        else:
+            # use_prior_traj=False: 完全忽略先验，用零 token 填充
+            gated_prior = torch.zeros(
+                tensor_prior.shape[0], self.n_prior_tokens, self.token_dim,
+                device=device
+            )
 
         # ── 标签/增强轨迹嵌入（用于 critic，与 NavDP 一致）────────────────
         label_embed = self.input_embed(tensor_label_actions).detach()
@@ -629,10 +637,16 @@ class BridgeDPNet(PreTrainedModel):
                     tensor_point_goal.shape[0], self.predict_size, 3, device=self._device
                 )
 
-            prior_tokens = self.prior_encoder(tensor_prior)
-            vis_global = rgbd_embed.mean(dim=1)
-            gate = self.visual_gate(vis_global)
-            gated_prior = gate * prior_tokens
+            if self.use_prior_traj:
+                prior_tokens = self.prior_encoder(tensor_prior)
+                vis_global = rgbd_embed.mean(dim=1)
+                gate = self.visual_gate(vis_global)
+                gated_prior = gate * prior_tokens
+            else:
+                gated_prior = torch.zeros(
+                    tensor_prior.shape[0], self.n_prior_tokens, self.token_dim,
+                    device=self._device
+                )
 
             # 推理时桥端点：用归一化目标方向上的轨迹末端估计作为桥终点
             # 取目标方向上 predict_size 步能到达的位置（归一化空间中约 1.0 单位/步）
@@ -710,10 +724,15 @@ class BridgeDPNet(PreTrainedModel):
             else:
                 tensor_prior = torch.zeros(B, self.predict_size, 3, device=self._device)
 
-            prior_tokens = self.prior_encoder(tensor_prior)
-            vis_global = rgbd_embed.mean(dim=1)
-            gate = self.visual_gate(vis_global)
-            gated_prior = gate * prior_tokens
+            if self.use_prior_traj:
+                prior_tokens = self.prior_encoder(tensor_prior)
+                vis_global = rgbd_embed.mean(dim=1)
+                gate = self.visual_gate(vis_global)
+                gated_prior = gate * prior_tokens
+            else:
+                gated_prior = torch.zeros(
+                    B, self.n_prior_tokens, self.token_dim, device=self._device
+                )
 
             naction = self.bridge_scheduler.sample_initial_noise(
                 zero_goal,

@@ -38,3 +38,4 @@ class IlCfg(BaseModel, extra='allow'):
     fallback_fps: Optional[float] = None
     loss: Optional[Loss] = None
     report_to: Optional[str] = None
+    use_prior_traj: Optional[bool] = False

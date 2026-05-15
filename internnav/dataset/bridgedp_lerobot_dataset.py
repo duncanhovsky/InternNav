@@ -361,18 +361,40 @@ class BridgeDP_Base_Dataset(Dataset):
         return R_abs, T_abs
 
     def xyz_to_xyt(self, xyz_actions, init_vector):
-        """将 3D 坐标转为平面 (x, y, theta)。仿照 NavDP L486-505。"""
+        """将 3D 坐标转为平面 (x, y, theta)。仿照 NavDP L486-505。
+
+        修复：短轨迹末端重复点（dx≈dz≈0）时，θ 不再直接复用前值，
+        而是用最近一个有效方向做线性插值，避免阶梯跳变被网络学习。
+        """
+        T = xyz_actions.shape[0]
         xyt_actions = []
-        for i in range(xyz_actions.shape[0]):
+        # 第一步：计算每帧的原始 theta（有效帧用差分，无效帧暂存 None）
+        raw_theta = []
+        for i in range(T):
             x = xyz_actions[i, 0]
             y = xyz_actions[i, 2] if xyz_actions.shape[1] > 2 else 0.0
             if i == 0:
                 theta = np.arctan2(init_vector[2], init_vector[0]) if np.linalg.norm(init_vector[[0, 2]]) > 1e-6 else 0.0
+                raw_theta.append(theta)
             else:
                 dx = xyz_actions[i, 0] - xyz_actions[i - 1, 0]
                 dz = xyz_actions[i, 2] - xyz_actions[i - 1, 2] if xyz_actions.shape[1] > 2 else 0.0
-                theta = np.arctan2(dz, dx) if abs(dx) + abs(dz) > 1e-6 else (xyt_actions[-1][2] if xyt_actions else 0.0)
-            xyt_actions.append([x, y, theta])
+                raw_theta.append(np.arctan2(dz, dx) if abs(dx) + abs(dz) > 1e-6 else None)
+            xyt_actions.append([x, y, 0.0])
+
+        # 第二步：对 None（重复点）做线性插值
+        # 找到所有有效索引
+        valid_idx = [i for i, v in enumerate(raw_theta) if v is not None]
+        if not valid_idx:
+            valid_idx = [0]
+            raw_theta[0] = 0.0
+        # 用 np.interp 在有效锚点间插值（自动处理边界外推为最近值）
+        valid_vals = [raw_theta[i] for i in valid_idx]
+        all_idx = np.arange(T, dtype=np.float32)
+        interp_theta = np.interp(all_idx, valid_idx, valid_vals)
+
+        for i in range(T):
+            xyt_actions[i][2] = float(interp_theta[i])
         return np.array(xyt_actions, dtype=np.float32)
 
     def process_actions(self, extrinsics, base_extrinsic, start_step, end_step, pred_digit=1):
@@ -481,7 +503,7 @@ class BridgeDP_Base_Dataset(Dataset):
         if is_task_start:
             return np.zeros((T, 3), dtype=np.float32)
 
-        if np.random.random() < 0.5:
+        if np.random.random() < 0.7:
             # 正确先验：起点到轨迹末端直线插值 + 极小噪声
             traj_end = pred_actions[-1].copy()
             t_interp = np.linspace(0, 1, T).reshape(-1, 1)
