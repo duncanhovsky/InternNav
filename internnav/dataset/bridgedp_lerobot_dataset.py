@@ -226,51 +226,72 @@ class BridgeDP_Base_Dataset(Dataset):
         return len(self.trajectory_data_dir)
 
     def load_image(self, image_url):
-        """读取 RGB 图像。仿照 NavDP L189-204。"""
+        """读取 RGB 图像。与 NavDP 一致，使用 PIL 读取。"""
         try:
-            image = cv2.imread(image_url)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            return image
+            image = Image.open(image_url)
+            image = np.array(image, np.uint8)
         except Exception as e:
             print(f"Error loading image {image_url}: {e}")
-            return np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+            image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        return image
 
     def load_depth(self, depth_url):
-        """读取深度图。仿照 NavDP L206-221。"""
+        """读取深度图（16-bit PNG）。与 NavDP 一致，使用 PIL 读取 uint16。"""
         try:
-            depth = cv2.imread(depth_url, cv2.IMREAD_UNCHANGED)
-            if depth is None:
-                return np.zeros((self.image_size, self.image_size, 1), dtype=np.float32)
-            if len(depth.shape) == 2:
-                depth = depth[:, :, np.newaxis]
-            return depth.astype(np.float32)
+            depth = Image.open(depth_url)
+            depth = np.array(depth, np.uint16)
         except Exception as e:
             print(f"Error loading depth {depth_url}: {e}")
-            return np.zeros((self.image_size, self.image_size, 1), dtype=np.float32)
+            depth = np.zeros((self.image_size, self.image_size), dtype=np.uint16)
+        return depth
 
     def load_pointcloud(self, pcd_url):
-        """读取点云。仿照 NavDP L223-233。"""
+        """读取点云。与 NavDP 一致，返回 open3d PointCloud 对象。"""
         pcd = o3d.io.read_point_cloud(pcd_url)
-        points = np.asarray(pcd.points)
-        return points
+        return pcd
 
     def process_image(self, image_path):
-        """图像增强：resize + normalize。仿照 NavDP L235-261。"""
+        """预处理 RGB 图像到统一分辨率并归一化。与 NavDP 一致。
+
+        处理流程：
+        1. 等比例缩放到最长边为 image_size。
+        2. 居中零填充至正方形。
+        3. 再次 resize 到精确尺寸。
+        4. 转为 float32 并归一化到 [0, 1]。
+        """
         image = self.load_image(image_path)
-        image = cv2.resize(image, (self.image_size, self.image_size))
-        image = image.astype(np.float32) / 255.0
+        H, W, C = image.shape
+        prop = self.image_size / max(H, W)
+        image = cv2.resize(image, (-1, -1), fx=prop, fy=prop)
+        pad_width = max((self.image_size - image.shape[1]) // 2, 0)
+        pad_height = max((self.image_size - image.shape[0]) // 2, 0)
+        pad_image = np.pad(
+            image, ((pad_height, pad_height), (pad_width, pad_width), (0, 0)), mode='constant', constant_values=0
+        )
+        image = cv2.resize(pad_image, (self.image_size, self.image_size))
+        image = np.array(image, np.float32) / 255.0
         return image
 
     def process_depth(self, depth_path):
-        """深度图增强。仿照 NavDP L263-287。"""
-        depth = self.load_depth(depth_path)
-        depth = cv2.resize(depth, (self.image_size, self.image_size))
-        if len(depth.shape) == 2:
-            depth = depth[:, :, np.newaxis]
-        max_depth = np.max(depth)
-        if max_depth > 0:
-            depth = depth / max_depth
-        return depth.astype(np.float32)
+        """预处理深度图到统一分辨率并过滤异常值。与 NavDP 一致。
+
+        深度由原始单位转换为米（除以 10000），并将过近/过远值置零。
+        输出 shape=(image_size, image_size, 1), dtype=float32, 单位=米。
+        """
+        depth = self.load_depth(depth_path) / 10000.0
+        H, W = depth.shape
+        prop = self.image_size / max(H, W)
+        depth = cv2.resize(depth, (-1, -1), fx=prop, fy=prop)
+        pad_width = max((self.image_size - depth.shape[1]) // 2, 0)
+        pad_height = max((self.image_size - depth.shape[0]) // 2, 0)
+        pad_depth = np.pad(
+            depth, ((pad_height, pad_height), (pad_width, pad_width)), mode='constant', constant_values=0
+        )
+        pad_depth[pad_depth > 5.0] = 0
+        pad_depth[pad_depth < 0.1] = 0
+        depth = cv2.resize(pad_depth, (self.image_size, self.image_size))
+        depth = np.array(depth, np.float32)
+        return depth[:, :, np.newaxis]
 
     def process_data_parquet(self, index):
         """解析 Parquet 轨迹数据。与 NavDP process_data_parquet 保持一致。
@@ -300,13 +321,24 @@ class BridgeDP_Base_Dataset(Dataset):
         return camera_intrinsic, base_extrinsic, extrinsics, trajectory_length
 
     def process_obstacle_points(self, index):
-        """障碍点处理。仿照 NavDP L311-332。"""
+        """从场景点云中提取障碍物点。与 NavDP 一致，按颜色阈值筛选。
+
+        颜色约定：接近 [0, 0, 0.5] 的点视作障碍物。
+        详见 docs/InternData-N1-数据集格式说明.md §五。
+        """
         afford_path = self.trajectory_afford_path[index]
         try:
-            points = self.load_pointcloud(afford_path)
+            scene_pcd = self.load_pointcloud(afford_path)
+            scene_color = np.array(scene_pcd.colors)
+            scene_points = np.array(scene_pcd.points)
+            color_distance = np.abs(scene_color - np.array([0, 0, 0.5])).sum(axis=-1)
+            select_index = np.where(color_distance < 0.05)[0]
+            obstacle_points = scene_points[select_index]
+            if obstacle_points.shape[0] == 0:
+                obstacle_points = np.zeros((1, 3), dtype=np.float32)
         except Exception:
-            points = np.zeros((1, 3), dtype=np.float32)
-        return points, afford_path
+            obstacle_points = np.zeros((1, 3), dtype=np.float32)
+        return obstacle_points, afford_path
 
     def process_memory(self, rgb_paths, depth_paths, start_step, memory_digit=1):
         """构建历史帧记忆。仿照 NavDP L334-355。"""
