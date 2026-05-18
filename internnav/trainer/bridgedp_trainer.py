@@ -61,11 +61,12 @@ class BridgeDPTrainer(BaseTrainer):
         print(f"[Rank {dist.get_rank() if dist.is_initialized() else 0}] Model device: {self.model_device}")
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """执行一次前向并计算双空间 ε-MSE 总损失。
+        """执行一次前向并计算 x₀-MSE 总损失。
 
         损失结构与 NavDP 对齐：
             loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
-        其中 action_loss = α * L_abs + (1-α) * L_rel，均为均匀 MSE（无 SNR 加权）。
+        其中 action_loss = L_x0 + λ_delta * L_delta，均为均匀 MSE（无 SNR 加权）。
+        valid_mask 用于屏蔽轨迹末端 padding 步。
         """
         model_device = next(model.parameters()).device
 
@@ -86,13 +87,13 @@ class BridgeDPTrainer(BaseTrainer):
 
         batch_label_critic   = inputs_on_device["batch_label_critic"]
         batch_augment_critic = inputs_on_device["batch_augment_critic"]
+        # valid_mask: (B, T) bool，True 表示该时间步有效
+        valid_mask = inputs_on_device["batch_valid_mask"].bool()  # (B, T)
 
-        # 前向：返回 12 值元组（双空间 ε-prediction）
-        (eps_abs_pred_ng, eps_abs_pred_mg,
-         eps_rel_pred_ng, eps_rel_pred_mg,
+        # 前向：返回 8 值元组（x₀-prediction）
+        (x0_pred_ng, x0_pred_mg,
          critic_pred, augment_pred,
-         ng_noise, mg_noise,
-         ng_noise_rel, mg_noise_rel,
+         ng_x0_target, mg_x0_target,
          imagegoal_aux_pred, pixelgoal_aux_pred) = model(
             inputs_on_device["batch_pg"],
             inputs_on_device["batch_ig"],
@@ -105,21 +106,28 @@ class BridgeDPTrainer(BaseTrainer):
             inputs_on_device["batch_theta_g"],
         )
 
-        # ── 绝对空间 ε-MSE（均匀，无 SNR 加权）──────────────────────────
-        ng_abs_loss = (eps_abs_pred_ng - ng_noise).square().mean()
-        mg_abs_loss = (eps_abs_pred_mg - mg_noise).square().mean()
-        L_abs = 0.5 * (ng_abs_loss + mg_abs_loss)
+        # ── x₀-MSE（带 valid_mask，屏蔽 padding 步）─────────────────────
+        mask = valid_mask.unsqueeze(-1).float()  # (B, T, 1)
+        ng_x0_loss = ((x0_pred_ng - ng_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
+        mg_x0_loss = ((x0_pred_mg - mg_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
+        L_x0 = 0.5 * (ng_x0_loss + mg_x0_loss)
 
-        # ── 相对空间 ε-MSE（增量差分，T-1 步）──────────────────────────
-        # eps_rel_pred 是 (B, T, 3)，noise_rel 是 (B, T-1, 3)，需截断对齐
-        ng_rel_loss = (eps_rel_pred_ng[:, :-1, :] - ng_noise_rel).square().mean()
-        mg_rel_loss = (eps_rel_pred_mg[:, :-1, :] - mg_noise_rel).square().mean()
-        L_rel = 0.5 * (ng_rel_loss + mg_rel_loss)
+        # ── 增量一致性正则（鼓励预测轨迹平滑）────────────────────────────
+        # L_delta = MSE(Δx̂₀, Δx₀_target)，Δ 为相邻步差分
+        mask_delta = (mask[:, :-1] * mask[:, 1:])  # (B, T-1, 1)
+        ng_delta_loss = (
+            ((x0_pred_ng[:, 1:] - x0_pred_ng[:, :-1])
+             - (ng_x0_target[:, 1:] - ng_x0_target[:, :-1])).square() * mask_delta
+        ).sum() / mask_delta.sum().clamp(min=1)
+        mg_delta_loss = (
+            ((x0_pred_mg[:, 1:] - x0_pred_mg[:, :-1])
+             - (mg_x0_target[:, 1:] - mg_x0_target[:, :-1])).square() * mask_delta
+        ).sum() / mask_delta.sum().clamp(min=1)
+        L_delta = 0.5 * (ng_delta_loss + mg_delta_loss)
 
-        # ── 双空间加权动作损失 ────────────────────────────────────────
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
-        alpha = getattr(il_cfg, 'alpha_dual_space', 0.5) if il_cfg else 0.5
-        action_loss = alpha * L_abs + (1.0 - alpha) * L_rel
+        lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
+        action_loss = L_x0 + lambda_delta * L_delta
 
         # ── Critic 损失（与 NavDP 一致）──────────────────────────────
         critic_loss = (
@@ -145,19 +153,17 @@ class BridgeDPTrainer(BaseTrainer):
             if self._log_step_count % 50 == 1:
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f} "
-                      f"(L_abs={L_abs.item():.4f}, L_rel={L_rel.item():.4f}), "
+                      f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}), "
                       f"critic={critic_loss.item():.4f}, aux={aux_loss.item():.4f}")
 
             grad_norm = self._compute_grad_norm(model)
             self._monitor_logs = {
                 "loss/total":      loss.item(),
                 "loss/action":     action_loss.item(),
-                "loss/L_abs":      L_abs.item(),
-                "loss/L_rel":      L_rel.item(),
-                "loss/ng_abs":     ng_abs_loss.item(),
-                "loss/mg_abs":     mg_abs_loss.item(),
-                "loss/ng_rel":     ng_rel_loss.item(),
-                "loss/mg_rel":     mg_rel_loss.item(),
+                "loss/L_x0":       L_x0.item(),
+                "loss/L_delta":    L_delta.item(),
+                "loss/ng_x0":      ng_x0_loss.item(),
+                "loss/mg_x0":      mg_x0_loss.item(),
                 "loss/critic":     critic_loss.item(),
                 "loss/aux":        aux_loss.item(),
                 "debug/grad_norm": grad_norm,
@@ -175,15 +181,15 @@ class BridgeDPTrainer(BaseTrainer):
                 )
 
         outputs = {
-            'eps_abs_pred_ng': eps_abs_pred_ng,
-            'eps_abs_pred_mg': eps_abs_pred_mg,
-            'critic_pred':     critic_pred,
-            'loss':            loss,
-            'action_loss':     action_loss,
-            'L_abs':           L_abs,
-            'L_rel':           L_rel,
-            'critic_loss':     critic_loss,
-            'aux_loss':        aux_loss,
+            'x0_pred_ng':  x0_pred_ng,
+            'x0_pred_mg':  x0_pred_mg,
+            'critic_pred': critic_pred,
+            'loss':        loss,
+            'action_loss': action_loss,
+            'L_x0':        L_x0.item(),
+            'L_delta':     L_delta.item(),
+            'critic_loss': critic_loss,
+            'aux_loss':    aux_loss,
         }
 
         return (loss, outputs) if return_outputs else loss
@@ -246,13 +252,9 @@ class BridgeDPTrainer(BaseTrainer):
 
                 model_ref.bridge_scheduler.set_timesteps(10)
                 for k in model_ref.bridge_scheduler.timesteps:
-                    eps_pred = model_ref.predict_noise(
+                    x0_pred = model_ref.predict_x0(
                         naction, k.to(device).unsqueeze(0),
                         pointgoal_embed, rgbd_embed, gated_prior,
-                    )
-                    x0_pred = model_ref._eps_to_x0(
-                        eps_pred, naction, k.to(device).unsqueeze(0),
-                        endpoint_exp, theta_exp,
                     )
                     naction = model_ref.bridge_scheduler.step(
                         x0_pred, naction, k.to(device), endpoint_exp, theta_exp,

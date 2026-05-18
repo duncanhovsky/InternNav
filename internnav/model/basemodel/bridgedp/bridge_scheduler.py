@@ -250,7 +250,7 @@ class BridgeScheduler:
         timestep: torch.Tensor,
         goal: torch.Tensor,
         theta_g: torch.Tensor,
-        eta: float = 0.5,
+        eta: float = 0.0,
     ) -> torch.Tensor:
         """布朗桥 DDIM + 随机扰动反向去噪一步。
 

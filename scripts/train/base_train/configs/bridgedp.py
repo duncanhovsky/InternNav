@@ -88,16 +88,21 @@ bridgedp_exp_cfg = ExpCfg(
         # n_prior_tokens: PriorEncoder 输出 token 数量
         # num_train_timesteps: 训练时扩散步数（与 NavDP 保持一致，布朗桥端点约束加速收敛）
         # num_inference_timesteps: 推理时 DDIM 去噪步数（与 NavDP 保持一致）
-        sigma_base=0.1,
-        sigma_goal=0.1,
+        sigma_base=0.5,
+        sigma_goal=0.3,
         n_prior_tokens=4,
         num_train_timesteps=10,
         num_inference_timesteps=10,
         use_prior_traj=False,
-        # ── 双空间联合约束超参数 ──
-        # alpha_dual_space: 绝对空间 L_abs 与相对空间 L_rel 的混合权重
-        #   action_loss = alpha * L_abs + (1-alpha) * L_rel
-        alpha_dual_space=0.5,
+        # ── 增量一致性正则超参数 ──
+        # lambda_delta: 增量一致性正则权重
+        #   action_loss = L_x0 + lambda_delta * L_delta
+        lambda_delta=0.1,
+        # ── 轨迹长度上限（归一化空间）──
+        # 由 compute_sigma_base.py --mode d_max 离线标定
+        # 含义：单次预测中 24 个航点覆盖的最大直线距离（归一化后）
+        # 当导航目标距离 < d_max 时，轨迹终点 ≈ 导航目标
+        d_max=0.85,
     ),
     model=bridgedp_cfg,
 )
