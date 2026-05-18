@@ -94,11 +94,10 @@ bridgedp_exp_cfg = ExpCfg(
         num_train_timesteps=10,
         num_inference_timesteps=10,
         use_prior_traj=False,
-        # ── 混合表示超参数（方案 C）──
-        # lambda_consistency: 双头一致性 loss 权重 (cumsum(Δ) ≈ x̂₀)
-        # lambda_smoothness:  加速度正则 loss 权重 (增量的一阶差分²)
-        lambda_consistency=0.15,
-        lambda_smoothness=0.1,
+        # ── 双空间联合约束超参数 ──
+        # alpha_dual_space: 绝对空间 L_abs 与相对空间 L_rel 的混合权重
+        #   action_loss = alpha * L_abs + (1-alpha) * L_rel
+        alpha_dual_space=0.5,
     ),
     model=bridgedp_cfg,
 )

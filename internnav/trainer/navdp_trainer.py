@@ -173,7 +173,11 @@ class NavDPTrainer(BaseTrainer):
                 "loss/critic":     critic_loss.item(),
                 "loss/aux":        aux_loss.item(),
             }
-            self._write_traj_snapshot(ng_noise, pred_ng, inputs_on_device["batch_labels"])
+            # 可视化：每 100 步执行一次真实去噪推理并写入 JSONL
+            if self._log_step_count % 100 == 0:
+                gt_traj_abs = torch.cumsum(inputs_on_device["batch_labels"], dim=1)
+                pred_traj_abs = self._infer_pred_traj_navdp(model, inputs_on_device)
+                self._write_traj_snapshot(gt_traj_abs, pred_traj_abs, inputs_on_device["batch_labels"])
 
         # 将关键中间量暴露给上游 Trainer，便于日志、可视化和离线排障。
         outputs = {
@@ -200,9 +204,50 @@ class NavDPTrainer(BaseTrainer):
         # return_outputs 控制是否同时返回可分析字典。
         return (loss, outputs) if return_outputs else loss
 
+    def _infer_pred_traj_navdp(self, model, inputs_on_device):
+        """对 batch[0] 执行去噪推理，返回绝对坐标预测轨迹 (B, T, 3)。
+
+        推理步数 10（与训练一致），仅取第 0 个样本，
+        结果 expand 到 batch size 以保持 _write_traj_snapshot 接口不变。
+        """
+        model_ref = model.module if hasattr(model, 'module') else model
+        B = inputs_on_device["batch_labels"].shape[0]
+        device = inputs_on_device["batch_labels"].device
+
+        def s(t):
+            return t[0:1]
+
+        was_training = model_ref.training
+        model_ref.eval()
+        try:
+            with torch.no_grad():
+                pg = s(inputs_on_device["batch_pg"])
+                pointgoal_embed = model_ref.point_encoder(pg).unsqueeze(1)
+                rgbd_embed = model_ref.rgbd_encoder(
+                    s(inputs_on_device["batch_rgb"]),
+                    s(inputs_on_device["batch_depth"]),
+                )
+
+                naction = torch.randn((1, model_ref.predict_size, 3), device=device)
+                model_ref.noise_scheduler.set_timesteps(10)
+                for k in model_ref.noise_scheduler.timesteps:
+                    noise_pred = model_ref.predict_noise(
+                        naction, k.to(device).unsqueeze(0), pointgoal_embed, rgbd_embed
+                    )
+                    naction = model_ref.noise_scheduler.step(
+                        model_output=noise_pred, timestep=k, sample=naction
+                    ).prev_sample
+
+                pred_abs = torch.cumsum(naction / 4.0, dim=1)  # (1, T, 3)
+        finally:
+            if was_training:
+                model_ref.train()
+
+        return pred_abs.expand(B, -1, -1)
+
     def _write_traj_snapshot(self, noise_target, pred, gt_labels):
-        """每 10 步将 batch 轨迹数据追加写入 JSONL，供前端翻页可视化。"""
-        if not hasattr(self, '_log_step_count') or self._log_step_count % 10 != 0:
+        """将 batch 轨迹数据追加写入 JSONL，供前端翻页可视化。由调用方控制写入频率。"""
+        if not hasattr(self, '_log_step_count'):
             return
         try:
             log_dir = Path(self.args.output_dir).parent / 'logs'

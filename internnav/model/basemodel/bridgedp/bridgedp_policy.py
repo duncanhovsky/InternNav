@@ -277,7 +277,10 @@ class BridgeDPNet(PreTrainedModel):
     # ------------------------------------------------------------------
 
     def sample_bridge_noise(self, x0, goal, theta_g, timesteps=None):
-        """布朗桥前向加噪，替代 NavDP 的 sample_noise()。
+        """布朗桥前向加噪（双空间 ε-prediction 版本）。
+
+        与旧版的区别：返回噪声 ε（训练目标）而非干净轨迹 x₀。
+        这使得训练信号与 NavDP 的 ε-prediction 完全同构。
 
         NavDP 使用 DDPMScheduler.add_noise(action, noise, timesteps)；
         Bridge-DP 使用 BridgeScheduler.add_noise(x0, goal, theta_g, timesteps)。
@@ -286,10 +289,10 @@ class BridgeDPNet(PreTrainedModel):
             x0: 干净轨迹 (B, T_pred, 3)，绝对坐标。
             goal: 目标位置 (B, 3)。
             theta_g: 目标方位角 (B,)。
-            timesteps: 可选的预生成时间步 (B,)，用于 ng/mg 共享时间步。
+            timesteps: 可选的预生成时间步 (B,)。
 
         Returns:
-            x0: 原始干净轨迹（训练目标）。
+            noise: 加噪使用的标准高斯噪声 ε（训练目标）(B, T_pred, 3)。
             time_embeds: 时间步嵌入 (B, 1, d)。
             noisy_action_embed: 含噪轨迹嵌入 (B, T_pred, d)。
             timesteps: 离散时间步 (B,)。
@@ -305,18 +308,19 @@ class BridgeDPNet(PreTrainedModel):
         noise = torch.randn_like(x0)
         noisy_action = self.bridge_scheduler.add_noise(x0, goal, theta_g, timesteps, noise)
         noisy_action_embed = self.input_embed(noisy_action)
-        return x0, time_embeds, noisy_action_embed, timesteps
+        # 返回 noise 而非 x0，使训练目标为 ε-prediction（与 NavDP 同构）
+        return noise, time_embeds, noisy_action_embed, timesteps
 
     # ------------------------------------------------------------------
     # 去噪预测
     # ------------------------------------------------------------------
 
-    def predict_x0(self, noisy_actions, timestep, goal_embed, rgbd_embed, prior_embed):
-        """预测干净轨迹 x̂_0，替代 NavDP 的 predict_noise()。
+    def predict_noise(self, noisy_actions, timestep, goal_embed, rgbd_embed, prior_embed):
+        """预测噪声 ε（双空间 ε-prediction 模式，推理专用）。
 
-        与 NavDP 的区别：
-        1. memory 序列末尾追加了门控先验 token
-        2. 预测目标是 x̂_0（干净轨迹）而非 ε（噪声）
+        与旧版 predict_x0 的区别：
+        - 输出语义为噪声 ε_abs 而非干净轨迹 x̂_0
+        - 仅使用 action_head（推理时只需绝对空间噪声预测）
 
         Args:
             noisy_actions: 含噪轨迹 (B, T_pred, 3)。
@@ -326,7 +330,7 @@ class BridgeDPNet(PreTrainedModel):
             prior_embed: 门控后先验 token (B, N_p, d) 或 (1, N_p, d)。
 
         Returns:
-            x0_pred: 预测的干净轨迹 (B, T_pred, 3)。
+            eps_pred: 预测的绝对空间噪声 (B, T_pred, 3)。
         """
         action_embeds = self.input_embed(noisy_actions)
         time_embeds = self.time_emb(timestep.to(self._device)).unsqueeze(1)
@@ -345,7 +349,36 @@ class BridgeDPNet(PreTrainedModel):
             tgt_mask=self.tgt_mask.to(self._device)
         )
         output = self.layernorm(output)
-        x0_pred = self.action_head(output)
+        eps_pred = self.action_head(output)
+        return eps_pred
+
+    def _eps_to_x0(self, eps_pred, x_t, timestep, goal, theta_g):
+        """从 ε 预测反解干净轨迹 x₀（推理专用）。
+
+        布朗桥加噪公式：x_t = (1-t)·x₀ + t·g + σ(t;θ_g)·ε
+        反解：x₀ = (x_t - t·g - σ·ε̂) / (1-t)
+
+        Args:
+            eps_pred: 网络预测的噪声 (B, T_pred, 3)。
+            x_t: 当前含噪轨迹 (B, T_pred, 3)。
+            timestep: 离散时间步，标量或 (1,)。
+            goal: 目标位置 (B, T_pred, 3) 或 (B, 3)。
+            theta_g: 目标方位角 (B,)。
+
+        Returns:
+            x0_pred: 反解的干净轨迹 (B, T_pred, 3)。
+        """
+        t = self.bridge_scheduler._normalized_time(timestep).float()
+        # 扩展维度以广播到 (B, T_pred, 3)
+        while t.dim() < x_t.dim():
+            t = t.unsqueeze(-1)
+        theta_g_expanded = theta_g.view(-1, 1, 1)
+        sigma = self.bridge_scheduler.std(t, theta_g_expanded)
+        # 广播 goal 到 (B, T_pred, 3)
+        if goal.dim() == 2:
+            goal = goal.unsqueeze(1).expand_as(x_t)
+        # x₀ = (x_t - t·g - σ·ε̂) / (1-t)，clamp 防止 t→1 时除零
+        x0_pred = (x_t - t * goal - sigma * eps_pred) / (1 - t).clamp(min=0.01)
         return x0_pred
 
     def predict_critic(self, predict_trajectory, rgbd_embed):
@@ -433,16 +466,15 @@ class BridgeDPNet(PreTrainedModel):
         input_images = input_images.to(device)
         input_depths = input_depths.to(device)
 
-        # ── 布朗桥加噪（替代 NavDP 的 DDPM 加噪）───────────────────────
+        # ── 布朗桥加噪（双空间 ε-prediction 版本）────────────────────────
         # ng/mg 各自独立采样时间步，增加训练多样性（与 NavDP 一致）
-        x0_ng, ng_time_embed, ng_noisy_embed, ng_timesteps = self.sample_bridge_noise(
+        # sample_bridge_noise 现在返回 noise 而非 x0
+        ng_noise, ng_time_embed, ng_noisy_embed, ng_timesteps = self.sample_bridge_noise(
             tensor_label_actions, tensor_point_goal, tensor_theta_g
         )
-        x0_mg, mg_time_embed, mg_noisy_embed, mg_timesteps = self.sample_bridge_noise(
+        mg_noise, mg_time_embed, mg_noisy_embed, mg_timesteps = self.sample_bridge_noise(
             tensor_label_actions, tensor_point_goal, tensor_theta_g
         )
-        # 用 ng 的时间步做 SNR 加权（与 ng_action_loss 对应）
-        shared_timesteps = ng_timesteps
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
         rgbd_embed = self.rgbd_encoder(input_images, input_depths)
@@ -513,20 +545,20 @@ class BridgeDPNet(PreTrainedModel):
         label_action_embeddings = self.drop(label_embed + out_pos_embed)
         augment_action_embeddings = self.drop(augment_embed + out_pos_embed)
 
-        # no-goal 分支：预测 x̂_0 + 增量 Δ
+        # no-goal 分支：双空间 ε-prediction
         ng_output = self.decoder(tgt=ng_action_embeddings, memory=ng_cond_embeddings, tgt_mask=self.tgt_mask)
         ng_output = self.layernorm(ng_output)
-        x0_pred_ng = self.action_head(ng_output)
-        delta_pred_ng = self.delta_head(ng_output)  # 混合表示：增量辅助预测
+        eps_abs_pred_ng = self.action_head(ng_output)   # 绝对空间噪声预测 (B, T, 3)
+        eps_rel_pred_ng = self.delta_head(ng_output)    # 增量空间噪声预测 (B, T, 3)
 
-        # mixed-goal 分支：预测 x̂_0 + 增量 Δ
+        # mixed-goal 分支：双空间 ε-prediction
         mg_output = self.decoder(
             tgt=mg_action_embeddings, memory=mg_cond_embeddings,
             tgt_mask=self.tgt_mask.to(device)
         )
         mg_output = self.layernorm(mg_output)
-        x0_pred_mg = self.action_head(mg_output)
-        delta_pred_mg = self.delta_head(mg_output)  # 混合表示：增量辅助预测
+        eps_abs_pred_mg = self.action_head(mg_output)   # 绝对空间噪声预测 (B, T, 3)
+        eps_rel_pred_mg = self.delta_head(mg_output)    # 增量空间噪声预测 (B, T, 3)
 
         # Critic 分支（与 NavDP 一致，不使用先验）
         cr_label_output = self.decoder(
@@ -543,19 +575,23 @@ class BridgeDPNet(PreTrainedModel):
         cr_augment_output = self.layernorm(cr_augment_output)
         cr_augment_pred = self.critic_head(cr_augment_output.mean(dim=1))[:, 0]
 
+        # 计算增量空间的噪声目标：D(ε_abs) = ε_abs[i] - ε_abs[i-1]
+        ng_noise_rel = ng_noise[:, 1:, :] - ng_noise[:, :-1, :]  # (B, T-1, 3)
+        mg_noise_rel = mg_noise[:, 1:, :] - mg_noise[:, :-1, :]  # (B, T-1, 3)
+
         return (
-            x0_pred_ng,        # (B, T_pred, 3) 预测干净轨迹（ng 分支）
-            x0_pred_mg,        # (B, T_pred, 3) 预测干净轨迹（mg 分支）
+            eps_abs_pred_ng,   # (B, T_pred, 3) 绝对空间噪声预测（ng 分支）
+            eps_abs_pred_mg,   # (B, T_pred, 3) 绝对空间噪声预测（mg 分支）
+            eps_rel_pred_ng,   # (B, T_pred, 3) 增量空间噪声预测（ng 分支）
+            eps_rel_pred_mg,   # (B, T_pred, 3) 增量空间噪声预测（mg 分支）
             cr_label_pred,     # (B,) critic 评分（标签轨迹）
             cr_augment_pred,   # (B,) critic 评分（增强轨迹）
-            x0_ng,             # (B, T_pred, 3) 训练目标（ng 分支）
-            x0_mg,             # (B, T_pred, 3) 训练目标（mg 分支）
+            ng_noise,          # (B, T_pred, 3) 绝对空间噪声目标（ng 分支）
+            mg_noise,          # (B, T_pred, 3) 绝对空间噪声目标（mg 分支）
+            ng_noise_rel,      # (B, T_pred-1, 3) 增量空间噪声目标（ng 分支）
+            mg_noise_rel,      # (B, T_pred-1, 3) 增量空间噪声目标（mg 分支）
             imagegoal_aux_pred,  # (B, 3) 辅助预测
             pixelgoal_aux_pred,  # (B, 3) 辅助预测
-            shared_timesteps,    # (B,) 共享时间步（用于 SNR 加权）
-            tensor_theta_g,      # (B,) 目标方位角（用于 SNR 加权）
-            delta_pred_ng,       # (B, T_pred, 3) 增量预测（ng 分支，方案 C）
-            delta_pred_mg,       # (B, T_pred, 3) 增量预测（mg 分支，方案 C）
         )
 
     # ------------------------------------------------------------------
@@ -680,9 +716,13 @@ class BridgeDPNet(PreTrainedModel):
             theta_expanded = tensor_theta_g.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
-                x0_pred = self.predict_x0(
+                eps_pred = self.predict_noise(
                     naction, k.to(self._device).unsqueeze(0),
                     pointgoal_embed, rgbd_embed, gated_prior
+                )
+                x0_pred = self._eps_to_x0(
+                    eps_pred, naction, k.to(self._device).unsqueeze(0),
+                    endpoint_expanded, theta_expanded,
                 )
                 naction = self.bridge_scheduler.step(
                     x0_pred, naction, k,
@@ -765,9 +805,13 @@ class BridgeDPNet(PreTrainedModel):
             theta_expanded = zero_theta.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
-                x0_pred = self.predict_x0(
+                eps_pred = self.predict_noise(
                     naction, k.to(self._device).unsqueeze(0),
                     nogoal_embed, rgbd_embed, gated_prior
+                )
+                x0_pred = self._eps_to_x0(
+                    eps_pred, naction, k.to(self._device).unsqueeze(0),
+                    goal_expanded, theta_expanded,
                 )
                 naction = self.bridge_scheduler.step(
                     x0_pred, naction, k,

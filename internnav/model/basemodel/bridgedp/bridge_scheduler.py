@@ -259,6 +259,7 @@ class BridgeScheduler:
         Args:
             eta: 随机扰动强度。0 为纯 DDIM 确定性；1 为完整随机扰动。
         """
+        timestep = timestep.to(x_t.device)
         t_norm = self._normalized_time(timestep).float()
         dt = 1.0 / self.num_train_timesteps
 
