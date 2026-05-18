@@ -1,0 +1,1 @@
+PYTHONPATH="$(pwd)" conda run -n internnav env PYTHONPATH="$(pwd)"   python scripts/dataset/generate_preload_index.py   --root_dir /home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.1-mini/vln_n1/traj_data   --output /home/monika/dyishere/project/MyResearch/InternNav/checkpoints/preload_index.json

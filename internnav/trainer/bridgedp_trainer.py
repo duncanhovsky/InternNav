@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
@@ -106,7 +105,8 @@ class BridgeDPTrainer(BaseTrainer):
          critic_pred, augment_pred,
          x0_target_ng, x0_target_mg,
          imagegoal_aux_pred, pixelgoal_aux_pred,
-         shared_timesteps, tensor_theta_g) = model(
+         shared_timesteps, tensor_theta_g,
+         delta_pred_ng, delta_pred_mg) = model(
             inputs_on_device["batch_pg"],
             inputs_on_device["batch_ig"],
             inputs_on_device["batch_tg"],
@@ -146,42 +146,28 @@ class BridgeDPTrainer(BaseTrainer):
         ng_action_loss = weighted_ng.sum() / valid_count
         mg_action_loss = weighted_mg.sum() / valid_count
 
-        # ── 轨迹结构正则化 ──────────────────────────────────────────────
+        # ── 轨迹结构正则化 ─────────────────────────────────────────────
         x0_pred_avg = 0.5 * x0_pred_ng + 0.5 * x0_pred_mg
         x0_target_avg = 0.5 * x0_target_ng + 0.5 * x0_target_mg
 
-        # 1. 终点约束：与真值末端对齐（比 batch_pg 更稳定）
+        # 终点约束：与真值末端对齐（比 batch_pg 更稳定）
         terminal_loss = (x0_pred_avg[:, -1, :2] - x0_target_avg[:, -1, :2]).square().mean()
 
-        # 3. 动量惯性惩罚：线加速度 + 角加速度，约束轨迹符合有质量物体的自然运动
-        # 拼接起点 (0,0,0)，使"起点→第1航点"的初始速度也参与加速度惩罚
-        origin_2d = torch.zeros(x0_pred_avg.shape[0], 1, x0_pred_avg.shape[2], device=model_device)
-        pred_with_origin = torch.cat([origin_2d, x0_pred_avg], dim=1)  # (B, T+1, 3)
-        pred_step = pred_with_origin[:, 1:, :2] - pred_with_origin[:, :-1, :2]  # (B, T, 2) 速度向量
-        if pred_step.shape[1] > 1:
-            # 线加速度惩罚：惩罚速度幅度的突变
-            linear_accel = pred_step[:, 1:, :] - pred_step[:, :-1, :]  # (B, T-1, 2)
-            linear_accel_loss = linear_accel.square().mean()
-            # 角加速度惩罚：惩罚方向变化率的突变（用单位方向向量的二阶差分近似）
-            pred_dir_norm = F.normalize(pred_step + 1e-8, dim=-1)       # (B, T, 2)
-            angular_accel = pred_dir_norm[:, 1:, :] - pred_dir_norm[:, :-1, :]  # (B, T-1, 2)
-            angular_accel_loss = angular_accel.square().mean()
-            momentum_loss = linear_accel_loss + angular_accel_loss
-        else:
-            momentum_loss = torch.tensor(0.0, device=model_device)
+        # ── 混合表示一致性约束（方案 C）─────────────────────────────────
+        # 增量累加应与绝对坐标预测一致：cumsum(Δ) ≈ x̂₀
+        x0_from_delta_ng = torch.cumsum(delta_pred_ng, dim=1)  # (B, T, 3)
+        x0_from_delta_mg = torch.cumsum(delta_pred_mg, dim=1)  # (B, T, 3)
+        consistency_ng = (x0_pred_ng - x0_from_delta_ng).square().mean(dim=-1)  # (B, T)
+        consistency_mg = (x0_pred_mg - x0_from_delta_mg).square().mean(dim=-1)  # (B, T)
+        consistency_loss = 0.5 * (
+            (valid_mask * consistency_ng).sum() / valid_count
+            + (valid_mask * consistency_mg).sum() / valid_count
+        )
 
-        # 4. 全局前进约束：只惩罚末端比起点更远离目标（允许绕行，不允许整体反转）
-        # 起点固定为 (0,0)，到目标的距离是常数，不依赖预测值
-        goal_2d = inputs_on_device["batch_pg"][:, :2].unsqueeze(1)  # (B, 1, 2)
-        start_dist = goal_2d.norm(dim=-1)  # (B, 1)，起点 (0,0) 到目标的距离
-        end_dist   = (x0_pred_avg[:, -1:, :2] - goal_2d).norm(dim=-1)
-        global_forward_loss = torch.relu(end_dist - start_dist + 0.1).mean()
-
-        # 5. 路径长度比约束（方案B）：惩罚预测路径比真值路径长超过 50%
-        #    权重极小（0.02），不干扰 Critic 的避障学习
-        gt_len = (x0_target_avg[:, 1:, :2] - x0_target_avg[:, :-1, :2]).norm(dim=-1).sum(dim=-1)    # (B,)
-        pred_len = (x0_pred_avg[:, 1:, :2] - x0_pred_avg[:, :-1, :2]).norm(dim=-1).sum(dim=-1)      # (B,)
-        path_ratio_loss = torch.relu(pred_len / (gt_len + 0.01) - 1.5).mean()
+        # ── 加速度正则（从增量视角，Δ 的一阶差分 = 加速度）──────────────
+        accel_ng = delta_pred_ng[:, 1:] - delta_pred_ng[:, :-1]  # (B, T-1, 3)
+        accel_mg = delta_pred_mg[:, 1:] - delta_pred_mg[:, :-1]  # (B, T-1, 3)
+        smoothness_loss = 0.5 * (accel_ng.square().mean() + accel_mg.square().mean())
 
         # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
         aux_loss = (
@@ -198,16 +184,20 @@ class BridgeDPTrainer(BaseTrainer):
             + (augment_pred - batch_augment_critic).square().mean()
         )
 
-        # ── 总损失 ──────────────────────────────────────────────────────
+        # ── 总损失（6 项：NavDP 结构 + 终点 + 混合表示一致性 + 平滑）────
+        # 从配置读取 lambda（有默认值兜底）
+        il_cfg = self.config.il if hasattr(self.config, 'il') else None
+        lambda_consistency = getattr(il_cfg, 'lambda_consistency', 0.15) if il_cfg else 0.15
+        lambda_smoothness = getattr(il_cfg, 'lambda_smoothness', 0.1) if il_cfg else 0.1
+
         loss = (0.8  * action_loss
                 + 0.2  * critic_loss
                 + 0.5  * aux_loss
-                + 0.2  * terminal_loss        # 终点对齐
-                + 0.1  * momentum_loss        # 动量惯性（线加速度 + 角加速度）
-                + 0.05 * global_forward_loss  # 全局前进（软约束）
-                + 0.02 * path_ratio_loss)     # 路径长度比（方案B，极小权重）
+                + 0.2  * terminal_loss
+                + lambda_consistency * consistency_loss   # 双头一致性（方案 C）
+                + lambda_smoothness  * smoothness_loss)   # 加速度正则（方案 C）
 
-        # 先验 vs 真值偏差（量化先验质量）
+        # 先验 vs 真值偏差（量化先验质量，仅用于监控）
         prior_gt_mse = (inputs_on_device["batch_prior"] - inputs_on_device["batch_labels"]).square().mean()
 
         # 收敛监控日志
@@ -220,8 +210,7 @@ class BridgeDPTrainer(BaseTrainer):
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f}, "
                       f"term={terminal_loss.item():.4f}, "
-                      f"momentum={momentum_loss.item():.4f}, gfwd={global_forward_loss.item():.4f}, "
-                      f"path_ratio={path_ratio_loss.item():.4f}, "
+                      f"consist={consistency_loss.item():.4f}, smooth={smoothness_loss.item():.4f}, "
                       f"valid_frac={valid_mask.mean().item():.2f}, "
                       f"snr_w=[{snr_weight.min().item():.2f},{snr_weight.max().item():.2f}]")
 
@@ -238,9 +227,8 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/critic":       critic_loss.item(),
                 "loss/aux":          aux_loss.item(),
                 "loss/terminal":     terminal_loss.item(),
-                "loss/momentum":     momentum_loss.item(),
-                "loss/global_fwd":   global_forward_loss.item(),
-                "loss/path_ratio":   path_ratio_loss.item(),
+                "loss/consistency":  consistency_loss.item(),
+                "loss/smoothness":   smoothness_loss.item(),
                 "loss/prior_gt_mse": prior_gt_mse.item(),
                 "debug/valid_frac":  valid_mask.mean().item(),
                 "debug/snr_w_min":   snr_weight.min().item(),
@@ -271,8 +259,8 @@ class BridgeDPTrainer(BaseTrainer):
             'aux_loss': aux_loss,
             'critic_loss': critic_loss,
             'terminal_loss': terminal_loss,
-            'momentum_loss': momentum_loss,
-            'global_forward_loss': global_forward_loss,
+            'consistency_loss': consistency_loss,
+            'smoothness_loss': smoothness_loss,
         }
 
         return (loss, outputs) if return_outputs else loss

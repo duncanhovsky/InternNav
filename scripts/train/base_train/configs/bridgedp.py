@@ -40,7 +40,7 @@ bridgedp_exp_cfg = ExpCfg(
         epochs=1000,
         batch_size=32,
         lr=1e-4,
-        num_workers=4,
+        num_workers=8,
         weight_decay=1e-4,
         warmup_ratio=0.05,
         use_iw=True,
@@ -50,14 +50,14 @@ bridgedp_exp_cfg = ExpCfg(
         load_from_ckpt=False,
         ckpt_to_load='',
         lmdb_map_size=1e12,
-        dataset_r2r_root_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.1-mini/vln_pe/raw_data/r2r',
+        dataset_r2r_root_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.5-mini/vln_pe/raw_data/r2r',
         lmdb_features_dir='r2r',
-        lerobot_features_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.1-mini/vln_pe/traj_data/r2r',
+        lerobot_features_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.5-mini/vln_pe/traj_data/r2r',
         camera_name='pano_camera_0',
         report_to='tensorboard',
         # 复用 NavDP 的数据索引和数据目录
         dataset_navdp='checkpoints/preload_index.json',
-        root_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.1-mini/vln_n1/traj_data',
+        root_dir='/home/monika/dyishere/dataset/InternData/N1/InternData-N1-v0.5-mini/vln_n1/traj_data',
         image_size=224,
         scene_scale=1.0,
         preload=True,
@@ -84,16 +84,21 @@ bridgedp_exp_cfg = ExpCfg(
         ),
         # ── Bridge-DP 专有超参数 ──
         # sigma_base: 数据驱动固定常数（由 compute_sigma_base.py 离线计算）
-        # sigma_goal: 弹性尾端松弛方差
+        # sigma_goal: 弹性尾端松弛方差（PointGoal 模式下适中约束）
         # n_prior_tokens: PriorEncoder 输出 token 数量
-        # num_train_timesteps: 训练时扩散步数（增大以提供足够的噪声水平覆盖）
-        # num_inference_timesteps: 推理时 DDIM 去噪步数
-        sigma_base=0.0813,
-        sigma_goal=0.001,
+        # num_train_timesteps: 训练时扩散步数（与 NavDP 保持一致，布朗桥端点约束加速收敛）
+        # num_inference_timesteps: 推理时 DDIM 去噪步数（与 NavDP 保持一致）
+        sigma_base=0.1,
+        sigma_goal=0.1,
         n_prior_tokens=4,
-        num_train_timesteps=100,
-        num_inference_timesteps=100,
+        num_train_timesteps=10,
+        num_inference_timesteps=10,
         use_prior_traj=False,
+        # ── 混合表示超参数（方案 C）──
+        # lambda_consistency: 双头一致性 loss 权重 (cumsum(Δ) ≈ x̂₀)
+        # lambda_smoothness:  加速度正则 loss 权重 (增量的一阶差分²)
+        lambda_consistency=0.15,
+        lambda_smoothness=0.1,
     ),
     model=bridgedp_cfg,
 )

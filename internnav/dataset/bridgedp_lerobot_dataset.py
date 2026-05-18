@@ -321,35 +321,37 @@ class BridgeDP_Base_Dataset(Dataset):
         return camera_intrinsic, base_extrinsic, extrinsics, trajectory_length
 
     def process_obstacle_points(self, index):
-        """从场景点云中提取障碍物点。与 NavDP 一致，按颜色阈值筛选。
+        """从场景点云中提取障碍物点。与 NavDP navdp_lerobot_dataset.py:345-366 对齐。
 
         颜色约定：接近 [0, 0, 0.5] 的点视作障碍物。
         详见 docs/InternData-N1-数据集格式说明.md §五。
+
+        Returns:
+            tuple: (obstacle_points: np.ndarray, obstacle_pcd: open3d.PointCloud)
+                与 NavDP 返回类型一致。
         """
-        afford_path = self.trajectory_afford_path[index]
-        try:
-            scene_pcd = self.load_pointcloud(afford_path)
-            scene_color = np.array(scene_pcd.colors)
-            scene_points = np.array(scene_pcd.points)
-            color_distance = np.abs(scene_color - np.array([0, 0, 0.5])).sum(axis=-1)
-            select_index = np.where(color_distance < 0.05)[0]
-            obstacle_points = scene_points[select_index]
-            if obstacle_points.shape[0] == 0:
-                obstacle_points = np.zeros((1, 3), dtype=np.float32)
-        except Exception:
-            obstacle_points = np.zeros((1, 3), dtype=np.float32)
-        return obstacle_points, afford_path
+        scene_pcd = self.load_pointcloud(self.trajectory_afford_path[index])
+        scene_color = np.array(scene_pcd.colors)
+        scene_points = np.array(scene_pcd.points)
+        color_distance = np.abs(scene_color - np.array([0, 0, 0.5])).sum(axis=-1)
+        select_index = np.where(color_distance < 0.05)[0]
+        scene_obstacle = o3d.geometry.PointCloud()
+        scene_obstacle.points = o3d.utility.Vector3dVector(scene_points[select_index])
+        scene_obstacle.colors = o3d.utility.Vector3dVector(scene_color[select_index])
+        return np.array(scene_obstacle.points), scene_obstacle
 
     def process_memory(self, rgb_paths, depth_paths, start_step, memory_digit=1):
-        """构建历史帧记忆。仿照 NavDP L334-355。"""
-        memory_images = []
-        memory_index = []
-        for i in range(self.memory_size):
-            idx = max(0, start_step - (self.memory_size - 1 - i) * memory_digit)
-            memory_images.append(self.process_image(rgb_paths[idx]))
-            memory_index.append(idx)
-        depth_image = self.process_depth(depth_paths[start_step])
-        return np.array(memory_images), depth_image, memory_index
+        """构建历史帧记忆。与 NavDP navdp_lerobot_dataset.py:368-389 对齐。
+
+        越界帧用零填充（而非重复第 0 帧），保留时序位置语义。
+        """
+        memory_index = np.arange(start_step - (self.memory_size - 1) * memory_digit, start_step + 1, memory_digit)
+        outrange_sum = (memory_index < 0).sum()
+        memory_index = memory_index[outrange_sum:]
+        context_image = np.zeros((self.memory_size, self.image_size, self.image_size, 3), np.float32)
+        context_image[outrange_sum:] = np.array([self.process_image(rgb_paths[i]) for i in memory_index])
+        context_depth = self.process_depth(depth_paths[start_step])
+        return context_image, context_depth, memory_index
 
     def process_pixel_goal(self, image_url, target_point, camera_intrinsic, camera_extrinsic):
         """将局部目标点投影到图像平面。仿照 NavDP L357-412。"""
@@ -381,53 +383,68 @@ class BridgeDP_Base_Dataset(Dataset):
             return pixel_goal, 0.0
 
     def relative_pose(self, R_base, T_base, R_world, T_world, base_extrinsic):
-        """计算相对位姿。仿照 NavDP L414-448。"""
-        R_rel = R_base.T @ R_world
-        T_rel = R_base.T @ (T_world - T_base)
-        return R_rel, T_rel
+        """计算相对位姿，与 NavDP navdp_dataset.py L221-239 完全对齐。
+
+        NavDP 在变换后做了坐标轴置换 [T[1], -T[0], T[2]]，
+        原简化实现遗漏了此步骤，导致 x/y 轴方向错误。
+        """
+        R_base = np.matmul(R_base, np.linalg.inv(base_extrinsic[0:3, 0:3]))
+        homo_RT = np.eye(4)
+        homo_RT[0:3, 0:3] = R_base
+        homo_RT[0:3, 3] = T_base
+        if len(T_world.shape) == 1:
+            R_frame = np.dot(R_world, R_base.T)
+            T_frame = np.dot(np.linalg.inv(homo_RT), np.array([*T_world, 1]).T)[0:3]
+            T_frame = np.array([T_frame[1], -T_frame[0], T_frame[2]])
+        else:
+            R_frame = np.dot(R_world, R_base.T)
+            T_frame = np.dot(
+                np.linalg.inv(homo_RT),
+                np.concatenate((T_world, np.ones((T_world.shape[0], 1))), axis=-1).T,
+            ).T[:, 0:3]
+            T_frame = T_frame[:, [1, 0, 2]]
+            T_frame[:, 1] = -T_frame[:, 1]
+        return R_frame, T_frame
 
     def absolute_pose(self, R_base, T_base, R_frame, T_frame, base_extrinsic):
-        """计算绝对位姿。仿照 NavDP L450-484。"""
-        R_abs = R_base @ R_frame
-        T_abs = R_base @ T_frame + T_base
-        return R_abs, T_abs
+        """计算绝对位姿，与 NavDP navdp_dataset.py L241-255 完全对齐。"""
+        R_base = np.matmul(R_base, np.linalg.inv(base_extrinsic[0:3, 0:3]))
+        homo_RT = np.eye(4)
+        homo_RT[0:3, 0:3] = R_base
+        homo_RT[0:3, 3] = T_base
+        if len(T_frame.shape) == 1:
+            R_world = np.dot(R_frame, R_base)
+            T_world = np.dot(homo_RT, np.array([-T_frame[1], T_frame[0], T_frame[2], 1]).T)[0:3]
+        else:
+            R_world = np.dot(R_frame, R_base)
+            T_world = np.dot(
+                homo_RT,
+                np.concatenate(
+                    (np.stack((-T_frame[:, 1], T_frame[:, 0], T_frame[:, 2]), axis=-1),
+                     np.ones((T_frame.shape[0], 1))),
+                    axis=-1,
+                ).T,
+            ).T[:, 0:3]
+        return R_world, T_world
 
     def xyz_to_xyt(self, xyz_actions, init_vector):
-        """将 3D 坐标转为平面 (x, y, theta)。仿照 NavDP L486-505。
+        """将局部三维轨迹点序列转换为二维平面动作序列 (x, y, theta)。
 
-        修复：短轨迹末端重复点（dx≈dz≈0）时，θ 不再直接复用前值，
-        而是用最近一个有效方向做线性插值，避免阶梯跳变被网络学习。
+        与 NavDP navdp_lerobot_dataset.py:520-539 对齐：
+        - 使用水平面分量 [0] 和 [1]（x, y），而非 [0] 和 [2]（x, z）
+        - theta 由 init_vector 与当前位移向量的夹角计算
+        - 输出 shape = (T-1, 3)，与 NavDP 一致
+
+        增强：短轨迹末端重复点（dx≈dy≈0）时，theta 用线性插值避免阶梯跳变。
         """
-        T = xyz_actions.shape[0]
         xyt_actions = []
-        # 第一步：计算每帧的原始 theta（有效帧用差分，无效帧暂存 None）
-        raw_theta = []
-        for i in range(T):
-            x = xyz_actions[i, 0]
-            y = xyz_actions[i, 2] if xyz_actions.shape[1] > 2 else 0.0
-            if i == 0:
-                theta = np.arctan2(init_vector[2], init_vector[0]) if np.linalg.norm(init_vector[[0, 2]]) > 1e-6 else 0.0
-                raw_theta.append(theta)
-            else:
-                dx = xyz_actions[i, 0] - xyz_actions[i - 1, 0]
-                dz = xyz_actions[i, 2] - xyz_actions[i - 1, 2] if xyz_actions.shape[1] > 2 else 0.0
-                raw_theta.append(np.arctan2(dz, dx) if abs(dx) + abs(dz) > 1e-6 else None)
-            xyt_actions.append([x, y, 0.0])
-
-        # 第二步：对 None（重复点）做线性插值
-        # 找到所有有效索引
-        valid_idx = [i for i, v in enumerate(raw_theta) if v is not None]
-        if not valid_idx:
-            valid_idx = [0]
-            raw_theta[0] = 0.0
-        # 用 np.interp 在有效锚点间插值（自动处理边界外推为最近值）
-        valid_vals = [raw_theta[i] for i in valid_idx]
-        all_idx = np.arange(T, dtype=np.float32)
-        interp_theta = np.interp(all_idx, valid_idx, valid_vals)
-
-        for i in range(T):
-            xyt_actions[i][2] = float(interp_theta[i])
-        return np.array(xyt_actions, dtype=np.float32)
+        for i in range(0, xyz_actions.shape[0] - 1):
+            current_vector = xyz_actions[i + 1] - xyz_actions[i]
+            dot_product = np.dot(init_vector[0:2], current_vector[0:2])
+            cross_product = np.cross(init_vector[0:2], current_vector[0:2])
+            theta = np.arctan2(cross_product, dot_product)
+            xyt_actions.append([xyz_actions[i][0], xyz_actions[i][1], theta])
+        return np.array(xyt_actions)
 
     def process_actions(self, extrinsics, base_extrinsic, start_step, end_step, pred_digit=1):
         """处理动作轨迹（含旋转增强+样条插值）。仿照 NavDP L507-590。"""
@@ -486,14 +503,9 @@ class BridgeDP_Base_Dataset(Dataset):
             local_augment_points.append(Tg)
         local_label_points = np.array(local_label_points)
         local_augment_points = np.array(local_augment_points)
-        # 动态采样：短轨迹用 clip（保证末端指向真实目标，修复 theta_g 污染）；
-        # 长轨迹用 linspace（均匀覆盖全程，避免只采前 96 帧）。
-        max_idx = label_actions.shape[0] - 1
-        if max_idx < self.predict_size:
-            # 短轨迹：固定步长 clip，末端重复点在绝对坐标下是合法的 hold-last
-            action_indexes = np.clip(np.arange(self.predict_size + 1) * 4, 0, max_idx)
-        else:
-            action_indexes = np.linspace(0, max_idx, self.predict_size + 1, dtype=int)
+        # 与 NavDP navdp_lerobot_dataset.py:623 对齐：
+        # 上界用 label_actions.shape[0] - 2，预留差分缓冲，避免 critic 差分末端退化。
+        action_indexes = np.clip(np.arange(self.predict_size + 1) * pred_digit, 0, label_actions.shape[0] - 2)
         return local_label_points, local_augment_points, origin_world_points, result_augment_points, action_indexes
 
     def rank_steps(self, extrinsics, obstacle_points, pred_digit=4):
@@ -524,8 +536,8 @@ class BridgeDP_Base_Dataset(Dataset):
         """生成先验轨迹，三种情况：
 
         1. 任务开始（is_task_start=True）：全零，无先验。
-        2. 任务中正确先验（50%）：起点到轨迹末端直线插值 + 0.5% 噪声。
-        3. 任务中错误先验（50%）：随机旋转 60-300° 的错误轨迹。
+        2. 任务中正确先验（70%）：起点到轨迹末端直线插值 + 0.5% 噪声。
+        3. 任务中错误先验（30%）：随机旋转 60-300° 的错误轨迹。
 
         Args:
             pred_actions: 标签轨迹 (T, 3)，已归一化绝对坐标。
@@ -677,7 +689,8 @@ class BridgeDP_Base_Dataset(Dataset):
         step_diffs = np.linalg.norm(pred_actions[1:, :2] - pred_actions[:-1, :2], axis=-1)  # (T-1,)
         valid_mask = np.concatenate([[1.0], (step_diffs > 1e-4).astype(np.float32)])         # (T,)
 
-        # 2. 计算目标方位角（在归一化之前，使用原始坐标）
+        # 2. 计算目标方位角（在归一化之前，使用原始水平面坐标 x, y）
+        # point_goal 来自 xyz_to_xyt，[0]=x, [1]=y（水平面），[2]=theta
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
 
         # 3. 动作空间归一化：将绝对坐标从 [0,~10m] 映射到 [-2,2]
