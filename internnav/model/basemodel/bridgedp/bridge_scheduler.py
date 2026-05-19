@@ -296,8 +296,10 @@ class BridgeScheduler:
     ) -> torch.Tensor:
         """从目标附近采样推理初始噪声 x_T ~ N(g, σ²_goal · I)。
 
-        对比 NavDP 的 ``torch.randn(...)``（标准高斯），Bridge-DP 的初始噪声
-        以目标为中心，幅度由 σ_goal 控制。
+        **已废弃**：请使用 ``sample_initial_noise_ordered()``，
+        该方法将 24 个航点有序分布在 x₀→x_n 区间上。
+
+        本方法保留以兼容旧代码路径。
 
         Args:
             goal: 目标位置，形状 (B, 1, 3) 或 (B, 3)。
@@ -306,11 +308,6 @@ class BridgeScheduler:
 
         Returns:
             初始含噪轨迹 x_T，形状 (B, T_pred, 3)。
-
-        场景自检 — 初始噪声的物理意义：
-            - PointGoal (σ_goal=0.1): x_T 紧密围绕目标位置 → 去噪快速收敛
-            - NoGoal (σ_goal=10.0): x_T 几乎是纯随机 → 等价于标准扩散起点
-            - 目标在身后: x_T 仍围绕目标采样，去噪过程通过 U-turn 路径到达起点
         """
         noise = torch.randn(shape, device=device)
 
@@ -320,6 +317,84 @@ class BridgeScheduler:
         goal = goal.expand(shape)
 
         return goal + self.sigma_goal * noise
+
+    def sample_initial_noise_ordered(
+        self,
+        goal: torch.Tensor,
+        origin: torch.Tensor,
+        d_max: float,
+        shape: tuple,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """有序区间初始化：24 个航点从 x₀ 到 x_n 线性分布，方差来自布朗桥。
+
+        布朗桥构建在 x₀→goal（导航目标）上，但 24 个航点只采样
+        前段 [x₀, x_n] 区间，其中 x_n 由 d_max 截断：
+
+            x_n = origin + dir(goal) × min(d_max, ||goal - origin||)
+
+        航点 i 的初始值：
+            均值 μ_i = lerp(origin, x_n, i/23)
+            方差 σ²_i = σ²(s_i; θ_g)，s_i 为该航点在完整桥上的位置参数
+
+        当 ||goal - origin|| ≤ d_max 时，x_n ≈ goal，轨迹覆盖全程。
+
+        Args:
+            goal: 导航目标，形状 (B, 3)，归一化坐标。
+            origin: 起点，形状 (B, 3)，通常为零向量（当前机器人位置）。
+            d_max: 归一化空间中的最大轨迹直线距离（由离线标定）。
+            shape: 输出形状 (B, T_pred, 3)。
+            device: 计算设备。
+
+        Returns:
+            初始含噪轨迹，形状 (B, T_pred, 3)，航点有序分布在 [origin, x_n] 上。
+
+        场景自检：
+            1. goal 在 3m 外 (归一化 0.6), d_max=0.85:
+               x_n = goal（0.6 < 0.85），航点覆盖全程 → 正确。
+            2. goal 在 10m 外 (归一化 2.0), d_max=0.85:
+               x_n = dir(goal) × 0.85，航点只覆盖前 4.25m → 正确。
+            3. NoGoal (goal=0): x_n = origin = 0，
+               所有航点 μ_i=0，方差小 → 退化为原点附近采样 → 需要 NoGoal 走独立路径。
+        """
+        B, T_pred, dim = shape
+
+        # 保证 origin 和 goal 都是 (B, 3)
+        if origin.dim() == 1:
+            origin = origin.unsqueeze(0).expand(B, -1)
+        if goal.dim() == 1:
+            goal = goal.unsqueeze(0).expand(B, -1)
+
+        # 目标方向和距离
+        goal_vec = goal - origin  # (B, 3)
+        goal_dist = goal_vec.norm(dim=-1, keepdim=True).clamp(min=1e-6)  # (B, 1)
+        goal_dir = goal_vec / goal_dist  # (B, 3) 单位方向
+
+        # 合理轨迹终点距离 = min(d_max, ||goal - origin||)
+        traj_dist = torch.clamp(goal_dist, max=d_max)  # (B, 1)
+        x_n = origin + goal_dir * traj_dist  # (B, 3) 轨迹终点
+
+        # 24 个航点从 origin 到 x_n 线性插值
+        t_traj = torch.linspace(0, 1, T_pred, device=device)  # (T,)
+        t_traj = t_traj.view(1, T_pred, 1)  # (1, T, 1)
+
+        origin_exp = origin.unsqueeze(1)  # (B, 1, 3)
+        x_n_exp = x_n.unsqueeze(1)        # (B, 1, 3)
+        mu = origin_exp + t_traj * (x_n_exp - origin_exp)  # (B, T, 3)
+
+        # 每个航点在完整布朗桥（x₀→goal）上的位置参数 s_i
+        # s_i = (i/23) × (traj_dist / goal_dist)
+        s_ratio = (traj_dist / goal_dist).unsqueeze(1)  # (B, 1, 1)
+        s_values = t_traj * s_ratio  # (B, T, 1)
+
+        # 计算方差：使用布朗桥在 s_i 处的方差
+        theta_g = torch.atan2(goal_vec[:, 1], goal_vec[:, 0])  # (B,)
+        theta_g_exp = theta_g.view(-1, 1, 1)  # (B, 1, 1)
+        sigma_per_point = self.std(s_values, theta_g_exp)  # (B, T, 1)
+
+        # 采样：μ_i + σ(s_i) · ε
+        noise = torch.randn(shape, device=device)
+        return mu + sigma_per_point * noise
 
     # ------------------------------------------------------------------
     # 序列化（兼容 config 属性访问模式）

@@ -241,11 +241,17 @@ class BridgeDPTrainer(BaseTrainer):
                     1, model_ref.n_prior_tokens, model_ref.token_dim, device=device
                 )
 
-                bridge_endpoint = pg_n  # (1, 3)
-                naction = model_ref.bridge_scheduler.sample_initial_noise(
-                    bridge_endpoint, (1, model_ref.predict_size, 3), device
+                # 有序区间初始化（与推理函数一致）
+                origin = torch.zeros_like(pg_n)  # (1, 3)
+                naction = model_ref.bridge_scheduler.sample_initial_noise_ordered(
+                    goal=pg_n,
+                    origin=origin,
+                    d_max=model_ref.d_max,
+                    shape=(1, model_ref.predict_size, 3),
+                    device=device,
                 )
-                endpoint_exp = bridge_endpoint.unsqueeze(1).expand(
+                # 去噪时 goal = 导航目标
+                goal_exp = pg_n.unsqueeze(1).expand(
                     -1, model_ref.predict_size, -1
                 )
                 theta_exp = theta_g
@@ -257,7 +263,7 @@ class BridgeDPTrainer(BaseTrainer):
                         pointgoal_embed, rgbd_embed, gated_prior,
                     )
                     naction = model_ref.bridge_scheduler.step(
-                        x0_pred, naction, k.to(device), endpoint_exp, theta_exp,
+                        x0_pred, naction, k.to(device), goal_exp, theta_exp,
                     )
 
                 pred_abs = model_ref._denormalize_action(naction)  # (1, T, 3)

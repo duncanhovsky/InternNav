@@ -144,6 +144,9 @@ class BridgeDPNet(PreTrainedModel):
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
         # use_prior_traj=False 时完全忽略先验轨迹输入（等价于全零先验）
         self.use_prior_traj = il.get('use_prior_traj', False)
+        # d_max: 归一化空间中单次预测的最大轨迹直线距离
+        # 由 compute_sigma_base.py --mode d_max 离线标定
+        self.d_max = il.get('d_max', 0.85)
 
         # 动作空间归一化参数（必须与 bridgedp_lerobot_dataset.py 保持一致）
         self.action_scale_xy = 5.0
@@ -641,31 +644,22 @@ class BridgeDPNet(PreTrainedModel):
                     device=self._device
                 )
 
-            # 推理时桥端点：用归一化目标方向上的轨迹末端估计作为桥终点
-            # 取目标方向上 predict_size 步能到达的位置（归一化空间中约 1.0 单位/步）
-            # 实际上用 goal_point 的方向单位向量 × predict_size × 平均步长
+            # ── 有序区间初始化：24 个航点从起点到合理终点线性分布 ──
+            # 桥终点 = 导航目标（与训练一致），初始化区间由 d_max 截断
             B = tensor_point_goal_n.shape[0]
-            # 桥终点 = 轨迹末端估计（归一化空间中，沿目标方向的合理终点）
-            # 用 goal_point 本身作为桥终点（归一化后量级与轨迹末端接近）
-            bridge_endpoint = tensor_point_goal_n  # (B, 3)，归一化后量级合理
-            endpoint_for_init = bridge_endpoint.repeat(sample_num, 1)
-            naction = self.bridge_scheduler.sample_initial_noise(
-                endpoint_for_init,
-                (sample_num * B, self.predict_size, 3),
-                self._device,
+            origin = torch.zeros_like(tensor_point_goal_n)  # 起点 = 机器人当前位置（归一化空间中的原点）
+            naction = self.bridge_scheduler.sample_initial_noise_ordered(
+                goal=tensor_point_goal_n.repeat(sample_num, 1),
+                origin=origin.repeat(sample_num, 1),
+                d_max=self.d_max,
+                shape=(sample_num * B, self.predict_size, 3),
+                device=self._device,
             )
-            # 方案C：方向扰动——将 sample_num 条轨迹均匀分布在目标周围不同方向
-            angles = torch.linspace(0, 2 * math.pi, sample_num, device=self._device)
-            dir_bias = torch.stack(
-                [torch.cos(angles), torch.sin(angles), torch.zeros(sample_num, device=self._device)], dim=-1
-            )  # (S, 3)
-            dir_bias = dir_bias.unsqueeze(1).expand(-1, self.predict_size, -1)  # (S, T, 3)
-            dir_bias = dir_bias.repeat(B, 1, 1) if B > 1 else dir_bias  # (S*B, T, 3)
-            naction = naction + dir_bias * 0.3
 
+            # 去噪时 goal 仍为导航目标（保持桥的一致性）
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
-            endpoint_expanded = bridge_endpoint.unsqueeze(1).expand(-1, self.predict_size, -1)
-            endpoint_expanded = endpoint_expanded.repeat(sample_num, 1, 1)
+            goal_expanded = tensor_point_goal_n.unsqueeze(1).expand(-1, self.predict_size, -1)
+            goal_expanded = goal_expanded.repeat(sample_num, 1, 1)
             theta_expanded = tensor_theta_g.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
@@ -675,7 +669,7 @@ class BridgeDPNet(PreTrainedModel):
                 )
                 naction = self.bridge_scheduler.step(
                     x0_pred, naction, k,
-                    endpoint_expanded, theta_expanded,
+                    goal_expanded, theta_expanded,
                 )
 
             # Critic 排序
@@ -735,19 +729,12 @@ class BridgeDPNet(PreTrainedModel):
                     B, self.n_prior_tokens, self.token_dim, device=self._device
                 )
 
+            # NoGoal: goal=0，无方向信息，使用旧的均匀初始化（不使用有序采样）
             naction = self.bridge_scheduler.sample_initial_noise(
                 zero_goal,
                 (sample_num * B, self.predict_size, 3),
                 self._device,
             )
-            # 方案C：方向扰动（NoGoal 模式同步应用）
-            angles = torch.linspace(0, 2 * math.pi, sample_num, device=self._device)
-            dir_bias = torch.stack(
-                [torch.cos(angles), torch.sin(angles), torch.zeros(sample_num, device=self._device)], dim=-1
-            )  # (S, 3)
-            dir_bias = dir_bias.unsqueeze(1).expand(-1, self.predict_size, -1)
-            dir_bias = dir_bias.repeat(B, 1, 1) if B > 1 else dir_bias
-            naction = naction + dir_bias * 0.3
 
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
             goal_expanded = zero_goal.unsqueeze(1).expand(-1, self.predict_size, -1).repeat(sample_num, 1, 1)

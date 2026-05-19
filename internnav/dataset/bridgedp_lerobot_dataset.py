@@ -650,7 +650,7 @@ class BridgeDP_Base_Dataset(Dataset):
             pred_critic = 2.0
             augment_critic = 2.0
 
-        point_goal = target_xyt_actions[-1]
+        # point_goal 已在下方 "Bridge-DP 核心差异点" 中重新赋值为导航目标
         image_goal = np.concatenate((
             self.process_image(self.trajectory_rgb_path[index][target_choice]),
             self.process_image(self.trajectory_rgb_path[index][memory_start_choice]),
@@ -689,13 +689,27 @@ class BridgeDP_Base_Dataset(Dataset):
         step_diffs = np.linalg.norm(pred_actions[1:, :2] - pred_actions[:-1, :2], axis=-1)  # (T-1,)
         valid_mask = np.concatenate([[1.0], (step_diffs > 1e-4).astype(np.float32)])         # (T,)
 
-        # 2. 计算目标方位角（在归一化之前，使用原始水平面坐标 x, y）
-        # point_goal 来自 xyz_to_xyt，[0]=x, [1]=y（水平面），[2]=theta
+        # 2. point_goal 改为导航目标（整条 episode 终点），而非轨迹片段终点
+        #    这保证训练-推理一致：网络学会"即使目标在 10m 外，当前只走合理的一段"
+        #    导航目标 = trajectory 最后一帧的位姿，转为相对于 memory_start_choice 的局部坐标
+        _, nav_goal_local = self.relative_pose(
+            trajectory_extrinsics[memory_start_choice][0:3, 0:3],
+            trajectory_extrinsics[memory_start_choice][0:3, 3],
+            trajectory_extrinsics[-1][0:3, 0:3],
+            trajectory_extrinsics[-1][0:3, 3],
+            trajectory_base_extrinsic,
+        )
+        # 计算导航目标方向角（从起点到导航目标的方位）
+        nav_goal_theta = np.arctan2(nav_goal_local[1], nav_goal_local[0])
+        point_goal = np.array([
+            nav_goal_local[0], nav_goal_local[1], nav_goal_theta
+        ], dtype=np.float32)
+
+        # 3. 计算目标方位角（在归一化之前，使用原始水平面坐标 x, y）
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
 
-        # 3. 动作空间归一化：将绝对坐标从 [0,~10m] 映射到 [-2,2]
+        # 4. 动作空间归一化：将绝对坐标从 [0,~10m] 映射到 [-2,2]
         #    使训练目标尺度与 NavDP 的噪声 ε ~ N(0,1) 对齐。
-        #    详见 TRAINING_CONVERGENCE_ANALYSIS.md §4 方案 A。
         pred_actions[:, 0:2] = pred_actions[:, 0:2] / self.action_scale_xy
         pred_actions[:, 2] = pred_actions[:, 2] / self.action_scale_theta
         augment_actions[:, 0:2] = augment_actions[:, 0:2] / self.action_scale_xy
@@ -703,7 +717,7 @@ class BridgeDP_Base_Dataset(Dataset):
         point_goal[0:2] = point_goal[0:2] / self.action_scale_xy
         point_goal[2] = point_goal[2] / self.action_scale_theta
 
-        # 4. 生成先验轨迹（三种情况：任务开始/正确先验/错误先验）
+        # 5. 生成先验轨迹（三种情况：任务开始/正确先验/错误先验）
         is_task_start = (memory_start_choice == pixel_start_choice)
         prior_traj = self.generate_prior_trajectory(pred_actions, is_task_start=is_task_start)
 
