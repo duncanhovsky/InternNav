@@ -130,6 +130,9 @@ canvas.chart { width: 100% !important; height: 180px !important; }
           <span><span class="legend-dot" style="background:#555;border:1px dashed #888"></span>先验轨迹</span>
           <span><span class="legend-dot" style="background:#4ade80"></span>真值轨迹</span>
           <span><span class="legend-dot" style="background:#7c9ef8"></span>预测轨迹</span>
+          <span><span class="legend-dot" style="background:rgba(248,113,113,0.6)"></span>障碍物</span>
+          <span><span class="legend-dot" style="background:#fbbf24;border:2px solid #fbbf24"></span>导航目标</span>
+          <span><span class="legend-dot" style="background:#22c55e;border:2px solid #fff"></span>轨迹终点</span>
         </div>
         <div id="traj-meta" style="font-size:.72rem;color:#888;margin-top:12px;line-height:1.8"></div>
       </div>
@@ -287,7 +290,8 @@ async function loadCurrentSample() {
     canvas.style.display = 'block'; noData.style.display = 'none';
     document.getElementById('batch-label').textContent = `Batch ${b.batch_idx}  Step ${b.step}`;
     document.getElementById('sample-label').textContent = `样本 ${d.sample_idx + 1} / ${d.n_samples}`;
-    drawTrajectory(canvas, d.gt_traj, d.pred_traj, d.prior_traj, d.theta_g);
+    drawTrajectory(canvas, d.gt_traj, d.pred_traj, d.prior_traj, d.theta_g,
+                   d.nav_goal, d.obstacle_pts);
     if (d.gt_traj && d.pred_traj && d.gt_traj.length === d.pred_traj.length) {
       let mse = 0, maxErr = 0;
       for (let i = 0; i < d.gt_traj.length; i++) {
@@ -298,11 +302,10 @@ async function loadCurrentSample() {
         }
       }
       mse /= d.gt_traj.length;
-      // theta_g 校验：数据集存储值 vs 从 gt_traj 末端计算值
+      // theta_g 校验：数据集存储值 vs 从导航目标计算值
       let thetaHtml = '';
-      if (d.theta_g != null && d.gt_traj.length > 0) {
-        const last = d.gt_traj[d.gt_traj.length - 1];
-        const thetaCalc = Math.atan2(last[1], last[0]);
+      if (d.theta_g != null && d.nav_goal && d.nav_goal.length >= 2) {
+        const thetaCalc = Math.atan2(d.nav_goal[1], d.nav_goal[0]);
         const diff = ((d.theta_g - thetaCalc + Math.PI) % (2*Math.PI) - Math.PI);
         const diffDeg = (diff * 180 / Math.PI).toFixed(1);
         const color = Math.abs(diff) > 0.3 ? '#f87171' : '#4ade80';
@@ -320,7 +323,7 @@ async function refreshTraj() {
   await loadCurrentSample();
 }
 
-function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
+function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, obstaclePts) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -332,7 +335,11 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
     return [[0, 0, 0], ...pts];  // 插入起点
   };
   const gt = toXYT(gtTraj), pred = toXYT(predTraj), prior = toXYT(priorTraj);
-  const all = [...gt, ...pred, ...prior, [0,0,0]];
+  // 障碍物点参与边界计算（保证同一坐标系下正确缩放）
+  const obsFlat = (obstaclePts || []).map(p => Array.isArray(p) ? [p[0], p[1], 0] : [0,0,0]);
+  // 导航目标参与边界计算
+  const goalPt = (navGoal && navGoal.length >= 2) ? [[navGoal[0], navGoal[1], 0]] : [];
+  const all = [...gt, ...pred, ...prior, ...obsFlat, ...goalPt, [0,0,0]];
   if (all.length === 0) return;
 
   // 计算边界（含原点）
@@ -383,6 +390,18 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
     ctx.closePath(); ctx.fill();
   }
 
+  // ── 障碍物点（红色半透明小点，最先绘制作为背景层） ──
+  if (obstaclePts && obstaclePts.length > 0) {
+    ctx.fillStyle = 'rgba(248, 113, 113, 0.5)';
+    obstaclePts.forEach(p => {
+      if (Array.isArray(p) && p.length >= 2) {
+        ctx.beginPath();
+        ctx.arc(tx(p[0]), ty(p[1]), 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+  }
+
   // ── 先验轨迹（虚线灰色，无朝向箭头） ──
   if (prior.length > 1) {
     ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
@@ -409,6 +428,12 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
     });
     // 终点大圆
     ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(tx(gt[gt.length-1][0]),ty(gt[gt.length-1][1]),5,0,Math.PI*2); ctx.fill();
+    // 轨迹终点白色外圈强调 + 标签
+    const endX = tx(gt[gt.length-1][0]), endY = ty(gt[gt.length-1][1]);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(endX, endY, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('End', endX + 10, endY + 3);
   }
 
   // ── 预测轨迹（蓝色实线 + 朝向箭头） ──
@@ -423,6 +448,20 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
     ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
   }
 
+  // ── 导航目标点（黄色菱形标记） ──
+  if (navGoal && navGoal.length >= 2) {
+    const gx = tx(navGoal[0]), gy = ty(navGoal[1]);
+    ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2; ctx.setLineDash([]);
+    const r = 7;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy - r); ctx.lineTo(gx + r, gy);
+    ctx.lineTo(gx, gy + r); ctx.lineTo(gx - r, gy);
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = 'rgba(251,191,36,0.3)'; ctx.fill();
+    ctx.fillStyle = '#fbbf24'; ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('Goal', gx + r + 2, gy + 3);
+  }
+
   // ── 起点标记（公共原点 0,0） ──
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(tx(0),ty(0),6,0,Math.PI*2); ctx.stroke();
@@ -430,10 +469,10 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG) {
   ctx.fillText('O', tx(0)+8, ty(0)+4);
 
   // ── theta_g 方向箭头（从原点出发） ──
-  if (thetaG != null && gt.length > 0) {
+  if (thetaG != null && navGoal && navGoal.length >= 2) {
     const ox = tx(0), oy = ty(0);
     const arrowLen = 36;
-    const thetaCalc = Math.atan2(gt[gt.length-1][1], gt[gt.length-1][0]);
+    const thetaCalc = Math.atan2(navGoal[1], navGoal[0]);
     [[thetaG, '#22c55e', 'θ_g存储'], [thetaCalc, '#fb923c', 'θ_g计算']].forEach(([angle, color, label]) => {
       const ex = ox + arrowLen * Math.cos(angle), ey = oy - arrowLen * Math.sin(angle);
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([3,2]);

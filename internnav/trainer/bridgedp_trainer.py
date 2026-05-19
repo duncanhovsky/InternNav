@@ -172,12 +172,21 @@ class BridgeDPTrainer(BaseTrainer):
             # 可视化：每 100 步执行一次真实去噪推理并写入 JSONL
             if self._log_step_count % 100 == 0:
                 pred_traj = self._infer_pred_traj_bridgedp(model, inputs_on_device)
+                # 反归一化 gt 和 prior（统一为物理坐标，米/弧度）
+                gt_phys = self._denorm_batch(inputs_on_device["batch_labels"])
+                prior_phys = self._denorm_batch(inputs_on_device["batch_prior"])
+                # 导航目标点（反归一化）
+                nav_goal_phys = self._denorm_batch(inputs_on_device["batch_pg"])
+                # 障碍物点（已在 Dataset 中做过局部化，物理坐标）
+                obstacle_pts = inputs.get("batch_obstacle_pts", None)
                 self._write_traj_snapshot(
-                    inputs_on_device["batch_labels"],
+                    gt_phys,
                     pred_traj,
-                    inputs_on_device["batch_prior"],
+                    prior_phys,
                     inputs_on_device["batch_labels"],
                     inputs_on_device["batch_theta_g"],
+                    batch_nav_goal=nav_goal_phys,
+                    batch_obstacle_pts=obstacle_pts,
                 )
 
         outputs = {
@@ -273,8 +282,26 @@ class BridgeDPTrainer(BaseTrainer):
 
         return pred_abs.expand(B, -1, -1)
 
-    def _write_traj_snapshot(self, x0_target, x0_pred, prior_traj, gt_labels, batch_theta_g=None):
-        """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。由调用方控制写入频率。"""
+    def _denorm_batch(self, batch_tensor):
+        """将归一化的 batch 轨迹/目标点反归一化为物理坐标（米/弧度）。
+
+        归一化规则与 BridgeDP_Base_Dataset.__getitem__ 一致：
+            xy / 5.0, θ / π → 反归一化：xy * 5.0, θ * π
+        """
+        t = batch_tensor.detach().cpu().clone()
+        t[..., 0:2] = t[..., 0:2] * 5.0
+        if t.shape[-1] >= 3:
+            t[..., 2] = t[..., 2] * 3.14159
+        return t
+
+    def _write_traj_snapshot(self, gt_phys, pred_phys, prior_phys, gt_labels,
+                              batch_theta_g=None, batch_nav_goal=None,
+                              batch_obstacle_pts=None):
+        """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。
+
+        所有轨迹数据统一使用物理坐标（米/弧度），确保坐标系一致。
+        新增字段：nav_goal（导航目标点）、obstacle_pts（局部化障碍物点）。
+        """
         if not hasattr(self, '_log_step_count'):
             return
         try:
@@ -282,18 +309,35 @@ class BridgeDPTrainer(BaseTrainer):
             log_dir.mkdir(parents=True, exist_ok=True)
             batch_file = log_dir / 'traj_batches.jsonl'
 
-            B = x0_target.shape[0]
-            theta_g_list = batch_theta_g.detach().cpu().view(-1).tolist() if batch_theta_g is not None else [None] * B
+            B = gt_phys.shape[0]
+            theta_g_list = (batch_theta_g.detach().cpu().view(-1).tolist()
+                            if batch_theta_g is not None else [None] * B)
+            nav_goal_list = (batch_nav_goal.detach().cpu()[:, 0:2].tolist()
+                             if batch_nav_goal is not None else [None] * B)
+            # 障碍物点：list of tensor/ndarray，每个样本点数不同
+            if batch_obstacle_pts is not None:
+                obs_list = []
+                for pts in batch_obstacle_pts:
+                    if hasattr(pts, 'detach'):
+                        obs_list.append(pts.detach().cpu().tolist())
+                    elif hasattr(pts, 'tolist'):
+                        obs_list.append(pts.tolist())
+                    else:
+                        obs_list.append([])
+            else:
+                obs_list = [[] for _ in range(B)]
+
             record = {
                 "batch_idx": self._log_step_count,
                 "step": self._log_step_count,
                 "samples": [
                     {
-                        "gt_traj":    x0_target[i].detach().cpu().tolist(),
-                        "pred_traj":  x0_pred[i].detach().cpu().tolist(),
-                        "prior_traj": prior_traj[i].detach().cpu().tolist(),
-                        "gt_labels":  gt_labels[i].detach().cpu().tolist(),
-                        "theta_g":    theta_g_list[i],
+                        "gt_traj":      gt_phys[i].tolist() if hasattr(gt_phys[i], 'tolist') else gt_phys[i],
+                        "pred_traj":    pred_phys[i].detach().cpu().tolist() if hasattr(pred_phys[i], 'detach') else pred_phys[i].tolist(),
+                        "prior_traj":   prior_phys[i].tolist() if hasattr(prior_phys[i], 'tolist') else prior_phys[i],
+                        "theta_g":      theta_g_list[i],
+                        "nav_goal":     nav_goal_list[i],
+                        "obstacle_pts": obs_list[i],
                     }
                     for i in range(B)
                 ],

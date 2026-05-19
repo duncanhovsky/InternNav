@@ -689,21 +689,8 @@ class BridgeDP_Base_Dataset(Dataset):
         step_diffs = np.linalg.norm(pred_actions[1:, :2] - pred_actions[:-1, :2], axis=-1)  # (T-1,)
         valid_mask = np.concatenate([[1.0], (step_diffs > 1e-4).astype(np.float32)])         # (T,)
 
-        # 2. point_goal 改为导航目标（整条 episode 终点），而非轨迹片段终点
-        #    这保证训练-推理一致：网络学会"即使目标在 10m 外，当前只走合理的一段"
-        #    导航目标 = trajectory 最后一帧的位姿，转为相对于 memory_start_choice 的局部坐标
-        _, nav_goal_local = self.relative_pose(
-            trajectory_extrinsics[memory_start_choice][0:3, 0:3],
-            trajectory_extrinsics[memory_start_choice][0:3, 3],
-            trajectory_extrinsics[-1][0:3, 0:3],
-            trajectory_extrinsics[-1][0:3, 3],
-            trajectory_base_extrinsic,
-        )
-        # 计算导航目标方向角（从起点到导航目标的方位）
-        nav_goal_theta = np.arctan2(nav_goal_local[1], nav_goal_local[0])
-        point_goal = np.array([
-            nav_goal_local[0], nav_goal_local[1], nav_goal_theta
-        ], dtype=np.float32)
+        # 2. point_goal 使用轨迹片段终点（与 NavDP 对齐）
+        point_goal = target_xyt_actions[-1].astype(np.float32)
 
         # 3. 计算目标方位角（在归一化之前，使用原始水平面坐标 x, y）
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
@@ -720,6 +707,23 @@ class BridgeDP_Base_Dataset(Dataset):
         # 5. 生成先验轨迹（三种情况：任务开始/正确先验/错误先验）
         is_task_start = (memory_start_choice == pixel_start_choice)
         prior_traj = self.generate_prior_trajectory(pred_actions, is_task_start=is_task_start)
+
+        # 6. 障碍物点局部化（世界坐标 → 局部坐标，取最近 64 个点的水平面 xy）
+        #    用于前端可视化面板叠加显示障碍物层
+        if trajectory_obstacle_points.shape[0] > 0:
+            _, obs_local = self.relative_pose(
+                trajectory_extrinsics[memory_start_choice][0:3, 0:3],
+                trajectory_extrinsics[memory_start_choice][0:3, 3],
+                np.eye(3),
+                trajectory_obstacle_points,   # (N, 3) 世界坐标
+                trajectory_base_extrinsic,
+            )
+            obs_xy = obs_local[:, 0:2].astype(np.float32)
+            dists = np.linalg.norm(obs_xy, axis=-1)
+            top_k = min(64, obs_xy.shape[0])
+            obs_local_xy = obs_xy[np.argsort(dists)[:top_k]]  # (K, 2)
+        else:
+            obs_local_xy = np.zeros((0, 2), dtype=np.float32)
 
         # 日志
         end_time = time.time()
@@ -743,29 +747,32 @@ class BridgeDP_Base_Dataset(Dataset):
         prior_traj = torch.tensor(prior_traj, dtype=torch.float32)
         theta_g = torch.tensor(theta_g, dtype=torch.float32)
         valid_mask = torch.tensor(valid_mask, dtype=torch.float32)
+        obstacle_pts_local = torch.tensor(obs_local_xy, dtype=torch.float32)  # (K, 2) 物理坐标
 
         return (
-            point_goal,       # 0: (3,) 已归一化
-            image_goal,       # 1: (H, W, 6)
-            pixel_goal,       # 2: (H, W, C)
-            memory_images,    # 3: (mem, H, W, 3)
-            depth_image,      # 4: (H, W, 1)
-            pred_actions,     # 5: (T_pred, 3) 已归一化绝对坐标
-            augment_actions,  # 6: (T_pred, 3) 已归一化绝对坐标
-            pred_critic,      # 7: scalar
-            augment_critic,   # 8: scalar
-            float(pixel_flag),  # 9: float
-            prior_traj,       # 10: (T_pred, 3) 已归一化先验轨迹
-            theta_g,          # 11: scalar 目标方位角（原始值，未归一化）
-            valid_mask,       # 12: (T_pred,) 有效步掩码（1=真实运动，0=填充静止）
+            point_goal,           # 0: (3,) 已归一化
+            image_goal,           # 1: (H, W, 6)
+            pixel_goal,           # 2: (H, W, C)
+            memory_images,        # 3: (mem, H, W, 3)
+            depth_image,          # 4: (H, W, 1)
+            pred_actions,         # 5: (T_pred, 3) 已归一化绝对坐标
+            augment_actions,      # 6: (T_pred, 3) 已归一化绝对坐标
+            pred_critic,          # 7: scalar
+            augment_critic,       # 8: scalar
+            float(pixel_flag),    # 9: float
+            prior_traj,           # 10: (T_pred, 3) 已归一化先验轨迹
+            theta_g,              # 11: scalar 目标方位角（原始值，未归一化）
+            valid_mask,           # 12: (T_pred,) 有效步掩码（1=真实运动，0=填充静止）
+            obstacle_pts_local,   # 13: (K, 2) 局部坐标障碍物点（物理坐标，米）
         )
 
 
 def bridgedp_collate_fn(batch):
     """Bridge-DP 数据集自定义拼接函数。
 
-    将 __getitem__ 返回的 12 个字段拼接为 batch 字典。
-    与 NavDP 的 navdp_collate_fn 对比：新增 batch_prior 和 batch_theta_g。
+    将 __getitem__ 返回的 14 个字段拼接为 batch 字典。
+    与 NavDP 的 navdp_collate_fn 对比：新增 batch_prior、batch_theta_g、batch_obstacle_pts。
+    注意：batch_obstacle_pts 是 list 类型（每个样本障碍物点数量不同），不做 torch.stack。
     """
     collated = {
         "batch_pg": torch.stack([item[0] for item in batch]),
@@ -781,5 +788,7 @@ def bridgedp_collate_fn(batch):
         "batch_prior": torch.stack([item[10] for item in batch]),
         "batch_theta_g": torch.stack([item[11] for item in batch]),
         "batch_valid_mask": torch.stack([item[12] for item in batch]),
+        # 障碍物点：每个样本点数不同，用 list 存储，不进 torch.stack
+        "batch_obstacle_pts": [item[13] for item in batch],
     }
     return collated

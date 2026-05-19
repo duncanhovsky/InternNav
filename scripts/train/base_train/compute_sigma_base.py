@@ -55,21 +55,15 @@ def compute_sigma_base(dataset_index, predict_size=24, num_samples=3000,
             print(f"  进度: {i+1}/{n} ({100.0*(i+1)/n:.1f}%)")
         try:
             df = pd.read_parquet(data_dirs[idx])
-            # action 列：每行是 4 个 4-element array = 4×4 矩阵
+            # action 列：每行是 4x4 矩阵或 1x16 展开数组
             actions_raw = df['action'].values
+            extrinsics = np.array([np.stack(frame) for frame in actions_raw], dtype=np.float64)
+            if extrinsics.ndim == 2 and extrinsics.shape[1] == 16:
+                extrinsics = extrinsics.reshape(-1, 4, 4)
             L = len(actions_raw)
             if L < predict_size + 2:
                 error += 1
                 continue
-
-            # 重建 4×4 矩阵，提取平移向量 (x, z)
-            # action 格式: [row0(4), row1(4), row2(4), row3(4)]
-            # 第一行 [R00, R01, R02, Tx], 第二行 [R10, R11, R12, Tz_forward]
-            positions = np.array([
-                [np.stack(actions_raw[j])[0, 3],   # x 世界坐标
-                 np.stack(actions_raw[j])[1, 3]]    # z 世界坐标 (前进方向)
-                for j in range(L)
-            ], dtype=np.float32)
 
             # 随机选起点
             max_start = L - predict_size - 1
@@ -81,11 +75,11 @@ def compute_sigma_base(dataset_index, predict_size=24, num_samples=3000,
 
             # 以起点为原点的局部坐标
             # 这里用世界坐标的 R0 旋转到局部坐标系
-            pose0 = np.stack(actions_raw[start])  # 4×4
+            pose0 = extrinsics[start]  # 4×4
             R0 = pose0[:3, :3]
             T0 = pose0[:3, 3]
             local = np.array([
-                R0.T @ (np.stack(actions_raw[fi])[:3, 3] - T0)
+                R0.T @ (extrinsics[fi][:3, 3] - T0)
                 for fi in frame_indices
             ], dtype=np.float32)
             # 取 x, z 分量 (平面导航)
@@ -190,6 +184,9 @@ def compute_d_max(dataset_index, predict_size=24, num_samples=3000,
         try:
             df = pd.read_parquet(data_dirs[idx])
             actions_raw = df['action'].values
+            extrinsics = np.array([np.stack(frame) for frame in actions_raw], dtype=np.float64)
+            if extrinsics.ndim == 2 and extrinsics.shape[1] == 16:
+                extrinsics = extrinsics.reshape(-1, 4, 4)
             L = len(actions_raw)
             min_len = predict_size * pred_digit + 2
             if L < min_len:
@@ -204,10 +201,10 @@ def compute_d_max(dataset_index, predict_size=24, num_samples=3000,
             end = min(start + predict_size * pred_digit, L - 1)
 
             # 以起点为原点的局部坐标
-            pose0 = np.stack(actions_raw[start])  # 4×4
+            pose0 = extrinsics[start]  # 4×4
             R0 = pose0[:3, :3]
             T0 = pose0[:3, 3]
-            pose_end = np.stack(actions_raw[end])
+            pose_end = extrinsics[end]
             T_end_local = R0.T @ (pose_end[:3, 3] - T0)
 
             # 取 x, z 分量（平面导航），归一化
