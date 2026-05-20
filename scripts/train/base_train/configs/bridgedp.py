@@ -88,8 +88,8 @@ bridgedp_exp_cfg = ExpCfg(
         # n_prior_tokens: PriorEncoder 输出 token 数量
         # num_train_timesteps: 训练时扩散步数（与 NavDP 保持一致，布朗桥端点约束加速收敛）
         # num_inference_timesteps: 推理时 DDIM 去噪步数（与 NavDP 保持一致）
-        sigma_base=0.5,
-        sigma_goal=0.3,
+        sigma_base=0.2,
+        sigma_goal=0.01,
         n_prior_tokens=4,
         num_train_timesteps=10,
         num_inference_timesteps=10,

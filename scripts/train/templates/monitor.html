@@ -121,6 +121,7 @@ canvas.chart { width: 100% !important; height: 180px !important; }
         <span id="sample-label" style="font-size:.72rem;color:#888;min-width:80px;text-align:center">样本 --/--</span>
         <button id="sample-next" type="button">下一样本 ▶</button>
         <button id="traj-refresh" type="button">刷新</button>
+        <button id="traj-reset" type="button">重置视图</button>
       </div>
     </div>
     <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
@@ -260,6 +261,61 @@ async function refreshLossDetail() {
 let batchList = [];
 let curBatchPos = -1;
 let curSampleIdx = 0;
+let lastTrajData = null;
+const trajView = { scale: 1.0, offsetX: 0, offsetY: 0, dragging: false, lastX: 0, lastY: 0 };
+
+function renderCachedTraj() {
+  if (!lastTrajData) return;
+  const canvas = document.getElementById('traj-canvas');
+  drawTrajectory(
+    canvas,
+    lastTrajData.gt_traj, lastTrajData.pred_traj, lastTrajData.prior_traj,
+    lastTrajData.theta_g, lastTrajData.nav_goal, lastTrajData.obstacle_pts,
+    lastTrajData.gt_valid_mask, lastTrajData.pred_valid_mask
+  );
+}
+
+function initTrajInteractions() {
+  const canvas = document.getElementById('traj-canvas');
+  if (!canvas || canvas.dataset.interactive === '1') return;
+  canvas.dataset.interactive = '1';
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const s = trajView.scale;
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    const next = Math.min(5.0, Math.max(0.5, s * factor));
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const baseX = (mx - cx - trajView.offsetX) / s + cx;
+    const baseY = (my - cy - trajView.offsetY) / s + cy;
+    trajView.scale = next;
+    trajView.offsetX = mx - (baseX - cx) * next - cx;
+    trajView.offsetY = my - (baseY - cy) * next - cy;
+    renderCachedTraj();
+  }, { passive: false });
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    trajView.dragging = true;
+    trajView.lastX = e.clientX;
+    trajView.lastY = e.clientY;
+  });
+  window.addEventListener('mouseup', () => { trajView.dragging = false; });
+  window.addEventListener('mousemove', (e) => {
+    if (!trajView.dragging) return;
+    const dx = e.clientX - trajView.lastX;
+    const dy = e.clientY - trajView.lastY;
+    trajView.lastX = e.clientX;
+    trajView.lastY = e.clientY;
+    trajView.offsetX += dx;
+    trajView.offsetY += dy;
+    renderCachedTraj();
+  });
+}
 
 async function loadBatchList() {
   try {
@@ -278,6 +334,7 @@ async function loadCurrentSample() {
     canvas.style.display = 'none'; noData.style.display = 'block'; meta.innerHTML = '';
     document.getElementById('batch-label').textContent = 'Batch --';
     document.getElementById('sample-label').textContent = '样本 --/--';
+    lastTrajData = null;
     return;
   }
   try {
@@ -286,12 +343,13 @@ async function loadCurrentSample() {
       `/api/traj_batch_detail?exp=${encodeURIComponent(currentExp)}&batch_idx=${b.batch_idx}&sample_idx=${curSampleIdx}`
     );
     const d = await r.json();
-    if (!d.available) { canvas.style.display = 'none'; noData.style.display = 'block'; return; }
+    if (!d.available) { canvas.style.display = 'none'; noData.style.display = 'block'; lastTrajData = null; return; }
     canvas.style.display = 'block'; noData.style.display = 'none';
     document.getElementById('batch-label').textContent = `Batch ${b.batch_idx}  Step ${b.step}`;
     document.getElementById('sample-label').textContent = `样本 ${d.sample_idx + 1} / ${d.n_samples}`;
+    lastTrajData = d;
     drawTrajectory(canvas, d.gt_traj, d.pred_traj, d.prior_traj, d.theta_g,
-                   d.nav_goal, d.obstacle_pts);
+             d.nav_goal, d.obstacle_pts, d.gt_valid_mask, d.pred_valid_mask);
     if (d.gt_traj && d.pred_traj && d.gt_traj.length === d.pred_traj.length) {
       let mse = 0, maxErr = 0;
       for (let i = 0; i < d.gt_traj.length; i++) {
@@ -313,9 +371,19 @@ async function loadCurrentSample() {
           + `<br>θ_g 计算: ${thetaCalc.toFixed(3)} rad (${(thetaCalc*180/Math.PI).toFixed(1)}°)`
           + `<br>θ_g 偏差: <span style="color:${color}">${diffDeg}°</span>`;
       }
-      meta.innerHTML = `序列长度: ${d.gt_traj.length}<br>XY MSE: ${mse.toFixed(6)}<br>最大点误差: ${maxErr.toFixed(4)}${thetaHtml}`;
+      const validLen = (maskArr) => {
+        if (!Array.isArray(maskArr)) return '--';
+        for (let i = maskArr.length - 1; i >= 0; i--) {
+          if (maskArr[i]) return i + 1;
+        }
+        return 0;
+      };
+      const gtValid = validLen(d.gt_valid_mask);
+      const predValid = validLen(d.pred_valid_mask);
+      const validHtml = `<br>有效步: GT ${gtValid} / Pred ${predValid}`;
+      meta.innerHTML = `序列长度: ${d.gt_traj.length}<br>XY MSE: ${mse.toFixed(6)}<br>最大点误差: ${maxErr.toFixed(4)}${thetaHtml}${validHtml}`;
     }
-  } catch(e) { console.error('traj_batch_detail fetch failed:', e); }
+  } catch(e) { console.error('traj_batch_detail fetch failed:', e); lastTrajData = null; }
 }
 
 async function refreshTraj() {
@@ -323,7 +391,7 @@ async function refreshTraj() {
   await loadCurrentSample();
 }
 
-function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, obstaclePts) {
+function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, obstaclePts, gtMask, predMask) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -334,7 +402,15 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     const pts = traj.map(p => Array.isArray(p) ? [p[0], p[1], p[2] ?? 0] : [p, 0, 0]);
     return [[0, 0, 0], ...pts];  // 插入起点
   };
+  const withStartMask = (mask, rawLen) => {
+    if (!Array.isArray(mask) || mask.length !== rawLen) {
+      return Array(rawLen + 1).fill(true);
+    }
+    return [true, ...mask.map(v => !!v)];
+  };
   const gt = toXYT(gtTraj), pred = toXYT(predTraj), prior = toXYT(priorTraj);
+  const gtM = withStartMask(gtMask, gtTraj ? gtTraj.length : 0);
+  const predM = withStartMask(predMask, predTraj ? predTraj.length : 0);
   // 障碍物点参与边界计算（保证同一坐标系下正确缩放）
   const obsFlat = (obstaclePts || []).map(p => Array.isArray(p) ? [p[0], p[1], 0] : [0,0,0]);
   // 导航目标参与边界计算
@@ -348,8 +424,11 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
   const pad = 38;
 
-  const tx = (x) => pad + (x - minX) / rangeX * (W - 2*pad);
-  const ty = (y) => H - pad - (y - minY) / rangeY * (H - 2*pad);
+  const baseX = (x) => pad + (x - minX) / rangeX * (W - 2*pad);
+  const baseY = (y) => H - pad - (y - minY) / rangeY * (H - 2*pad);
+  const cx = W / 2, cy = H / 2;
+  const tx = (x) => (baseX(x) - cx) * trajView.scale + cx + trajView.offsetX;
+  const ty = (y) => (baseY(y) - cy) * trajView.scale + cy + trajView.offsetY;
 
   // ── 刻度 ──
   const TICKS = 5;
@@ -358,14 +437,14 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   for (let i = 0; i <= TICKS; i++) {
     const xv = minX + i * rangeX / TICKS;
     const gx = tx(xv);
-    ctx.beginPath(); ctx.moveTo(gx, pad); ctx.lineTo(gx, H-pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(gx, ty(minY)); ctx.lineTo(gx, ty(maxY)); ctx.stroke();
     ctx.fillText(xv.toFixed(2), gx, H - pad + 12);
   }
   ctx.textAlign = 'right';
   for (let i = 0; i <= TICKS; i++) {
     const yv = minY + i * rangeY / TICKS;
     const gy = ty(yv);
-    ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(W-pad, gy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(tx(minX), gy); ctx.lineTo(tx(maxX), gy); ctx.stroke();
     ctx.fillText(yv.toFixed(2), pad - 3, gy + 3);
   }
 
@@ -390,6 +469,40 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     ctx.closePath(); ctx.fill();
   }
 
+  function lastValidIndex(maskArr, totalLen) {
+    const n = Math.min(maskArr.length, totalLen);
+    for (let i = n - 1; i >= 0; i--) {
+      if (maskArr[i]) return i;
+    }
+    return 0;
+  }
+
+  function drawMaskedTrajectory(points, maskArr, color, label) {
+    if (points.length < 2) return;
+    const validEnd = lastValidIndex(maskArr, points.length);
+    if (validEnd >= 1) {
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
+      ctx.beginPath();
+      points.slice(0, validEnd + 1).forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
+      ctx.stroke();
+      points.slice(1, validEnd + 1).forEach(([x,y,theta]) => drawArrow(tx(x), ty(y), theta, 8, color));
+    }
+    if (validEnd < points.length - 1) {
+      ctx.globalAlpha = 0.3; ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      points.slice(validEnd, points.length).forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
+      ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1.0;
+    }
+    if (validEnd >= 1) {
+      const [vx, vy] = points[validEnd];
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(tx(vx), ty(vy), 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(label, tx(vx) + 8, ty(vy) + 3);
+    }
+  }
+
   // ── 障碍物点（红色半透明小点，最先绘制作为背景层） ──
   if (obstaclePts && obstaclePts.length > 0) {
     ctx.fillStyle = 'rgba(248, 113, 113, 0.5)';
@@ -412,20 +525,10 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
 
   // ── 真值轨迹（绿色实线 + 朝向箭头） ──
   if (gt.length > 1) {
-    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2; ctx.setLineDash([]);
-    ctx.beginPath();
-    gt.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
-    ctx.stroke();
-    // 每个航点朝向箭头（跳过起点，起点用圆圈标记）
-    gt.forEach(([x,y,theta], i) => {
-      if (i === 0) {
-        // 起点：白色圆圈
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(tx(x),ty(y),5,0,Math.PI*2); ctx.stroke();
-      } else {
-        drawArrow(tx(x), ty(y), theta, 8, '#4ade80');
-      }
-    });
+    // 起点：白色圆圈
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(tx(gt[0][0]),ty(gt[0][1]),5,0,Math.PI*2); ctx.stroke();
+    drawMaskedTrajectory(gt, gtM, '#4ade80', 'V-GT');
     // 终点大圆
     ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(tx(gt[gt.length-1][0]),ty(gt[gt.length-1][1]),5,0,Math.PI*2); ctx.fill();
     // 轨迹终点白色外圈强调 + 标签
@@ -438,13 +541,7 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
 
   // ── 预测轨迹（蓝色实线 + 朝向箭头） ──
   if (pred.length > 1) {
-    ctx.strokeStyle = '#7c9ef8'; ctx.lineWidth = 2; ctx.setLineDash([]);
-    ctx.beginPath();
-    pred.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
-    ctx.stroke();
-    pred.forEach(([x,y,theta], i) => {
-      if (i > 0) drawArrow(tx(x), ty(y), theta, 8, '#7c9ef8');
-    });
+    drawMaskedTrajectory(pred, predM, '#7c9ef8', 'V-P');
     ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
   }
 
@@ -685,10 +782,16 @@ document.getElementById('sample-next').addEventListener('click', async () => {
   if (b && curSampleIdx < b.n_samples - 1) { curSampleIdx++; await loadCurrentSample(); }
 });
 document.getElementById('traj-refresh').addEventListener('click', refreshTraj);
+document.getElementById('traj-reset').addEventListener('click', () => {
+  trajView.scale = 1.0;
+  trajView.offsetX = 0;
+  trajView.offsetY = 0;
+  renderCachedTraj();
+});
 
 // ── 启动 ──
 initLossChart();
-refreshExperiments().then(() => { refresh(); refreshLossDetail(); refreshTraj(); });
+refreshExperiments().then(() => { refresh(); refreshLossDetail(); refreshTraj(); initTrajInteractions(); });
 setInterval(refresh, 3000);
 setInterval(refreshLossDetail, 5000);
 setInterval(refreshTraj, 10000);

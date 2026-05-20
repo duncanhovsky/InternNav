@@ -275,6 +275,29 @@ class BridgeDPNet(PreTrainedModel):
         denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
         return denormed
 
+    def _build_valid_mask(self, trajectory, threshold=1e-4, min_valid_steps=4):
+        """基于位移阈值构建有效步掩码（推理专用）。"""
+        if trajectory.dim() != 3:
+            raise ValueError("trajectory must have shape (B, T, 3)")
+        B, T, _ = trajectory.shape
+        if T == 0:
+            return torch.zeros((B, 0), device=trajectory.device, dtype=torch.bool)
+        step_diffs = torch.norm(trajectory[:, 1:, :2] - trajectory[:, :-1, :2], dim=-1)
+        valid_mask = torch.cat(
+            [torch.ones((B, 1), device=trajectory.device, dtype=torch.bool), step_diffs > threshold],
+            dim=1,
+        )
+        if min_valid_steps > 1:
+            valid_mask[:, :min(min_valid_steps, T)] = True
+        return valid_mask
+
+    def _valid_mask_to_lengths(self, valid_mask):
+        """将有效步掩码转换为每条轨迹的有效长度。"""
+        if valid_mask.numel() == 0:
+            return torch.zeros((valid_mask.shape[0],), device=valid_mask.device, dtype=torch.long)
+        idx = torch.arange(1, valid_mask.shape[1] + 1, device=valid_mask.device).unsqueeze(0)
+        return (valid_mask.long() * idx).max(dim=1).values
+
     # ------------------------------------------------------------------
     # 前向加噪（训练专用）
     # ------------------------------------------------------------------
@@ -581,6 +604,7 @@ class BridgeDPNet(PreTrainedModel):
     def predict_pointgoal_batch_action_vel(
         self, goal_point, input_images, input_depths,
         prior_traj=None, theta_g=None, sample_num=32,
+        return_mask=False, min_valid_steps=4, valid_threshold=1e-4,
     ):
         """PointGoal 推理：生成多条候选轨迹并通过 Critic 排序。
 
@@ -601,6 +625,11 @@ class BridgeDPNet(PreTrainedModel):
         Returns:
             negative_trajectory: 低分轨迹 (8, T_pred, 3)。
             positive_trajectory: 高分轨迹 (8, T_pred, 3)。
+            return_mask=True 时额外返回:
+                negative_mask: (8, T_pred) 有效步掩码。
+                positive_mask: (8, T_pred) 有效步掩码。
+                negative_len: (8,) 有效长度（最后一个有效步索引+1）。
+                positive_len: (8,) 有效长度（最后一个有效步索引+1）。
 
         场景自检 — 推理流程验证：
             1. 首帧无先验 (prior_traj=None): 先验设为全零 →
@@ -681,11 +710,26 @@ class BridgeDPNet(PreTrainedModel):
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
             positive_trajectory = trajectory[(-critic_values).argsort()[0:8]]
+            if return_mask:
+                negative_mask = self._build_valid_mask(
+                    negative_trajectory, threshold=valid_threshold, min_valid_steps=min_valid_steps
+                )
+                positive_mask = self._build_valid_mask(
+                    positive_trajectory, threshold=valid_threshold, min_valid_steps=min_valid_steps
+                )
+                negative_len = self._valid_mask_to_lengths(negative_mask)
+                positive_len = self._valid_mask_to_lengths(positive_mask)
+                return (
+                    negative_trajectory, positive_trajectory,
+                    negative_mask, positive_mask,
+                    negative_len, positive_len,
+                )
             return negative_trajectory, positive_trajectory
 
     def predict_nogoal_batch_action_vel(
         self, input_images, input_depths,
         prior_traj=None, sample_num=32,
+        return_mask=False, min_valid_steps=4, valid_threshold=1e-4,
     ):
         """NoGoal 推理：无目标自由探索。
 
@@ -703,6 +747,11 @@ class BridgeDPNet(PreTrainedModel):
         Returns:
             negative_trajectory: 低分轨迹 (8, T_pred, 3)。
             positive_trajectory: 高分轨迹 (8, T_pred, 3)。
+            return_mask=True 时额外返回:
+                negative_mask: (8, T_pred) 有效步掩码。
+                positive_mask: (8, T_pred) 有效步掩码。
+                negative_len: (8,) 有效长度（最后一个有效步索引+1）。
+                positive_len: (8,) 有效长度（最后一个有效步索引+1）。
         """
         with torch.no_grad():
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
@@ -758,6 +807,20 @@ class BridgeDPNet(PreTrainedModel):
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
             positive_trajectory = trajectory[(-critic_values).argsort()[0:8]]
+            if return_mask:
+                negative_mask = self._build_valid_mask(
+                    negative_trajectory, threshold=valid_threshold, min_valid_steps=min_valid_steps
+                )
+                positive_mask = self._build_valid_mask(
+                    positive_trajectory, threshold=valid_threshold, min_valid_steps=min_valid_steps
+                )
+                negative_len = self._valid_mask_to_lengths(negative_mask)
+                positive_len = self._valid_mask_to_lengths(positive_mask)
+                return (
+                    negative_trajectory, positive_trajectory,
+                    negative_mask, positive_mask,
+                    negative_len, positive_len,
+                )
             return negative_trajectory, positive_trajectory
 
 
@@ -794,6 +857,57 @@ def smooth_trajectory_batch(trajectories: torch.Tensor) -> torch.Tensor:
     这对后续可能的上采样（如控制频率高于规划频率）提供了正确的插值基函数。
     如果当前场景下不需要上采样，此函数等价于恒等映射但保留了扩展接口。
     """
-    # 当输入输出节点相同时，三次样条在节点处精确插值 = 输入值。
-    # 直接返回克隆即可，保留函数签名以便后续上采样扩展。
-    return trajectories.clone()
+    if trajectories.dim() != 3:
+        raise ValueError("trajectories must have shape (B, T, 3)")
+
+    B, T, C = trajectories.shape
+    if T < 3:
+        return trajectories.clone()
+
+    y = trajectories
+    d = 6.0 * (y[:, 2:, :] - 2.0 * y[:, 1:-1, :] + y[:, :-2, :])
+    n = T - 2
+
+    c_prime = torch.zeros((B, n, C), device=y.device, dtype=y.dtype)
+    d_prime = torch.zeros((B, n, C), device=y.device, dtype=y.dtype)
+
+    c_prime[:, 0, :] = 0.25
+    d_prime[:, 0, :] = d[:, 0, :] / 4.0
+
+    for i in range(1, n):
+        denom = 4.0 - c_prime[:, i - 1, :]
+        c_prime[:, i, :] = 1.0 / denom
+        d_prime[:, i, :] = (d[:, i, :] - d_prime[:, i - 1, :]) / denom
+
+    m = torch.zeros((B, T, C), device=y.device, dtype=y.dtype)
+    m[:, -2, :] = d_prime[:, -1, :]
+    for i in range(n - 2, -1, -1):
+        m[:, i + 1, :] = d_prime[:, i, :] - c_prime[:, i, :] * m[:, i + 2, :]
+
+    t = torch.linspace(0, T - 1, T, device=y.device, dtype=y.dtype)
+    idx = t.floor().long().clamp(max=T - 2)
+    idx_next = (idx + 1).clamp(max=T - 1)
+
+    idx_expand = idx.view(1, T, 1).expand(B, T, C)
+    idx_next_expand = idx_next.view(1, T, 1).expand(B, T, C)
+
+    y_i = torch.gather(y, 1, idx_expand)
+    y_ip1 = torch.gather(y, 1, idx_next_expand)
+    m_i = torch.gather(m, 1, idx_expand)
+    m_ip1 = torch.gather(m, 1, idx_next_expand)
+
+    t_i = idx.to(dtype=y.dtype).view(1, T, 1)
+    t_ip1 = t_i + 1.0
+    t_expand = t.view(1, T, 1)
+
+    dt = t_expand - t_i
+    dt_next = t_ip1 - t_expand
+
+    smoothed = (
+        m_i * (dt_next ** 3) / 6.0
+        + m_ip1 * (dt ** 3) / 6.0
+        + (y_i - m_i / 6.0) * dt_next
+        + (y_ip1 - m_ip1 / 6.0) * dt
+    )
+
+    return smoothed

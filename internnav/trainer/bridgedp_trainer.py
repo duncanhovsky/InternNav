@@ -187,6 +187,7 @@ class BridgeDPTrainer(BaseTrainer):
                     inputs_on_device["batch_theta_g"],
                     batch_nav_goal=nav_goal_phys,
                     batch_obstacle_pts=obstacle_pts,
+                    batch_valid_mask=inputs_on_device["batch_valid_mask"],
                 )
 
         outputs = {
@@ -296,11 +297,11 @@ class BridgeDPTrainer(BaseTrainer):
 
     def _write_traj_snapshot(self, gt_phys, pred_phys, prior_phys, gt_labels,
                               batch_theta_g=None, batch_nav_goal=None,
-                              batch_obstacle_pts=None):
+                              batch_obstacle_pts=None, batch_valid_mask=None):
         """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。
 
         所有轨迹数据统一使用物理坐标（米/弧度），确保坐标系一致。
-        新增字段：nav_goal（导航目标点）、obstacle_pts（局部化障碍物点）。
+        新增字段：nav_goal（导航目标点）、obstacle_pts（局部化障碍物点）、valid_mask。
         """
         if not hasattr(self, '_log_step_count'):
             return
@@ -314,6 +315,10 @@ class BridgeDPTrainer(BaseTrainer):
                             if batch_theta_g is not None else [None] * B)
             nav_goal_list = (batch_nav_goal.detach().cpu()[:, 0:2].tolist()
                              if batch_nav_goal is not None else [None] * B)
+            if batch_valid_mask is not None:
+                gt_valid_mask = batch_valid_mask.detach().cpu().bool()
+            else:
+                gt_valid_mask = None
             # 障碍物点：list of tensor/ndarray，每个样本点数不同
             if batch_obstacle_pts is not None:
                 obs_list = []
@@ -327,6 +332,19 @@ class BridgeDPTrainer(BaseTrainer):
             else:
                 obs_list = [[] for _ in range(B)]
 
+            pred_valid_mask = None
+            if hasattr(pred_phys, 'detach'):
+                pred_tensor = pred_phys.detach()
+                if pred_tensor.dim() == 3 and pred_tensor.shape[1] > 0:
+                    step_diffs = torch.norm(pred_tensor[:, 1:, :2] - pred_tensor[:, :-1, :2], dim=-1)
+                    pred_valid_mask = torch.cat(
+                        [torch.ones((pred_tensor.shape[0], 1), device=pred_tensor.device, dtype=torch.bool),
+                         step_diffs > 1e-4],
+                        dim=1,
+                    )
+                    pred_valid_mask[:, :min(4, pred_tensor.shape[1])] = True
+                    pred_valid_mask = pred_valid_mask.cpu()
+
             record = {
                 "batch_idx": self._log_step_count,
                 "step": self._log_step_count,
@@ -338,6 +356,8 @@ class BridgeDPTrainer(BaseTrainer):
                         "theta_g":      theta_g_list[i],
                         "nav_goal":     nav_goal_list[i],
                         "obstacle_pts": obs_list[i],
+                        "gt_valid_mask": (gt_valid_mask[i].tolist() if gt_valid_mask is not None else None),
+                        "pred_valid_mask": (pred_valid_mask[i].tolist() if pred_valid_mask is not None else None),
                     }
                     for i in range(B)
                 ],
