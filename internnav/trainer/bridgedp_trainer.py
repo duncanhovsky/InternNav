@@ -143,8 +143,9 @@ class BridgeDPTrainer(BaseTrainer):
         self,
         traj: torch.Tensor,
         num_points: int,
+        include_start: bool = False,
     ) -> torch.Tensor:
-        """用 x/y 弧长参数在当前 GPU 上把一条原始轨迹重采样为 24 个未来点。"""
+        """用 x/y 弧长参数在当前 GPU 上把一条原始轨迹重采样为指定数量的点。"""
         traj = traj[:, :3]
         if traj.shape[0] == 0:
             return torch.zeros((num_points, 3), device=traj.device, dtype=traj.dtype)
@@ -171,13 +172,8 @@ class BridgeDPTrainer(BaseTrainer):
         y[-1] = curve[-1]
         s = s / total
 
-        q = torch.linspace(
-            1.0 / float(num_points),
-            1.0,
-            num_points,
-            device=traj.device,
-            dtype=traj.dtype,
-        )
+        q_start = 0.0 if include_start else 1.0 / float(num_points)
+        q = torch.linspace(q_start, 1.0, num_points, device=traj.device, dtype=traj.dtype)
         sampled = self._natural_cubic_eval(s, y, q)
         sampled[:, 2] = self._wrap_to_pi(sampled[:, 2])
         return sampled
@@ -187,13 +183,20 @@ class BridgeDPTrainer(BaseTrainer):
         raw_trajs: torch.Tensor,
         lengths: torch.Tensor,
         num_points: int,
+        include_start: bool = False,
     ) -> torch.Tensor:
         """对 batch 内变长原始轨迹做 GPU 弧长样条重采样。"""
         samples = []
         for bid in range(raw_trajs.shape[0]):
             n = int(lengths[bid].item())
             n = max(1, min(n, raw_trajs.shape[1]))
-            samples.append(self._resample_one_trajectory_gpu(raw_trajs[bid, :n], num_points))
+            samples.append(
+                self._resample_one_trajectory_gpu(
+                    raw_trajs[bid, :n],
+                    num_points,
+                    include_start=include_start,
+                )
+            )
         return torch.stack(samples, dim=0)
 
     def _normalize_action_tensor(self, action: torch.Tensor) -> torch.Tensor:
@@ -430,6 +433,15 @@ class BridgeDPTrainer(BaseTrainer):
                 nav_goal_phys = self._denorm_batch(inputs_on_device["batch_pg"])
                 # 障碍物点（已在 Dataset 中做过局部化，物理坐标）
                 obstacle_pts = inputs.get("batch_obstacle_pts", None)
+                gt_spline_traj = None
+                if "batch_raw_labels" in inputs_on_device:
+                    spline_points = max(int(inputs_on_device["batch_labels"].shape[1]) * 4, 2)
+                    gt_spline_traj = self._resample_trajectories_gpu(
+                        inputs_on_device["batch_raw_labels"],
+                        inputs_on_device["batch_raw_lengths"],
+                        spline_points,
+                        include_start=True,
+                    )
                 self._write_traj_snapshot(
                     gt_phys,
                     pred_traj,
@@ -439,6 +451,7 @@ class BridgeDPTrainer(BaseTrainer):
                     batch_nav_goal=nav_goal_phys,
                     batch_obstacle_pts=obstacle_pts,
                     batch_valid_mask=inputs_on_device["batch_valid_mask"],
+                    batch_gt_spline_traj=gt_spline_traj,
                 )
 
         outputs = {
@@ -554,11 +567,13 @@ class BridgeDPTrainer(BaseTrainer):
 
     def _write_traj_snapshot(self, gt_phys, pred_phys, prior_phys, gt_labels,
                               batch_theta_g=None, batch_nav_goal=None,
-                              batch_obstacle_pts=None, batch_valid_mask=None):
+                              batch_obstacle_pts=None, batch_valid_mask=None,
+                              batch_gt_spline_traj=None):
         """将整个 batch 所有样本的轨迹追加写入 JSONL，供前端翻页可视化。
 
         所有轨迹数据统一使用物理坐标（米/弧度），确保坐标系一致。
-        新增字段：nav_goal（导航目标点）、obstacle_pts（局部化障碍物点）、valid_mask。
+        新增字段：nav_goal（导航目标点）、obstacle_pts（局部化障碍物点）、valid_mask、
+        gt_spline_traj（原始 GT 轨迹的三次样条重采样曲线，未做端点强制覆盖）。
         """
         if not hasattr(self, '_log_step_count'):
             return
@@ -572,6 +587,8 @@ class BridgeDPTrainer(BaseTrainer):
                             if batch_theta_g is not None else [None] * B)
             nav_goal_list = (batch_nav_goal.detach().cpu()[:, 0:2].tolist()
                              if batch_nav_goal is not None else [None] * B)
+            gt_spline_traj = (batch_gt_spline_traj.detach().cpu()
+                              if batch_gt_spline_traj is not None else None)
             if batch_valid_mask is not None:
                 gt_valid_mask = batch_valid_mask.detach().cpu().bool()
             else:
@@ -613,6 +630,7 @@ class BridgeDPTrainer(BaseTrainer):
                         "theta_g":      theta_g_list[i],
                         "nav_goal":     nav_goal_list[i],
                         "obstacle_pts": obs_list[i],
+                        "gt_spline_traj": (gt_spline_traj[i].tolist() if gt_spline_traj is not None else None),
                         "gt_valid_mask": (gt_valid_mask[i].tolist() if gt_valid_mask is not None else None),
                         "pred_valid_mask": (pred_valid_mask[i].tolist() if pred_valid_mask is not None else None),
                     }
