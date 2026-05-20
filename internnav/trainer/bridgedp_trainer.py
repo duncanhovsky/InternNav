@@ -94,7 +94,9 @@ class BridgeDPTrainer(BaseTrainer):
         (x0_pred_ng, x0_pred_mg,
          critic_pred, augment_pred,
          ng_x0_target, mg_x0_target,
-         imagegoal_aux_pred, pixelgoal_aux_pred) = model(
+         imagegoal_aux_pred, pixelgoal_aux_pred,
+         ng_noisy_action, mg_noisy_action,
+         ng_timesteps, mg_timesteps) = model(
             inputs_on_device["batch_pg"],
             inputs_on_device["batch_ig"],
             inputs_on_device["batch_tg"],
@@ -125,9 +127,43 @@ class BridgeDPTrainer(BaseTrainer):
         ).sum() / mask_delta.sum().clamp(min=1)
         L_delta = 0.5 * (ng_delta_loss + mg_delta_loss)
 
+        model_ref = model.module if hasattr(model, 'module') else model
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
-        action_loss = L_x0 + lambda_delta * L_delta
+        lambda_eps = getattr(il_cfg, 'lambda_eps', 0.1) if il_cfg else 0.1
+
+        # ── 由 x0 反推噪声的回归项（x0 -> eps）────────────────────────
+        goal = inputs_on_device["batch_pg"]
+        theta_g = inputs_on_device["batch_theta_g"]
+
+        def _eps_loss(x0_pred, x0_target, noisy_action, timesteps):
+            if model_ref.use_origin_bridge_train:
+                bridge_x0 = torch.zeros_like(x0_target)
+            else:
+                bridge_x0 = x0_target
+
+            t_norm = model_ref.bridge_scheduler._normalized_time(timesteps).view(-1, 1, 1)
+            if goal.dim() == 2:
+                goal_exp = goal.unsqueeze(1).expand_as(x0_target)
+            else:
+                goal_exp = goal.expand_as(x0_target)
+            bridge_mean = (1.0 - t_norm) * bridge_x0 + t_norm * goal_exp
+
+            theta_exp = theta_g.view(-1, 1, 1)
+            sigma = model_ref.bridge_scheduler.std(t_norm, theta_exp).clamp(min=1e-6)
+            eps_target = (noisy_action - bridge_mean) / sigma
+
+            pred_mean = (1.0 - t_norm) * x0_pred + t_norm * goal_exp
+            eps_pred = (noisy_action - pred_mean) / sigma
+
+            return ((eps_pred - eps_target).square() * mask).sum() / mask.sum().clamp(min=1)
+
+        L_eps = 0.5 * (
+            _eps_loss(x0_pred_ng, ng_x0_target, ng_noisy_action, ng_timesteps)
+            + _eps_loss(x0_pred_mg, mg_x0_target, mg_noisy_action, mg_timesteps)
+        )
+
+        action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
 
         # ── Critic 损失（与 NavDP 一致）──────────────────────────────
         critic_loss = (
@@ -162,6 +198,7 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/action":     action_loss.item(),
                 "loss/L_x0":       L_x0.item(),
                 "loss/L_delta":    L_delta.item(),
+                "loss/L_eps":      L_eps.item(),
                 "loss/ng_x0":      ng_x0_loss.item(),
                 "loss/mg_x0":      mg_x0_loss.item(),
                 "loss/critic":     critic_loss.item(),
@@ -198,6 +235,7 @@ class BridgeDPTrainer(BaseTrainer):
             'action_loss': action_loss,
             'L_x0':        L_x0.item(),
             'L_delta':     L_delta.item(),
+            'L_eps':       L_eps.item(),
             'critic_loss': critic_loss,
             'aux_loss':    aux_loss,
         }

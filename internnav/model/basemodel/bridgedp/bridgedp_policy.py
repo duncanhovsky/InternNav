@@ -142,6 +142,8 @@ class BridgeDPNet(PreTrainedModel):
         self.sigma_goal = il.get('sigma_goal', 0.1)
         self.num_train_timesteps = il.get('num_train_timesteps', 100)
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
+        # 训练时是否使用“原点→目标”的布朗桥（前向加噪起点固定为零向量）
+        self.use_origin_bridge_train = il.get('use_origin_bridge_train', False)
         # use_prior_traj=False 时完全忽略先验轨迹输入（等价于全零先验）
         self.use_prior_traj = il.get('use_prior_traj', False)
         # d_max: 归一化空间中单次预测的最大轨迹直线距离
@@ -303,7 +305,7 @@ class BridgeDPNet(PreTrainedModel):
     # ------------------------------------------------------------------
 
     def sample_bridge_noise(self, x0, goal, theta_g, timesteps=None):
-        """布朗桥前向加噪，返回 x₀（训练目标）和含噪嵌入。
+        """布朗桥前向加噪，返回 x₀（训练目标）、含噪嵌入与含噪轨迹。
 
         训练目标为 x₀-prediction（预测干净轨迹），与推导文档 §6.1 一致。
         布朗桥的 σ(t) 远小于 DDPM 的 √(1-ᾱ)，ε-prediction 反解时
@@ -314,6 +316,7 @@ class BridgeDPNet(PreTrainedModel):
             time_embeds: 时间步嵌入 (B, 1, d)。
             noisy_action_embed: 含噪轨迹嵌入 (B, T_pred, d)。
             timesteps: 离散时间步 (B,)。
+            noisy_action: 含噪轨迹 (B, T_pred, 3)。
         """
         device = x0.device
         B = x0.shape[0]
@@ -323,10 +326,11 @@ class BridgeDPNet(PreTrainedModel):
                 (B,), device=device
             ).long()
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
-        noisy_action = self.bridge_scheduler.add_noise(x0, goal, theta_g, timesteps)
+        bridge_x0 = torch.zeros_like(x0) if self.use_origin_bridge_train else x0
+        noisy_action = self.bridge_scheduler.add_noise(bridge_x0, goal, theta_g, timesteps)
         noisy_action_embed = self.input_embed(noisy_action)
         # 返回 x0 作为训练目标（x₀-prediction）
-        return x0, time_embeds, noisy_action_embed, timesteps
+        return x0, time_embeds, noisy_action_embed, timesteps, noisy_action
 
     # ------------------------------------------------------------------
     # 去噪预测
@@ -458,10 +462,10 @@ class BridgeDPNet(PreTrainedModel):
         # ── 布朗桥加噪（x₀-prediction 版本）──────────────────────────────
         # ng/mg 各自独立采样时间步，增加训练多样性（与 NavDP 一致）
         # sample_bridge_noise 返回 x0（干净轨迹）作为训练目标
-        ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps = self.sample_bridge_noise(
+        ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps, ng_noisy_action = self.sample_bridge_noise(
             tensor_label_actions, tensor_point_goal, tensor_theta_g
         )
-        mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps = self.sample_bridge_noise(
+        mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps, mg_noisy_action = self.sample_bridge_noise(
             tensor_label_actions, tensor_point_goal, tensor_theta_g
         )
 
@@ -571,6 +575,10 @@ class BridgeDPNet(PreTrainedModel):
             mg_x0_target,      # (B, T_pred, 3) x₀ 目标（mg 分支，即干净轨迹）
             imagegoal_aux_pred,  # (B, 3) 辅助预测
             pixelgoal_aux_pred,  # (B, 3) 辅助预测
+            ng_noisy_action,   # (B, T_pred, 3) ng 含噪轨迹
+            mg_noisy_action,   # (B, T_pred, 3) mg 含噪轨迹
+            ng_timesteps,      # (B,) ng 时间步
+            mg_timesteps,      # (B,) mg 时间步
         )
 
     # ------------------------------------------------------------------
