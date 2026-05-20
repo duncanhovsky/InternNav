@@ -473,47 +473,53 @@ class BridgeDPTrainer(BaseTrainer):
             return 0.0
 
     def _infer_pred_traj_bridgedp(self, model, inputs_on_device):
-        """对 batch[0] 执行布朗桥去噪推理，返回绝对坐标预测轨迹 (B, T, 3)。
+        """对整个 batch 执行布朗桥去噪推理，返回绝对坐标预测轨迹 (B, T, 3)。
 
-        推理步数 10（与训练一致），仅取第 0 个样本，结果 expand 到 batch size。
+        每个 batch 样本使用自己的 point-goal / RGBD / prior 单独推理，避免
+        可视化时把 batch[0] 的预测轨迹复用到其它样本上。
         """
         model_ref = model.module if hasattr(model, 'module') else model
         B = inputs_on_device["batch_labels"].shape[0]
         device = inputs_on_device["batch_labels"].device
 
-        def s(t):
-            return t[0:1]
-
         was_training = model_ref.training
         model_ref.eval()
         try:
             with torch.no_grad():
-                pg = s(inputs_on_device["batch_pg"])
-                theta_g = s(inputs_on_device["batch_theta_g"])
-                pg_n = model_ref._normalize_action(pg)
+                # batch_pg already lives in Bridge-DP normalized action space
+                # because Dataset/Trainer apply xy / 5.0 and theta / pi before
+                # model input. Normalizing it again would shrink the visualized
+                # target by another factor of 5 in xy.
+                pg_n = inputs_on_device["batch_pg"]
+                theta_g = inputs_on_device["batch_theta_g"]
 
                 pointgoal_embed = model_ref.point_encoder(pg_n).unsqueeze(1)
                 rgbd_embed = model_ref.rgbd_encoder(
-                    s(inputs_on_device["batch_rgb"]),
-                    s(inputs_on_device["batch_depth"]),
+                    inputs_on_device["batch_rgb"],
+                    inputs_on_device["batch_depth"],
                 )
 
-                # 先验（use_prior_traj=False 时 gated_prior 为零）
-                gated_prior = torch.zeros(
-                    1, model_ref.n_prior_tokens, model_ref.token_dim, device=device
-                )
+                if getattr(model_ref, "use_prior_traj", False):
+                    prior_tokens = model_ref.prior_encoder(inputs_on_device["batch_prior"])
+                    vis_global = rgbd_embed.mean(dim=1)
+                    gate = model_ref.visual_gate(vis_global)
+                    gated_prior = gate * prior_tokens
+                else:
+                    gated_prior = torch.zeros(
+                        B, model_ref.n_prior_tokens, model_ref.token_dim, device=device
+                    )
 
                 # 有序区间初始化（与推理函数一致）
-                origin = torch.zeros_like(pg_n)  # (1, 3)
+                origin = torch.zeros_like(pg_n)  # (B, 3)
                 naction = model_ref.bridge_scheduler.sample_initial_noise_ordered(
                     goal=pg_n,
                     origin=origin,
-                    shape=(1, model_ref.predict_size, 3),
+                    shape=(B, model_ref.predict_size, 3),
                     device=device,
                 )
                 theta_exp = theta_g
 
-                model_ref.bridge_scheduler.set_timesteps(10)
+                model_ref.bridge_scheduler.set_timesteps(model_ref.num_inference_timesteps)
                 for k in model_ref.bridge_scheduler.timesteps:
                     x0_pred = model_ref.predict_x0(
                         naction, k.to(device).unsqueeze(0),
@@ -527,12 +533,12 @@ class BridgeDPTrainer(BaseTrainer):
                         mode="pointgoal",
                     )
 
-                pred_abs = model_ref._denormalize_action(naction)  # (1, T, 3)
+                pred_abs = model_ref._denormalize_action(naction)  # (B, T, 3)
         finally:
             if was_training:
                 model_ref.train()
 
-        return pred_abs.expand(B, -1, -1)
+        return pred_abs
 
     def _denorm_batch(self, batch_tensor):
         """将归一化的 batch 轨迹/目标点反归一化为物理坐标（米/弧度）。
