@@ -67,6 +67,11 @@ canvas.chart { width: 100% !important; height: 180px !important; }
 #traj-canvas { border: 1px solid #2d3148; border-radius: 6px; background: #0f1117; }
 .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
 .traj-legend { display: flex; gap: 16px; font-size: .72rem; color: #aaa; margin-top: 8px; flex-wrap: wrap; }
+.traj-legend-item { display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 0;
+  color: #aaa; padding: 2px 0; font-size: .72rem; cursor: pointer; }
+.traj-legend-item:hover { color: #e0e0e0; }
+.traj-legend-item.off { opacity: .35; text-decoration: line-through; }
+.traj-legend-item .legend-dot { margin-right: 0; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -128,13 +133,16 @@ canvas.chart { width: 100% !important; height: 180px !important; }
       <canvas id="traj-canvas" width="420" height="320"></canvas>
       <div>
         <div class="traj-legend">
-          <span><span class="legend-dot" style="background:#555;border:1px dashed #888"></span>先验轨迹</span>
-          <span><span class="legend-dot" style="background:#4ade80"></span>真值轨迹</span>
-          <span><span class="legend-dot" style="background:#fb923c"></span>GT样条拟合</span>
-          <span><span class="legend-dot" style="background:#7c9ef8"></span>预测轨迹</span>
-          <span><span class="legend-dot" style="background:rgba(248,113,113,0.6)"></span>障碍物</span>
-          <span><span class="legend-dot" style="background:#fbbf24;border:2px solid #fbbf24"></span>导航目标</span>
-          <span><span class="legend-dot" style="background:#22c55e;border:2px solid #fff"></span>轨迹终点</span>
+          <button class="traj-legend-item" data-layer="prior" type="button"><span class="legend-dot" style="background:#555;border:1px dashed #888"></span>先验轨迹</button>
+          <button class="traj-legend-item" data-layer="gt" type="button"><span class="legend-dot" style="background:#4ade80"></span>真值轨迹</button>
+          <button class="traj-legend-item" data-layer="gtSpline" type="button"><span class="legend-dot" style="background:#fb923c"></span>GT样条拟合</button>
+          <button class="traj-legend-item" data-layer="resamplePoints" type="button"><span class="legend-dot" style="background:#fbbf24;border:1px solid #fff"></span>重采样点</button>
+          <button class="traj-legend-item" data-layer="correspondence" type="button"><span class="legend-dot" style="width:16px;height:2px;border-radius:999px;background:rgba(56,189,248,0.7)"></span>对应关系</button>
+          <button class="traj-legend-item" data-layer="pred" type="button"><span class="legend-dot" style="background:#7c9ef8"></span>预测轨迹</button>
+          <button class="traj-legend-item" data-layer="obstacles" type="button"><span class="legend-dot" style="background:rgba(248,113,113,0.6)"></span>障碍物</button>
+          <button class="traj-legend-item" data-layer="navGoal" type="button"><span class="legend-dot" style="background:#fbbf24;border:2px solid #fbbf24"></span>导航目标</button>
+          <button class="traj-legend-item" data-layer="endpoint" type="button"><span class="legend-dot" style="background:#22c55e;border:2px solid #fff"></span>轨迹终点</button>
+          <button class="traj-legend-item" data-layer="theta" type="button"><span class="legend-dot" style="width:16px;height:2px;border-radius:999px;background:#22c55e"></span>θ_g</button>
         </div>
         <div id="traj-meta" style="font-size:.72rem;color:#888;margin-top:12px;line-height:1.8"></div>
       </div>
@@ -264,6 +272,60 @@ let curBatchPos = -1;
 let curSampleIdx = 0;
 let lastTrajData = null;
 const trajView = { scale: 1.0, offsetX: 0, offsetY: 0, dragging: false, lastX: 0, lastY: 0 };
+const TRAJ_LAYER_STORAGE_KEY = 'internnav_traj_layers';
+const DEFAULT_TRAJ_LAYERS = {
+  prior: true,
+  gt: true,
+  gtSpline: true,
+  resamplePoints: true,
+  correspondence: true,
+  pred: true,
+  obstacles: true,
+  navGoal: true,
+  endpoint: true,
+  theta: false,
+};
+let trajLayers = loadTrajLayers();
+
+function loadTrajLayers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(TRAJ_LAYER_STORAGE_KEY) || '{}');
+    return { ...DEFAULT_TRAJ_LAYERS, ...saved };
+  } catch(e) {
+    return { ...DEFAULT_TRAJ_LAYERS };
+  }
+}
+
+function persistTrajLayers() {
+  try {
+    localStorage.setItem(TRAJ_LAYER_STORAGE_KEY, JSON.stringify(trajLayers));
+  } catch(e) {}
+}
+
+function updateTrajLegendState() {
+  document.querySelectorAll('.traj-legend-item').forEach(item => {
+    const layer = item.dataset.layer;
+    const isOn = trajLayers[layer] !== false;
+    item.classList.toggle('off', !isOn);
+    item.setAttribute('aria-pressed', isOn ? 'true' : 'false');
+  });
+}
+
+function initTrajLegend() {
+  document.querySelectorAll('.traj-legend-item').forEach(item => {
+    if (item.dataset.bound === '1') return;
+    item.dataset.bound = '1';
+    item.setAttribute('aria-pressed', trajLayers[item.dataset.layer] !== false ? 'true' : 'false');
+    item.addEventListener('click', () => {
+      const layer = item.dataset.layer;
+      trajLayers[layer] = trajLayers[layer] === false;
+      persistTrajLayers();
+      updateTrajLegendState();
+      renderCachedTraj();
+    });
+  });
+  updateTrajLegendState();
+}
 
 function renderCachedTraj() {
   if (!lastTrajData) return;
@@ -273,7 +335,7 @@ function renderCachedTraj() {
     lastTrajData.gt_traj, lastTrajData.pred_traj, lastTrajData.prior_traj,
     lastTrajData.theta_g, lastTrajData.nav_goal, lastTrajData.obstacle_pts,
     lastTrajData.gt_valid_mask, lastTrajData.pred_valid_mask,
-    lastTrajData.gt_spline_traj
+    lastTrajData.gt_spline_traj, lastTrajData.gt_resample_points
   );
 }
 
@@ -352,17 +414,22 @@ async function loadCurrentSample() {
     lastTrajData = d;
     drawTrajectory(canvas, d.gt_traj, d.pred_traj, d.prior_traj, d.theta_g,
              d.nav_goal, d.obstacle_pts, d.gt_valid_mask, d.pred_valid_mask,
-             d.gt_spline_traj);
-    if (d.gt_traj && d.pred_traj && d.gt_traj.length === d.pred_traj.length) {
+             d.gt_spline_traj, d.gt_resample_points);
+    const resamplePoints = (Array.isArray(d.gt_resample_points) && d.gt_resample_points.length > 0)
+      ? d.gt_resample_points
+      : d.gt_traj;
+    if (Array.isArray(resamplePoints) && Array.isArray(d.pred_traj)
+        && resamplePoints.length > 0 && d.pred_traj.length > 0) {
+      const nPair = Math.min(resamplePoints.length, d.pred_traj.length);
       let mse = 0, maxErr = 0;
-      for (let i = 0; i < d.gt_traj.length; i++) {
-        const gt = d.gt_traj[i], pr = d.pred_traj[i];
+      for (let i = 0; i < nPair; i++) {
+        const gt = resamplePoints[i], pr = d.pred_traj[i];
         if (Array.isArray(gt) && Array.isArray(pr)) {
           let se = (gt[0]-pr[0])**2 + (gt[1]-pr[1])**2;
           mse += se; maxErr = Math.max(maxErr, Math.sqrt(se));
         }
       }
-      mse /= d.gt_traj.length;
+      mse /= Math.max(1, nPair);
       // theta_g 校验：数据集存储值 vs 从导航目标计算值
       let thetaHtml = '';
       if (d.theta_g != null && d.nav_goal && d.nav_goal.length >= 2) {
@@ -384,20 +451,24 @@ async function loadCurrentSample() {
       const gtValid = validLen(d.gt_valid_mask);
       const predValid = validLen(d.pred_valid_mask);
       const validHtml = `<br>有效步: GT ${gtValid} / Pred ${predValid}`;
+      const seqLen = Array.isArray(d.gt_traj) ? d.gt_traj.length : '--';
+      const corrHtml = `<br>对应点数: ${nPair} / ${resamplePoints.length} × ${d.pred_traj.length}`;
       let splineHtml = '';
       if (Array.isArray(d.gt_spline_traj) && d.gt_spline_traj.length > 0) {
         const sp0 = d.gt_spline_traj[0];
         const spN = d.gt_spline_traj[d.gt_spline_traj.length - 1];
         const endRef = (Array.isArray(d.nav_goal) && d.nav_goal.length >= 2)
           ? d.nav_goal
-          : d.gt_traj[d.gt_traj.length - 1];
+          : resamplePoints[resamplePoints.length - 1];
         const startDrift = Math.hypot(sp0[0], sp0[1]);
         const endDrift = Math.hypot(spN[0] - endRef[0], spN[1] - endRef[1]);
         splineHtml = `<br>样条点数: ${d.gt_spline_traj.length}`
           + `<br>样条起点偏移: ${startDrift.toFixed(5)}`
           + `<br>样条终点偏移: ${endDrift.toFixed(5)}`;
       }
-      meta.innerHTML = `序列长度: ${d.gt_traj.length}<br>XY MSE: ${mse.toFixed(6)}<br>最大点误差: ${maxErr.toFixed(4)}${thetaHtml}${validHtml}${splineHtml}`;
+      meta.innerHTML = `序列长度: ${seqLen}<br>重采样点: ${resamplePoints.length}<br>XY MSE: ${mse.toFixed(6)}<br>最大点误差: ${maxErr.toFixed(4)}${corrHtml}${thetaHtml}${validHtml}${splineHtml}`;
+    } else {
+      meta.innerHTML = '';
     }
   } catch(e) { console.error('traj_batch_detail fetch failed:', e); lastTrajData = null; }
 }
@@ -407,7 +478,7 @@ async function refreshTraj() {
   await loadCurrentSample();
 }
 
-function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, obstaclePts, gtMask, predMask, gtSplineTraj) {
+function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, obstaclePts, gtMask, predMask, gtSplineTraj, gtResamplePoints) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -425,6 +496,8 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     return [true, ...mask.map(v => !!v)];
   };
   const gt = toXYT(gtTraj), pred = toXYT(predTraj), prior = toXYT(priorTraj);
+  const resample = toXYT((gtResamplePoints && gtResamplePoints.length > 0) ? gtResamplePoints : gtTraj, false);
+  const predWaypoints = toXYT(predTraj, false);
   const spline = toXYT(gtSplineTraj, false);
   const gtM = withStartMask(gtMask, gtTraj ? gtTraj.length : 0);
   const predM = withStartMask(predMask, predTraj ? predTraj.length : 0);
@@ -432,7 +505,7 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   const obsFlat = (obstaclePts || []).map(p => Array.isArray(p) ? [p[0], p[1], 0] : [0,0,0]);
   // 导航目标参与边界计算
   const goalPt = (navGoal && navGoal.length >= 2) ? [[navGoal[0], navGoal[1], 0]] : [];
-  const all = [...gt, ...pred, ...prior, ...spline, ...obsFlat, ...goalPt, [0,0,0]];
+  const all = [...gt, ...pred, ...prior, ...spline, ...resample, ...obsFlat, ...goalPt, [0,0,0]];
   if (all.length === 0) return;
 
   // 计算边界（含原点）
@@ -520,8 +593,49 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     }
   }
 
+  function drawCorrespondenceLines(srcPoints, dstPoints) {
+    const n = Math.min(srcPoints.length, dstPoints.length);
+    if (n === 0) return;
+    for (let i = 0; i < n; i++) {
+      const s = srcPoints[i], d = dstPoints[i];
+      if (!s || !d) continue;
+      const isValid = !Array.isArray(predMask) || predMask.length !== dstPoints.length || !!predMask[i];
+      ctx.globalAlpha = isValid ? 0.32 : 0.14;
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash(isValid ? [] : [2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(tx(s[0]), ty(s[1]));
+      ctx.lineTo(tx(d[0]), ty(d[1]));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1.0;
+    ctx.setLineDash([]);
+  }
+
+  function drawResamplePoints(points) {
+    if (!points || points.length === 0) return;
+    const labelEvery = Math.max(1, Math.ceil(points.length / 6));
+    points.forEach(([x, y], i) => {
+      const px = tx(x), py = ty(y);
+      ctx.fillStyle = '#fbbf24';
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (i === 0 || i === points.length - 1 || (i + 1) % labelEvery === 0) {
+        ctx.fillStyle = '#fef3c7';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(String(i + 1), px + 5, py - 4);
+      }
+    });
+  }
+
   // ── 障碍物点（红色半透明小点，最先绘制作为背景层） ──
-  if (obstaclePts && obstaclePts.length > 0) {
+  if (trajLayers.obstacles && obstaclePts && obstaclePts.length > 0) {
     ctx.fillStyle = 'rgba(248, 113, 113, 0.5)';
     obstaclePts.forEach(p => {
       if (Array.isArray(p) && p.length >= 2) {
@@ -532,8 +646,14 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     });
   }
 
+  // ── 重采样点与预测航点的一一对应线（背景层） ──
+  if (trajLayers.correspondence && trajLayers.resamplePoints && trajLayers.pred
+      && resample.length > 0 && predWaypoints.length > 0) {
+    drawCorrespondenceLines(resample, predWaypoints);
+  }
+
   // ── 先验轨迹（虚线灰色，无朝向箭头） ──
-  if (prior.length > 1) {
+  if (trajLayers.prior && prior.length > 1) {
     ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
     ctx.beginPath();
     prior.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
@@ -541,7 +661,7 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   }
 
   // ── GT 三次样条拟合曲线（按后端求值结果原样绘制，不做端点修正） ──
-  if (spline.length > 1) {
+  if (trajLayers.gtSpline && spline.length > 1) {
     ctx.strokeStyle = '#fb923c'; ctx.lineWidth = 2.4; ctx.setLineDash([]);
     ctx.beginPath();
     spline.forEach(([x,y], i) => { i === 0 ? ctx.moveTo(tx(x),ty(y)) : ctx.lineTo(tx(x),ty(y)); });
@@ -554,14 +674,27 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   }
 
   // ── 真值轨迹（绿色实线 + 朝向箭头） ──
-  if (gt.length > 1) {
+  if (trajLayers.gt && gt.length > 1) {
     // 起点：白色圆圈
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(tx(gt[0][0]),ty(gt[0][1]),5,0,Math.PI*2); ctx.stroke();
     drawMaskedTrajectory(gt, gtM, '#4ade80', 'V-GT');
-    // 终点大圆
+  }
+
+  // ── 预测轨迹（蓝色实线 + 朝向箭头） ──
+  if (trajLayers.pred && pred.length > 1) {
+    drawMaskedTrajectory(pred, predM, '#7c9ef8', 'V-P');
+    ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
+  }
+
+  // ── 三次样条上的重采样监督点 ──
+  if (trajLayers.resamplePoints && resample.length > 0) {
+    drawResamplePoints(resample);
+  }
+
+  // ── 轨迹终点 ──
+  if (trajLayers.endpoint && gt.length > 1) {
     ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(tx(gt[gt.length-1][0]),ty(gt[gt.length-1][1]),5,0,Math.PI*2); ctx.fill();
-    // 轨迹终点白色外圈强调 + 标签
     const endX = tx(gt[gt.length-1][0]), endY = ty(gt[gt.length-1][1]);
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.setLineDash([]);
     ctx.beginPath(); ctx.arc(endX, endY, 8, 0, Math.PI * 2); ctx.stroke();
@@ -569,14 +702,8 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
     ctx.fillText('End', endX + 10, endY + 3);
   }
 
-  // ── 预测轨迹（蓝色实线 + 朝向箭头） ──
-  if (pred.length > 1) {
-    drawMaskedTrajectory(pred, predM, '#7c9ef8', 'V-P');
-    ctx.fillStyle = '#7c9ef8'; ctx.beginPath(); ctx.arc(tx(pred[pred.length-1][0]),ty(pred[pred.length-1][1]),5,0,Math.PI*2); ctx.fill();
-  }
-
   // ── 导航目标点（黄色菱形标记） ──
-  if (navGoal && navGoal.length >= 2) {
+  if (trajLayers.navGoal && navGoal && navGoal.length >= 2) {
     const gx = tx(navGoal[0]), gy = ty(navGoal[1]);
     ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2; ctx.setLineDash([]);
     const r = 7;
@@ -596,7 +723,7 @@ function drawTrajectory(canvas, gtTraj, predTraj, priorTraj, thetaG, navGoal, ob
   ctx.fillText('O', tx(0)+8, ty(0)+4);
 
   // ── theta_g 方向箭头（从原点出发） ──
-  if (thetaG != null && navGoal && navGoal.length >= 2) {
+  if (trajLayers.theta && thetaG != null && navGoal && navGoal.length >= 2) {
     const ox = tx(0), oy = ty(0);
     const arrowLen = 36;
     const thetaCalc = Math.atan2(navGoal[1], navGoal[0]);
@@ -821,6 +948,7 @@ document.getElementById('traj-reset').addEventListener('click', () => {
 
 // ── 启动 ──
 initLossChart();
+initTrajLegend();
 refreshExperiments().then(() => { refresh(); refreshLossDetail(); refreshTraj(); initTrajInteractions(); });
 setInterval(refresh, 3000);
 setInterval(refreshLossDetail, 5000);

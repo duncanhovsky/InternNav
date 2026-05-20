@@ -259,6 +259,7 @@ class NavDPTrainer(BaseTrainer):
                 "samples": [
                     {
                         "gt_traj":    noise_target[i].detach().cpu().tolist(),
+                        "gt_resample_points": noise_target[i].detach().cpu().tolist(),
                         "pred_traj":  pred[i].detach().cpu().tolist(),
                         "prior_traj": gt_labels[i].detach().cpu().tolist(),
                         "gt_labels":  gt_labels[i].detach().cpu().tolist(),

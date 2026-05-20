@@ -625,6 +625,7 @@ class BridgeDPTrainer(BaseTrainer):
                 "samples": [
                     {
                         "gt_traj":      gt_phys[i].tolist() if hasattr(gt_phys[i], 'tolist') else gt_phys[i],
+                        "gt_resample_points": gt_phys[i].tolist() if hasattr(gt_phys[i], 'tolist') else gt_phys[i],
                         "pred_traj":    pred_phys[i].detach().cpu().tolist() if hasattr(pred_phys[i], 'detach') else pred_phys[i].tolist(),
                         "prior_traj":   prior_phys[i].tolist() if hasattr(prior_phys[i], 'tolist') else prior_phys[i],
                         "theta_g":      theta_g_list[i],
