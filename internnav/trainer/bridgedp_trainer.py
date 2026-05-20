@@ -16,6 +16,7 @@
 """
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -60,13 +61,221 @@ class BridgeDPTrainer(BaseTrainer):
 
         print(f"[Rank {dist.get_rank() if dist.is_initialized() else 0}] Model device: {self.model_device}")
 
+    # ------------------------------------------------------------------
+    # GPU 轨迹曲线监督
+    # ------------------------------------------------------------------
+
+    def _wrap_to_pi(self, angles: torch.Tensor) -> torch.Tensor:
+        """将角度包裹到 [-pi, pi)。"""
+        return torch.remainder(angles + math.pi, 2.0 * math.pi) - math.pi
+
+    def _unwrap_angles(self, angles: torch.Tensor) -> torch.Tensor:
+        """torch 版 unwrap，保持在当前 device 上执行。"""
+        if angles.numel() <= 1:
+            return angles
+        diffs = angles[1:] - angles[:-1]
+        wrapped = self._wrap_to_pi(diffs)
+        wrapped = torch.where(
+            (wrapped == -math.pi) & (diffs > 0),
+            torch.full_like(wrapped, math.pi),
+            wrapped,
+        )
+        correction = torch.cumsum(wrapped - diffs, dim=0)
+        return torch.cat([angles[:1], angles[1:] + correction], dim=0)
+
+    def _natural_cubic_eval(
+        self,
+        s: torch.Tensor,
+        y: torch.Tensor,
+        q: torch.Tensor,
+    ) -> torch.Tensor:
+        """在 GPU 上求自然三次样条并于 q 处重采样。
+
+        Args:
+            s: (N,) 严格递增、归一化到 [0, 1] 的弧长参数。
+            y: (N, C) 曲线值。
+            q: (T,) 查询点。
+        """
+        n = s.shape[0]
+        if n == 1:
+            return y.expand(q.shape[0], -1)
+        if n == 2:
+            denom = (s[1] - s[0]).clamp(min=1e-6)
+            alpha = ((q - s[0]) / denom).clamp(0.0, 1.0).unsqueeze(-1)
+            return (1.0 - alpha) * y[0:1] + alpha * y[1:2]
+
+        h = (s[1:] - s[:-1]).clamp(min=1e-6)
+        A = torch.zeros((n, n), device=s.device, dtype=s.dtype)
+        rhs = torch.zeros((n, y.shape[-1]), device=s.device, dtype=y.dtype)
+        A[0, 0] = 1.0
+        A[-1, -1] = 1.0
+        for i in range(1, n - 1):
+            A[i, i - 1] = h[i - 1]
+            A[i, i] = 2.0 * (h[i - 1] + h[i])
+            A[i, i + 1] = h[i]
+            rhs[i] = 6.0 * (
+                (y[i + 1] - y[i]) / h[i]
+                - (y[i] - y[i - 1]) / h[i - 1]
+            )
+        second = torch.linalg.solve(A, rhs)
+
+        idx = torch.searchsorted(s.contiguous(), q.contiguous(), right=True) - 1
+        idx = idx.clamp(0, n - 2)
+        s_i = s[idx]
+        s_next = s[idx + 1]
+        h_i = (s_next - s_i).clamp(min=1e-6)
+        a = (s_next - q) / h_i
+        b = (q - s_i) / h_i
+
+        y_i = y[idx]
+        y_next = y[idx + 1]
+        m_i = second[idx]
+        m_next = second[idx + 1]
+        return (
+            a.unsqueeze(-1) * y_i
+            + b.unsqueeze(-1) * y_next
+            + (((a ** 3 - a).unsqueeze(-1) * m_i
+                + (b ** 3 - b).unsqueeze(-1) * m_next)
+               * (h_i ** 2).unsqueeze(-1) / 6.0)
+        )
+
+    def _resample_one_trajectory_gpu(
+        self,
+        traj: torch.Tensor,
+        num_points: int,
+    ) -> torch.Tensor:
+        """用 x/y 弧长参数在当前 GPU 上把一条原始轨迹重采样为 24 个未来点。"""
+        traj = traj[:, :3]
+        if traj.shape[0] == 0:
+            return torch.zeros((num_points, 3), device=traj.device, dtype=traj.dtype)
+        if traj.shape[0] == 1:
+            return traj[-1:].expand(num_points, -1)
+
+        theta_unwrapped = self._unwrap_angles(traj[:, 2])
+        curve = torch.cat([traj[:, :2], theta_unwrapped.unsqueeze(-1)], dim=-1)
+
+        dxy = torch.norm(traj[1:, :2] - traj[:-1, :2], dim=-1)
+        s_full = torch.cat([dxy.new_zeros(1), torch.cumsum(dxy, dim=0)])
+        total = s_full[-1]
+        if total <= 1e-6:
+            return curve[-1:].expand(num_points, -1).clone()
+
+        keep = torch.cat([
+            torch.ones(1, device=traj.device, dtype=torch.bool),
+            dxy > 1e-6,
+        ])
+        keep_idx = torch.nonzero(keep, as_tuple=False).flatten()
+        s = s_full[keep_idx]
+        y = curve[keep_idx]
+        # 若末端是重复静止点，用最后一帧的 theta 覆盖同弧长末端，保留 GT 姿态监督。
+        y[-1] = curve[-1]
+        s = s / total
+
+        q = torch.linspace(
+            1.0 / float(num_points),
+            1.0,
+            num_points,
+            device=traj.device,
+            dtype=traj.dtype,
+        )
+        sampled = self._natural_cubic_eval(s, y, q)
+        sampled[:, 2] = self._wrap_to_pi(sampled[:, 2])
+        return sampled
+
+    def _resample_trajectories_gpu(
+        self,
+        raw_trajs: torch.Tensor,
+        lengths: torch.Tensor,
+        num_points: int,
+    ) -> torch.Tensor:
+        """对 batch 内变长原始轨迹做 GPU 弧长样条重采样。"""
+        samples = []
+        for bid in range(raw_trajs.shape[0]):
+            n = int(lengths[bid].item())
+            n = max(1, min(n, raw_trajs.shape[1]))
+            samples.append(self._resample_one_trajectory_gpu(raw_trajs[bid, :n], num_points))
+        return torch.stack(samples, dim=0)
+
+    def _normalize_action_tensor(self, action: torch.Tensor) -> torch.Tensor:
+        """与 BridgeDPNet/Dataset 一致的动作归一化。"""
+        out = action.clone()
+        out[..., 0:2] = out[..., 0:2] / 5.0
+        out[..., 2] = out[..., 2] / 3.14159
+        return out
+
+    def _generate_prior_trajectory_gpu(
+        self,
+        labels: torch.Tensor,
+        is_task_start: torch.Tensor,
+    ) -> torch.Tensor:
+        """在 GPU 上根据重采样标签生成 Bridge-DP 先验轨迹。"""
+        B, T, _ = labels.shape
+        prior = torch.zeros_like(labels)
+        active = ~is_task_start.view(-1).bool()
+        if not active.any():
+            return prior
+
+        q = torch.linspace(
+            1.0 / float(T), 1.0, T, device=labels.device, dtype=labels.dtype
+        ).view(1, T, 1)
+        correct = torch.rand((B,), device=labels.device) < 0.7
+        correct = correct & active
+        if correct.any():
+            end = labels[correct, -1:].clone()
+            noise_std = 0.005 * torch.norm(end.squeeze(1), dim=-1, keepdim=True).view(-1, 1, 1)
+            prior[correct] = q * end + torch.randn_like(labels[correct]) * noise_std
+
+        wrong = active & ~correct
+        if wrong.any():
+            angles = torch.empty((int(wrong.sum().item()),), device=labels.device, dtype=labels.dtype)
+            angles.uniform_(math.pi / 3.0, 5.0 * math.pi / 3.0)
+            cos_a = torch.cos(angles)
+            sin_a = torch.sin(angles)
+            wrong_labels = labels[wrong]
+            x = wrong_labels[..., 0]
+            y = wrong_labels[..., 1]
+            prior_wrong = wrong_labels.clone()
+            prior_wrong[..., 0] = cos_a.view(-1, 1) * x - sin_a.view(-1, 1) * y
+            prior_wrong[..., 1] = sin_a.view(-1, 1) * x + cos_a.view(-1, 1) * y
+            prior[wrong] = prior_wrong
+        return prior
+
+    def _prepare_curve_supervision(self, inputs_on_device: dict, predict_size: int) -> None:
+        """用 GPU 生成弧长样条监督标签，并原地覆盖 batch 字段。"""
+        if "batch_raw_labels" not in inputs_on_device:
+            return
+
+        labels_phys = self._resample_trajectories_gpu(
+            inputs_on_device["batch_raw_labels"],
+            inputs_on_device["batch_raw_lengths"],
+            predict_size,
+        )
+        augments_phys = self._resample_trajectories_gpu(
+            inputs_on_device["batch_raw_augments"],
+            inputs_on_device["batch_raw_lengths"],
+            predict_size,
+        )
+        labels = self._normalize_action_tensor(labels_phys)
+        augments = self._normalize_action_tensor(augments_phys)
+        is_task_start = inputs_on_device.get(
+            "batch_is_task_start",
+            torch.zeros(labels.shape[0], device=labels.device, dtype=torch.bool),
+        )
+
+        inputs_on_device["batch_labels"] = labels
+        inputs_on_device["batch_augments"] = augments
+        inputs_on_device["batch_prior"] = self._generate_prior_trajectory_gpu(labels, is_task_start)
+        inputs_on_device["batch_valid_mask"] = torch.ones(
+            labels.shape[:2], device=labels.device, dtype=torch.float32
+        )
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """执行一次前向并计算 x₀-MSE 总损失。
 
         损失结构与 NavDP 对齐：
             loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
         其中 action_loss = L_x0 + λ_delta * L_delta，均为均匀 MSE（无 SNR 加权）。
-        valid_mask 用于屏蔽轨迹末端 padding 步。
+        轨迹监督由原始 GT 曲线在 GPU 上按弧长样条重采样得到，valid_mask 固定全 1。
         """
         model_device = next(model.parameters()).device
 
@@ -84,10 +293,23 @@ class BridgeDPTrainer(BaseTrainer):
             "batch_theta_g":        inputs["batch_theta_g"].to(model_device),
             "batch_valid_mask":     inputs["batch_valid_mask"].to(model_device),
         }
+        if "batch_raw_labels" in inputs:
+            inputs_on_device.update({
+                "batch_raw_labels":     inputs["batch_raw_labels"].to(model_device),
+                "batch_raw_augments":   inputs["batch_raw_augments"].to(model_device),
+                "batch_raw_lengths":    inputs["batch_raw_lengths"].to(model_device),
+                "batch_is_task_start":  inputs["batch_is_task_start"].to(model_device),
+            })
+
+        model_ref = model.module if hasattr(model, 'module') else model
+        self._prepare_curve_supervision(
+            inputs_on_device,
+            predict_size=getattr(model_ref, "predict_size", inputs_on_device["batch_labels"].shape[1]),
+        )
 
         batch_label_critic   = inputs_on_device["batch_label_critic"]
         batch_augment_critic = inputs_on_device["batch_augment_critic"]
-        # valid_mask: (B, T) bool，True 表示该时间步有效
+        # valid_mask: (B, T) bool，新轨迹拟合监督下全 1，保留为兼容 loss_mask。
         valid_mask = inputs_on_device["batch_valid_mask"].bool()  # (B, T)
 
         # 前向：返回 8 值元组（x₀-prediction）
@@ -108,7 +330,7 @@ class BridgeDPTrainer(BaseTrainer):
             inputs_on_device["batch_theta_g"],
         )
 
-        # ── x₀-MSE（带 valid_mask，屏蔽 padding 步）─────────────────────
+        # ── x₀-MSE（全 24 个重采样监督点参与训练）─────────────────────
         mask = valid_mask.unsqueeze(-1).float()  # (B, T, 1)
         ng_x0_loss = ((x0_pred_ng - ng_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
         mg_x0_loss = ((x0_pred_mg - mg_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
@@ -127,7 +349,6 @@ class BridgeDPTrainer(BaseTrainer):
         ).sum() / mask_delta.sum().clamp(min=1)
         L_delta = 0.5 * (ng_delta_loss + mg_delta_loss)
 
-        model_ref = model.module if hasattr(model, 'module') else model
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
         lambda_eps = getattr(il_cfg, 'lambda_eps', 0.1) if il_cfg else 0.1
@@ -294,7 +515,6 @@ class BridgeDPTrainer(BaseTrainer):
                 naction = model_ref.bridge_scheduler.sample_initial_noise_ordered(
                     goal=pg_n,
                     origin=origin,
-                    d_max=model_ref.d_max,
                     shape=(1, model_ref.predict_size, 3),
                     device=device,
                 )

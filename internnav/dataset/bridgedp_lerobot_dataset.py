@@ -5,9 +5,9 @@
 
 与 NavDP 数据集的核心区别：
 1. 动作空间：增量×4 → 绝对坐标 (x, y, θ)
-2. 新增先验轨迹生成（含 30% 对抗训练）
+2. 新增先验轨迹字段（实际先验由 Trainer 在 GPU 上随重采样标签生成）
 3. 新增目标方位角 θ_g 计算
-4. 返回字段：10 个 → 12 个（+prior_traj, theta_g）
+4. 返回字段：新增 prior_traj、theta_g、raw_xyt 轨迹与 raw length
 
 参考：
     - internnav/dataset/navdp_lerobot_dataset.py（NavDP 数据集，不修改）
@@ -532,48 +532,17 @@ class BridgeDP_Base_Dataset(Dataset):
         target_choice = np.random.choice(target_candidates, p=target_p)
         return start_choice, target_choice
 
-    def generate_prior_trajectory(self, pred_actions, is_task_start=False):
-        """生成先验轨迹，三种情况：
-
-        1. 任务开始（is_task_start=True）：全零，无先验。
-        2. 任务中正确先验（70%）：起点到轨迹末端直线插值 + 0.5% 噪声。
-        3. 任务中错误先验（30%）：随机旋转 60-300° 的错误轨迹。
-
-        Args:
-            pred_actions: 标签轨迹 (T, 3)，已归一化绝对坐标。
-            is_task_start: 是否为任务开始帧（无先验）。
-        """
-        T = pred_actions.shape[0]
-        if is_task_start:
-            return np.zeros((T, 3), dtype=np.float32)
-
-        if np.random.random() < 0.7:
-            # 正确先验：起点到轨迹末端直线插值 + 极小噪声
-            traj_end = pred_actions[-1].copy()
-            t_interp = np.linspace(0, 1, T).reshape(-1, 1)
-            prior = t_interp * traj_end
-            noise_std = 0.005 * np.linalg.norm(traj_end)
-            prior += np.random.randn(T, 3).astype(np.float32) * noise_std
-        else:
-            # 错误先验：随机旋转 60-300°
-            angle = np.random.uniform(np.pi / 3, 5 * np.pi / 3)
-            rot = np.array([[np.cos(angle), -np.sin(angle)],
-                            [np.sin(angle),  np.cos(angle)]], dtype=np.float32)
-            prior = pred_actions.copy()
-            prior[:, 0:2] = (rot @ pred_actions[:, 0:2].T).T
-        return prior.astype(np.float32)
-
     def __getitem__(self, index):
         """获取单条训练样本。
 
         与 NavDP __getitem__（L635-809）的核心区别：
         1. 不做差分×4，直接使用绝对 xyt 坐标
-        2. 新增先验轨迹生成（含对抗训练）
+        2. 新增先验轨迹字段（实际先验由 Trainer 在 GPU 上生成）
         3. 新增目标方位角 theta_g 计算
-        4. 返回 12 个字段（多出 prior_traj 和 theta_g）
+        4. 返回 GPU 重采样所需的原始 GT 轨迹字段（raw_xyt + length）
 
         Returns:
-            tuple: 12 个字段的元组。
+            tuple: 18 个字段的元组。
         """
         import time
 
@@ -625,9 +594,6 @@ class BridgeDP_Base_Dataset(Dataset):
         init_vector = target_local_points[1] - target_local_points[0]
         target_xyt_actions = self.xyz_to_xyt(target_local_points, init_vector)
         augment_xyt_actions = self.xyz_to_xyt(augment_local_points, init_vector)
-        pred_actions = target_xyt_actions[action_indexes]
-        augment_actions = augment_xyt_actions[action_indexes]
-
         # Critic 评分（与 NavDP 一致）
         if trajectory_obstacle_points.shape[0] != 0:
             pred_distance = (
@@ -670,27 +636,20 @@ class BridgeDP_Base_Dataset(Dataset):
             pixel_goal = np.concatenate((pixel_goal, memory_images[-1]), axis=-1)
 
         # ====== Bridge-DP 核心差异点 ======
-        # 1. 不做差分×4，直接使用绝对坐标（去掉起点保持 T 步）
-        pred_actions = pred_actions[1:]   # (T_pred, 3) 绝对坐标
-        augment_actions = augment_actions[1:]
+        # Dataset 只提供原始完整 x/y/theta 曲线；24 点弧长样条监督在 Trainer 的 GPU device 上生成。
+        raw_pred_actions = target_xyt_actions.astype(np.float32)
+        raw_augment_actions = augment_xyt_actions.astype(np.float32)
+        raw_traj_len = raw_pred_actions.shape[0]
 
-        # 对齐动作维度
-        pred_actions = np.pad(
-            pred_actions, ((0, 0), (0, self.action_dim - pred_actions.shape[-1])),
-            mode='constant', constant_values=0,
-        )
-        augment_actions = np.pad(
-            augment_actions, ((0, 0), (0, self.action_dim - augment_actions.shape[-1])),
-            mode='constant', constant_values=0,
-        )
+        # 占位字段用于保持既有 batch 接口；Trainer 会用 GPU 重采样结果覆盖。
+        pred_actions = np.zeros((self.predict_size, self.action_dim), dtype=np.float32)
+        augment_actions = np.zeros((self.predict_size, self.action_dim), dtype=np.float32)
+        prior_traj = np.zeros((self.predict_size, self.action_dim), dtype=np.float32)
+        # 新监督下所有 24 个轨迹控制点都参与训练，不再用 mask 截断短轨迹。
+        valid_mask = np.ones((self.predict_size,), dtype=np.float32)
 
-        # 方案A：计算有效步数掩码（归一化前，用原始坐标判断是否为重复填充点）
-        # 相邻步位移 > 阈值则为有效运动步；第 0 步（第 1 个航点）始终有效
-        step_diffs = np.linalg.norm(pred_actions[1:, :2] - pred_actions[:-1, :2], axis=-1)  # (T-1,)
-        valid_mask = np.concatenate([[1.0], (step_diffs > 1e-4).astype(np.float32)])         # (T,)
-
-        # 2. point_goal 使用轨迹片段终点（与 NavDP 对齐）
-        point_goal = target_xyt_actions[-1].astype(np.float32)
+        # 2. point_goal 使用轨迹片段终点（与重采样监督最后一点保持一致）
+        point_goal = raw_pred_actions[-1].astype(np.float32)
 
         # 3. 计算目标方位角（在归一化之前，使用原始水平面坐标 x, y）
         theta_g = np.arctan2(point_goal[1], point_goal[0]).astype(np.float32)
@@ -704,9 +663,8 @@ class BridgeDP_Base_Dataset(Dataset):
         point_goal[0:2] = point_goal[0:2] / self.action_scale_xy
         point_goal[2] = point_goal[2] / self.action_scale_theta
 
-        # 5. 生成先验轨迹（三种情况：任务开始/正确先验/错误先验）
+        # 5. 先验轨迹在 Trainer 中随 GPU 重采样标签同步生成。
         is_task_start = (memory_start_choice == pixel_start_choice)
-        prior_traj = self.generate_prior_trajectory(pred_actions, is_task_start=is_task_start)
 
         # 6. 障碍物点局部化（世界坐标 → 局部坐标，取最近 64 个点的水平面 xy）
         #    用于前端可视化面板叠加显示障碍物层
@@ -748,6 +706,10 @@ class BridgeDP_Base_Dataset(Dataset):
         theta_g = torch.tensor(theta_g, dtype=torch.float32)
         valid_mask = torch.tensor(valid_mask, dtype=torch.float32)
         obstacle_pts_local = torch.tensor(obs_local_xy, dtype=torch.float32)  # (K, 2) 物理坐标
+        raw_pred_actions = torch.tensor(raw_pred_actions, dtype=torch.float32)
+        raw_augment_actions = torch.tensor(raw_augment_actions, dtype=torch.float32)
+        raw_traj_len = torch.tensor(raw_traj_len, dtype=torch.long)
+        is_task_start = torch.tensor(is_task_start, dtype=torch.bool)
 
         return (
             point_goal,           # 0: (3,) 已归一化
@@ -762,18 +724,32 @@ class BridgeDP_Base_Dataset(Dataset):
             float(pixel_flag),    # 9: float
             prior_traj,           # 10: (T_pred, 3) 已归一化先验轨迹
             theta_g,              # 11: scalar 目标方位角（原始值，未归一化）
-            valid_mask,           # 12: (T_pred,) 有效步掩码（1=真实运动，0=填充静止）
+            valid_mask,           # 12: (T_pred,) 监督掩码（新方案中全 1）
             obstacle_pts_local,   # 13: (K, 2) 局部坐标障碍物点（物理坐标，米）
+            raw_pred_actions,     # 14: (N, 3) 未归一化完整 GT 轨迹，用于 GPU 弧长重采样
+            raw_augment_actions,  # 15: (N, 3) 未归一化完整增强轨迹，用于 GPU 弧长重采样
+            raw_traj_len,         # 16: scalar 原始轨迹长度
+            is_task_start,        # 17: bool 是否为任务开始帧
         )
 
 
 def bridgedp_collate_fn(batch):
     """Bridge-DP 数据集自定义拼接函数。
 
-    将 __getitem__ 返回的 14 个字段拼接为 batch 字典。
-    与 NavDP 的 navdp_collate_fn 对比：新增 batch_prior、batch_theta_g、batch_obstacle_pts。
+    将 __getitem__ 返回的字段拼接为 batch 字典。
+    与 NavDP 的 navdp_collate_fn 对比：新增 batch_prior、batch_theta_g、batch_obstacle_pts
+    以及 GPU 弧长重采样所需的 raw 轨迹字段。
     注意：batch_obstacle_pts 是 list 类型（每个样本障碍物点数量不同），不做 torch.stack。
     """
+    raw_lengths = torch.stack([item[16] for item in batch])
+    max_raw_len = int(raw_lengths.max().item())
+    raw_labels = torch.zeros((len(batch), max_raw_len, 3), dtype=torch.float32)
+    raw_augments = torch.zeros((len(batch), max_raw_len, 3), dtype=torch.float32)
+    for bid, item in enumerate(batch):
+        n = int(item[16].item())
+        raw_labels[bid, :n] = item[14]
+        raw_augments[bid, :n] = item[15]
+
     collated = {
         "batch_pg": torch.stack([item[0] for item in batch]),
         "batch_ig": torch.stack([item[1] for item in batch]),
@@ -790,5 +766,9 @@ def bridgedp_collate_fn(batch):
         "batch_valid_mask": torch.stack([item[12] for item in batch]),
         # 障碍物点：每个样本点数不同，用 list 存储，不进 torch.stack
         "batch_obstacle_pts": [item[13] for item in batch],
+        "batch_raw_labels": raw_labels,
+        "batch_raw_augments": raw_augments,
+        "batch_raw_lengths": raw_lengths,
+        "batch_is_task_start": torch.stack([item[17] for item in batch]),
     }
     return collated

@@ -103,11 +103,6 @@ bridgedp_exp_cfg = ExpCfg(
         # lambda_eps: x0 -> eps 反推噪声回归权重
         #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
         lambda_eps=0.1,
-        # ── 轨迹长度上限（归一化空间）──
-        # 由 compute_sigma_base.py --mode d_max 离线标定
-        # 含义：单次预测中 24 个航点覆盖的最大直线距离（归一化后）
-        # 当导航目标距离 < d_max 时，轨迹终点 ≈ 导航目标
-        d_max=0.85,
     ),
     model=bridgedp_cfg,
 )

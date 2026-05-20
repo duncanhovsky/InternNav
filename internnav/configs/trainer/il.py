@@ -39,5 +39,3 @@ class IlCfg(BaseModel, extra='allow'):
     loss: Optional[Loss] = None
     report_to: Optional[str] = None
     use_prior_traj: Optional[bool] = False
-    # Bridge-DP 轨迹长度上限（归一化空间，由 compute_sigma_base.py --mode d_max 离线标定）
-    d_max: Optional[float] = 0.85

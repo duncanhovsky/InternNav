@@ -9,7 +9,7 @@
 3. 新增模块：PriorEncoder + VisualGate（先验轨迹注入）
 4. memory 序列：[time, goal×3, rgbd] → [time, goal×3, rgbd, G·prior×N_p]
 5. 预测目标：预测噪声 ε → 预测干净轨迹 x̂_0
-6. 推理后处理：cumsum/4 → 三次样条平滑
+6. 推理输出：绝对坐标 24 点轨迹控制点（部署端可再按机器人运动属性重采样）
 
 参考文献：
     - docs/Bridge-DP推导.md §3（弹性布朗桥 SDE）
@@ -146,10 +146,6 @@ class BridgeDPNet(PreTrainedModel):
         self.use_origin_bridge_train = il.get('use_origin_bridge_train', False)
         # use_prior_traj=False 时完全忽略先验轨迹输入（等价于全零先验）
         self.use_prior_traj = il.get('use_prior_traj', False)
-        # d_max: 归一化空间中单次预测的最大轨迹直线距离
-        # 由 compute_sigma_base.py --mode d_max 离线标定
-        self.d_max = il.get('d_max', 0.85)
-
         # 动作空间归一化参数（必须与 bridgedp_lerobot_dataset.py 保持一致）
         self.action_scale_xy = 5.0
         self.action_scale_theta = 3.14159
@@ -619,7 +615,7 @@ class BridgeDPNet(PreTrainedModel):
         与 NavDP 的区别：
         1. 初始噪声：torch.randn → N(g, sigma_goal^2)
         2. 去噪步：DDPMScheduler.step → BridgeScheduler.step
-        3. 后处理：cumsum/4 → 三次样条平滑
+        3. 后处理：cumsum/4 → 直接输出绝对坐标轨迹控制点
         4. 新增参数：prior_traj, theta_g
 
         Args:
@@ -681,14 +677,13 @@ class BridgeDPNet(PreTrainedModel):
                     device=self._device
                 )
 
-            # ── 有序区间初始化：24 个航点从起点到合理终点线性分布 ──
-            # 桥终点 = 导航目标（与训练一致），初始化区间由 d_max 截断
+            # ── 有序区间初始化：24 个航点从起点到导航目标完整分布 ──
+            # 输出航点不包含起点，覆盖 (origin, goal]，与弧长重采样监督一致。
             B = tensor_point_goal_n.shape[0]
             origin = torch.zeros_like(tensor_point_goal_n)  # 起点 = 机器人当前位置（归一化空间中的原点）
             naction = self.bridge_scheduler.sample_initial_noise_ordered(
                 goal=tensor_point_goal_n.repeat(sample_num, 1),
                 origin=origin.repeat(sample_num, 1),
-                d_max=self.d_max,
                 shape=(sample_num * B, self.predict_size, 3),
                 device=self._device,
             )
@@ -712,9 +707,10 @@ class BridgeDPNet(PreTrainedModel):
             # Critic 排序
             critic_values = self.predict_critic(naction, rgbd_embed)
 
-            # ── 反归一化 + 三次样条平滑 ──
+            # ── 反归一化 ──
+            # smooth_trajectory_batch 暂停使用；24 点本身即为可重采样的轨迹控制点。
             naction = self._denormalize_action(naction)
-            trajectory = smooth_trajectory_batch(naction)
+            trajectory = naction
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
             positive_trajectory = trajectory[(-critic_values).argsort()[0:8]]
@@ -809,9 +805,10 @@ class BridgeDPNet(PreTrainedModel):
 
             critic_values = self.predict_critic(naction, rgbd_embed)
 
-            # ── 反归一化 + 平滑 ──
+            # ── 反归一化 ──
+            # smooth_trajectory_batch 暂停使用；部署端可按机器人运动属性另行重采样。
             naction = self._denormalize_action(naction)
-            trajectory = smooth_trajectory_batch(naction)
+            trajectory = naction
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
             positive_trajectory = trajectory[(-critic_values).argsort()[0:8]]
