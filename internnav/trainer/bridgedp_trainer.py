@@ -318,7 +318,10 @@ class BridgeDPTrainer(BaseTrainer):
          ng_x0_target, mg_x0_target,
          imagegoal_aux_pred, pixelgoal_aux_pred,
          ng_noisy_action, mg_noisy_action,
-         ng_timesteps, mg_timesteps) = model(
+         ng_timesteps, mg_timesteps,
+         ng_bridge_mu, mg_bridge_mu,
+         ng_bridge_sigma, mg_bridge_sigma,
+         ng_s_norm, mg_s_norm) = model(
             inputs_on_device["batch_pg"],
             inputs_on_device["batch_ig"],
             inputs_on_device["batch_tg"],
@@ -351,38 +354,28 @@ class BridgeDPTrainer(BaseTrainer):
 
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
-        lambda_eps = getattr(il_cfg, 'lambda_eps', 0.1) if il_cfg else 0.1
+        lambda_eps = getattr(il_cfg, 'lambda_eps', 0.0) if il_cfg else 0.0
 
-        # ── 由 x0 反推噪声的回归项（x0 -> eps）────────────────────────
-        goal = inputs_on_device["batch_pg"]
-        theta_g = inputs_on_device["batch_theta_g"]
-
-        def _eps_loss(x0_pred, x0_target, noisy_action, timesteps):
-            if model_ref.use_origin_bridge_train:
-                bridge_x0 = torch.zeros_like(x0_target)
-            else:
-                bridge_x0 = x0_target
-
-            t_norm = model_ref.bridge_scheduler._normalized_time(timesteps).view(-1, 1, 1)
-            if goal.dim() == 2:
-                goal_exp = goal.unsqueeze(1).expand_as(x0_target)
-            else:
-                goal_exp = goal.expand_as(x0_target)
-            bridge_mean = (1.0 - t_norm) * bridge_x0 + t_norm * goal_exp
-
-            theta_exp = theta_g.view(-1, 1, 1)
-            sigma = model_ref.bridge_scheduler.std(t_norm, theta_exp).clamp(min=1e-6)
-            eps_target = (noisy_action - bridge_mean) / sigma
-
-            pred_mean = (1.0 - t_norm) * x0_pred + t_norm * goal_exp
-            eps_pred = (noisy_action - pred_mean) / sigma
-
+        # ── optional eps-consistency under the trajectory-time bridge ──────
+        # Disabled by default because it is effectively an SNR-weighted x0 loss.
+        def _eps_loss(x0_pred, x0_target, noisy_action, bridge_mu, bridge_sigma, s_norm):
+            beta = s_norm.clamp(min=1e-6)
+            sigma = bridge_sigma.clamp(min=1e-6)
+            eps_target = (
+                noisy_action - (1.0 - s_norm) * x0_target - s_norm * bridge_mu
+            ) / (beta * sigma)
+            eps_pred = (
+                noisy_action - (1.0 - s_norm) * x0_pred - s_norm * bridge_mu
+            ) / (beta * sigma)
             return ((eps_pred - eps_target).square() * mask).sum() / mask.sum().clamp(min=1)
 
-        L_eps = 0.5 * (
-            _eps_loss(x0_pred_ng, ng_x0_target, ng_noisy_action, ng_timesteps)
-            + _eps_loss(x0_pred_mg, mg_x0_target, mg_noisy_action, mg_timesteps)
-        )
+        if lambda_eps > 0:
+            L_eps = 0.5 * (
+                _eps_loss(x0_pred_ng, ng_x0_target, ng_noisy_action, ng_bridge_mu, ng_bridge_sigma, ng_s_norm)
+                + _eps_loss(x0_pred_mg, mg_x0_target, mg_noisy_action, mg_bridge_mu, mg_bridge_sigma, mg_s_norm)
+            )
+        else:
+            L_eps = L_x0.new_tensor(0.0)
 
         action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
 
@@ -518,10 +511,6 @@ class BridgeDPTrainer(BaseTrainer):
                     shape=(1, model_ref.predict_size, 3),
                     device=device,
                 )
-                # 去噪时 goal = 导航目标
-                goal_exp = pg_n.unsqueeze(1).expand(
-                    -1, model_ref.predict_size, -1
-                )
                 theta_exp = theta_g
 
                 model_ref.bridge_scheduler.set_timesteps(10)
@@ -530,8 +519,12 @@ class BridgeDPTrainer(BaseTrainer):
                         naction, k.to(device).unsqueeze(0),
                         pointgoal_embed, rgbd_embed, gated_prior,
                     )
-                    naction = model_ref.bridge_scheduler.step(
-                        x0_pred, naction, k.to(device), goal_exp, theta_exp,
+                    naction = model_ref.bridge_scheduler.step_trajectory(
+                        x0_pred, naction, k.to(device),
+                        goal=pg_n,
+                        theta_g=theta_exp,
+                        origin=origin,
+                        mode="pointgoal",
                     )
 
                 pred_abs = model_ref._denormalize_action(naction)  # (1, T, 3)

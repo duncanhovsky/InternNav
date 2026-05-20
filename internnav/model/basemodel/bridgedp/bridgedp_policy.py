@@ -140,6 +140,13 @@ class BridgeDPNet(PreTrainedModel):
         self.n_prior_tokens = il.get('n_prior_tokens', 4)
         self.sigma_base = il.get('sigma_base', 1.0)
         self.sigma_goal = il.get('sigma_goal', 0.1)
+        self.sigma_floor = il.get('sigma_floor', self.sigma_goal)
+        self.nogoal_front_distance = il.get('nogoal_front_distance', 0.8)
+        self.nogoal_sigma_start = il.get('nogoal_sigma_start', 0.03)
+        self.nogoal_sigma_x_end = il.get('nogoal_sigma_x_end', 0.35)
+        self.nogoal_sigma_y_end = il.get('nogoal_sigma_y_end', 0.80)
+        self.nogoal_sigma_theta_end = il.get('nogoal_sigma_theta_end', 0.60)
+        self.nogoal_sigma_power = il.get('nogoal_sigma_power', 2.0)
         self.num_train_timesteps = il.get('num_train_timesteps', 100)
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
         # 训练时是否使用“原点→目标”的布朗桥（前向加噪起点固定为零向量）
@@ -214,6 +221,13 @@ class BridgeDPNet(PreTrainedModel):
             num_train_timesteps=self.num_train_timesteps,
             sigma_base=self.sigma_base,
             sigma_goal=self.sigma_goal,
+            sigma_floor=self.sigma_floor,
+            nogoal_front_distance=self.nogoal_front_distance,
+            nogoal_sigma_start=self.nogoal_sigma_start,
+            nogoal_sigma_x_end=self.nogoal_sigma_x_end,
+            nogoal_sigma_y_end=self.nogoal_sigma_y_end,
+            nogoal_sigma_theta_end=self.nogoal_sigma_theta_end,
+            nogoal_sigma_power=self.nogoal_sigma_power,
         )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
@@ -300,7 +314,7 @@ class BridgeDPNet(PreTrainedModel):
     # 前向加噪（训练专用）
     # ------------------------------------------------------------------
 
-    def sample_bridge_noise(self, x0, goal, theta_g, timesteps=None):
+    def sample_bridge_noise(self, x0, goal=None, theta_g=None, timesteps=None, mode="pointgoal"):
         """布朗桥前向加噪，返回 x₀（训练目标）、含噪嵌入与含噪轨迹。
 
         训练目标为 x₀-prediction（预测干净轨迹），与推导文档 §6.1 一致。
@@ -323,10 +337,18 @@ class BridgeDPNet(PreTrainedModel):
             ).long()
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
         bridge_x0 = torch.zeros_like(x0) if self.use_origin_bridge_train else x0
-        noisy_action = self.bridge_scheduler.add_noise(bridge_x0, goal, theta_g, timesteps)
+        origin = torch.zeros(x0.shape[0], x0.shape[-1], device=device, dtype=x0.dtype)
+        noisy_action, _, bridge_mu, bridge_sigma, s_norm = self.bridge_scheduler.add_noise_trajectory(
+            bridge_x0,
+            timesteps,
+            goal=goal,
+            theta_g=theta_g,
+            origin=origin,
+            mode=mode,
+        )
         noisy_action_embed = self.input_embed(noisy_action)
         # 返回 x0 作为训练目标（x₀-prediction）
-        return x0, time_embeds, noisy_action_embed, timesteps, noisy_action
+        return x0, time_embeds, noisy_action_embed, timesteps, noisy_action, bridge_mu, bridge_sigma, s_norm
 
     # ------------------------------------------------------------------
     # 去噪预测
@@ -351,7 +373,10 @@ class BridgeDPNet(PreTrainedModel):
             x0_pred: 预测的干净轨迹 (B, T_pred, 3)。
         """
         action_embeds = self.input_embed(noisy_actions)
-        time_embeds = self.time_emb(timestep.to(self._device)).unsqueeze(1)
+        time_embeds = self.time_emb(timestep.to(self._device).view(-1)).unsqueeze(1)
+        cond_batch = goal_embed.shape[0]
+        if time_embeds.shape[0] == 1 and cond_batch > 1:
+            time_embeds = time_embeds.expand(cond_batch, -1, -1)
 
         # memory = [time(1), goal×3, rgbd(mem×16), G·prior(N_p)]
         cond_tokens = torch.cat(
@@ -380,7 +405,8 @@ class BridgeDPNet(PreTrainedModel):
         Returns:
             critic_values: (B*S,) 标量评分。
         """
-        repeat_rgbd_embed = rgbd_embed.repeat(predict_trajectory.shape[0], 1, 1)
+        repeat_factor = max(1, predict_trajectory.shape[0] // rgbd_embed.shape[0])
+        repeat_rgbd_embed = rgbd_embed.repeat(repeat_factor, 1, 1)
         nogoal_embed = torch.zeros_like(repeat_rgbd_embed[:, 0:1])
         # 先验位置用零填充（critic 不使用先验）
         zero_prior = torch.zeros(
@@ -458,11 +484,11 @@ class BridgeDPNet(PreTrainedModel):
         # ── 布朗桥加噪（x₀-prediction 版本）──────────────────────────────
         # ng/mg 各自独立采样时间步，增加训练多样性（与 NavDP 一致）
         # sample_bridge_noise 返回 x0（干净轨迹）作为训练目标
-        ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps, ng_noisy_action = self.sample_bridge_noise(
-            tensor_label_actions, tensor_point_goal, tensor_theta_g
+        ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps, ng_noisy_action, ng_bridge_mu, ng_bridge_sigma, ng_s_norm = self.sample_bridge_noise(
+            tensor_label_actions, goal=None, theta_g=None, mode="nogoal"
         )
-        mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps, mg_noisy_action = self.sample_bridge_noise(
-            tensor_label_actions, tensor_point_goal, tensor_theta_g
+        mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps, mg_noisy_action, mg_bridge_mu, mg_bridge_sigma, mg_s_norm = self.sample_bridge_noise(
+            tensor_label_actions, goal=tensor_point_goal, theta_g=tensor_theta_g, mode="pointgoal"
         )
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
@@ -575,6 +601,12 @@ class BridgeDPNet(PreTrainedModel):
             mg_noisy_action,   # (B, T_pred, 3) mg 含噪轨迹
             ng_timesteps,      # (B,) ng 时间步
             mg_timesteps,      # (B,) mg 时间步
+            ng_bridge_mu,      # (B, T_pred, 3) ng bridge mean, no real-goal leakage
+            mg_bridge_mu,      # (B, T_pred, 3) mg ordered point-goal bridge mean
+            ng_bridge_sigma,   # (B, T_pred, 3)
+            mg_bridge_sigma,   # (B, T_pred, 3)
+            ng_s_norm,         # (B, 1, 1)
+            mg_s_norm,         # (B, 1, 1)
         )
 
     # ------------------------------------------------------------------
@@ -690,8 +722,8 @@ class BridgeDPNet(PreTrainedModel):
 
             # 去噪时 goal 仍为导航目标（保持桥的一致性）
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
-            goal_expanded = tensor_point_goal_n.unsqueeze(1).expand(-1, self.predict_size, -1)
-            goal_expanded = goal_expanded.repeat(sample_num, 1, 1)
+            goal_repeated = tensor_point_goal_n.repeat(sample_num, 1)
+            origin_repeated = origin.repeat(sample_num, 1)
             theta_expanded = tensor_theta_g.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
@@ -699,9 +731,12 @@ class BridgeDPNet(PreTrainedModel):
                     naction, k.to(self._device).unsqueeze(0),
                     pointgoal_embed, rgbd_embed, gated_prior
                 )
-                naction = self.bridge_scheduler.step(
+                naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
-                    goal_expanded, theta_expanded,
+                    goal=goal_repeated,
+                    theta_g=theta_expanded,
+                    origin=origin_repeated,
+                    mode="pointgoal",
                 )
 
             # Critic 排序
@@ -782,25 +817,23 @@ class BridgeDPNet(PreTrainedModel):
                     B, self.n_prior_tokens, self.token_dim, device=self._device
                 )
 
-            # NoGoal: goal=0，无方向信息，使用旧的均匀初始化（不使用有序采样）
-            naction = self.bridge_scheduler.sample_initial_noise(
-                zero_goal,
+            # NoGoal: fixed forward default target with uncertainty growing toward the far end.
+            naction = self.bridge_scheduler.sample_initial_noise_nogoal(
                 (sample_num * B, self.predict_size, 3),
                 self._device,
+                dtype=zero_goal.dtype,
             )
 
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
-            goal_expanded = zero_goal.unsqueeze(1).expand(-1, self.predict_size, -1).repeat(sample_num, 1, 1)
-            theta_expanded = zero_theta.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
                     nogoal_embed, rgbd_embed, gated_prior
                 )
-                naction = self.bridge_scheduler.step(
+                naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
-                    goal_expanded, theta_expanded,
+                    mode="nogoal",
                 )
 
             critic_values = self.predict_critic(naction, rgbd_embed)

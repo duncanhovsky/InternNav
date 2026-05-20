@@ -90,6 +90,14 @@ bridgedp_exp_cfg = ExpCfg(
         # num_inference_timesteps: 推理时 DDIM 去噪步数（与 NavDP 保持一致）
         sigma_base=0.2,
         sigma_goal=0.01,
+        sigma_floor=0.01,
+        # NoGoal 分支不使用真实目标；默认向正前方展开，远端方差更大。
+        nogoal_front_distance=0.8,  # normalized x distance, 0.8 ~= 4m before denorm
+        nogoal_sigma_start=0.03,
+        nogoal_sigma_x_end=0.35,
+        nogoal_sigma_y_end=0.80,
+        nogoal_sigma_theta_end=0.60,
+        nogoal_sigma_power=2.0,
         n_prior_tokens=4,
         num_train_timesteps=10,
         num_inference_timesteps=10,
@@ -102,7 +110,7 @@ bridgedp_exp_cfg = ExpCfg(
         lambda_delta=0.1,
         # lambda_eps: x0 -> eps 反推噪声回归权重
         #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
-        lambda_eps=0.1,
+        lambda_eps=0.0,
     ),
     model=bridgedp_cfg,
 )

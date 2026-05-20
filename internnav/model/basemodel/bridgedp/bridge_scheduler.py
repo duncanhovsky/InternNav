@@ -66,10 +66,24 @@ class BridgeScheduler:
         num_train_timesteps: int = 100,
         sigma_base: float = 1.0,
         sigma_goal: float = 0.5,
+        sigma_floor: Optional[float] = None,
+        nogoal_front_distance: float = 0.8,
+        nogoal_sigma_start: float = 0.03,
+        nogoal_sigma_x_end: float = 0.35,
+        nogoal_sigma_y_end: float = 0.80,
+        nogoal_sigma_theta_end: float = 0.60,
+        nogoal_sigma_power: float = 2.0,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
         self.sigma_goal = sigma_goal
+        self.sigma_floor = sigma_goal if sigma_floor is None else sigma_floor
+        self.nogoal_front_distance = nogoal_front_distance
+        self.nogoal_sigma_start = nogoal_sigma_start
+        self.nogoal_sigma_x_end = nogoal_sigma_x_end
+        self.nogoal_sigma_y_end = nogoal_sigma_y_end
+        self.nogoal_sigma_theta_end = nogoal_sigma_theta_end
+        self.nogoal_sigma_power = nogoal_sigma_power
 
         # 推理时使用的时间步序列（由 set_timesteps 设置）
         self._timesteps: Optional[torch.Tensor] = None
@@ -180,6 +194,161 @@ class BridgeScheduler:
         return self.variance(t_norm, theta_g).sqrt()
 
     # ------------------------------------------------------------------
+    # Trajectory-time ordered bridge helpers
+    # ------------------------------------------------------------------
+
+    def trajectory_time(
+        self,
+        predict_size: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Return tau_i=(i+1)/T for ordered waypoints, shaped (1, T, 1)."""
+        return torch.linspace(
+            1.0 / float(predict_size),
+            1.0,
+            predict_size,
+            device=device,
+            dtype=dtype,
+        ).view(1, predict_size, 1)
+
+    def _batch_endpoint(
+        self,
+        value: Optional[torch.Tensor],
+        batch_size: int,
+        dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Normalize an endpoint-like tensor to (B, dim)."""
+        if value is None:
+            return torch.zeros(batch_size, dim, device=device, dtype=dtype)
+        value = value.to(device=device, dtype=dtype)
+        if value.dim() == 1:
+            value = value.unsqueeze(0)
+        if value.dim() == 3:
+            value = value[:, -1, :]
+        if value.shape[0] == 1 and batch_size > 1:
+            value = value.expand(batch_size, -1)
+        return value
+
+    def bridge_mean_ordered(
+        self,
+        goal: torch.Tensor,
+        origin: Optional[torch.Tensor],
+        shape: tuple,
+    ) -> torch.Tensor:
+        """Ordered point-goal bridge mean from origin to goal, shaped (B, T, D)."""
+        B, T_pred, dim = shape
+        device = goal.device
+        dtype = goal.dtype
+        goal = self._batch_endpoint(goal, B, dim, device, dtype)
+        origin = self._batch_endpoint(origin, B, dim, device, dtype)
+        tau = self.trajectory_time(T_pred, device, dtype)
+        return origin.unsqueeze(1) + tau * (goal.unsqueeze(1) - origin.unsqueeze(1))
+
+    def bridge_mean_nogoal(
+        self,
+        shape: tuple,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """NoGoal default-front mean; independent of any real sample goal."""
+        B, T_pred, dim = shape
+        tau = self.trajectory_time(T_pred, device, dtype)
+        front = torch.zeros(B, dim, device=device, dtype=dtype)
+        front[:, 0] = self.nogoal_front_distance
+        return tau * front.unsqueeze(1)
+
+    def trajectory_std(
+        self,
+        shape: tuple,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+        goal: Optional[torch.Tensor] = None,
+        theta_g: Optional[torch.Tensor] = None,
+        origin: Optional[torch.Tensor] = None,
+        mode: str = "pointgoal",
+    ) -> torch.Tensor:
+        """Per-waypoint std for the trajectory-time bridge.
+
+        PointGoal uses a Brownian-bridge shape with small endpoint variance.
+        NoGoal uses a fixed front-biased prior whose uncertainty grows toward
+        the far end, especially laterally and in heading.
+        """
+        B, T_pred, dim = shape
+        tau = self.trajectory_time(T_pred, device, dtype)
+
+        if mode == "nogoal":
+            grow = tau.pow(self.nogoal_sigma_power)
+            end = torch.tensor(
+                [
+                    self.nogoal_sigma_x_end,
+                    self.nogoal_sigma_y_end,
+                    self.nogoal_sigma_theta_end,
+                ],
+                device=device,
+                dtype=dtype,
+            ).view(1, 1, 3)
+            if dim != 3:
+                end = end[..., :dim]
+            start = torch.full_like(end, self.nogoal_sigma_start)
+            sigma = start + (end - start) * grow
+            return sigma.expand(B, T_pred, dim).clamp(min=self.sigma_floor)
+
+        if theta_g is None:
+            goal_b = self._batch_endpoint(goal, B, dim, device, dtype)
+            origin_b = self._batch_endpoint(origin, B, dim, device, dtype)
+            vec = goal_b - origin_b
+            theta_g = torch.atan2(vec[:, 1], vec[:, 0])
+        else:
+            theta_g = theta_g.to(device=device, dtype=dtype).view(-1)
+            if theta_g.shape[0] == 1 and B > 1:
+                theta_g = theta_g.expand(B)
+
+        p = self.direction_adaptive_exponent(theta_g).view(B, 1, 1)
+        t_prod = (tau * (1.0 - tau)).clamp(min=0.0)
+        var = (self.sigma_base ** 2) * (t_prod ** p) + (self.sigma_floor ** 2)
+        return var.sqrt().expand(B, T_pred, dim)
+
+    def add_noise_trajectory(
+        self,
+        x0: torch.Tensor,
+        timesteps: torch.Tensor,
+        goal: Optional[torch.Tensor] = None,
+        theta_g: Optional[torch.Tensor] = None,
+        origin: Optional[torch.Tensor] = None,
+        mode: str = "pointgoal",
+        noise: Optional[torch.Tensor] = None,
+    ):
+        """Forward process with separate diffusion time s and trajectory time tau."""
+        if noise is None:
+            noise = torch.randn_like(x0)
+
+        B, T_pred, dim = x0.shape
+        device = x0.device
+        dtype = x0.dtype
+        s_norm = self._normalized_time(timesteps.to(device)).to(dtype=dtype).view(-1, 1, 1)
+        if s_norm.shape[0] == 1 and B > 1:
+            s_norm = s_norm.expand(B, 1, 1)
+
+        if mode == "nogoal":
+            mu = self.bridge_mean_nogoal(x0.shape, device, dtype)
+            sigma = self.trajectory_std(x0.shape, device, dtype, mode="nogoal")
+        else:
+            if origin is None:
+                origin = torch.zeros(B, dim, device=device, dtype=dtype)
+            mu = self.bridge_mean_ordered(goal, origin, x0.shape)
+            sigma = self.trajectory_std(
+                x0.shape, device, dtype,
+                goal=goal, theta_g=theta_g, origin=origin, mode="pointgoal",
+            )
+
+        beta = s_norm.clamp(min=1e-6)
+        noisy = (1.0 - s_norm) * x0 + s_norm * mu + beta * sigma * noise
+        return noisy, noise, mu, sigma, s_norm
+
+    # ------------------------------------------------------------------
     # 前向加噪（训练）
     # ------------------------------------------------------------------
 
@@ -216,6 +385,16 @@ class BridgeScheduler:
             3. NoGoal 模式 (goal=0, σ_goal 大):
                x_t 在 t→1 时完全由噪声主导 → 退化为自由扩散 → 正确。
         """
+        noisy, _, _, _, _ = self.add_noise_trajectory(
+            x0,
+            timesteps,
+            goal=goal,
+            theta_g=theta_g,
+            mode="pointgoal",
+            noise=noise,
+        )
+        return noisy
+
         if noise is None:
             noise = torch.randn_like(x0)
 
@@ -239,6 +418,58 @@ class BridgeScheduler:
         # x_t = bridge_mean + σ · ε
         return bridge_mean + sigma * noise
 
+    def step_trajectory(
+        self,
+        x0_pred: torch.Tensor,
+        x_s: torch.Tensor,
+        timestep: torch.Tensor,
+        goal: Optional[torch.Tensor] = None,
+        theta_g: Optional[torch.Tensor] = None,
+        origin: Optional[torch.Tensor] = None,
+        mode: str = "pointgoal",
+        eta: float = 0.0,
+    ) -> torch.Tensor:
+        """DDIM-style reverse step for the trajectory-time bridge process."""
+        device = x_s.device
+        dtype = x_s.dtype
+        timestep = timestep.to(device)
+        s_norm = self._normalized_time(timestep).to(dtype=dtype)
+        dt = 1.0 / self.num_train_timesteps
+
+        if s_norm.numel() == 1 and s_norm.item() <= dt + 1e-6:
+            return x0_pred
+
+        B, _, dim = x_s.shape
+        s = s_norm.view(-1, 1, 1)
+        if s.shape[0] == 1 and B > 1:
+            s = s.expand(B, 1, 1)
+        s_prev = (s - dt).clamp(min=0.0)
+
+        if mode == "nogoal":
+            mu = self.bridge_mean_nogoal(x_s.shape, device, dtype)
+            sigma = self.trajectory_std(x_s.shape, device, dtype, mode="nogoal")
+        else:
+            if origin is None:
+                origin = torch.zeros(B, dim, device=device, dtype=dtype)
+            mu = self.bridge_mean_ordered(goal, origin, x_s.shape)
+            sigma = self.trajectory_std(
+                x_s.shape, device, dtype,
+                goal=goal, theta_g=theta_g, origin=origin, mode="pointgoal",
+            )
+
+        beta = s.clamp(min=1e-6)
+        eps_hat = (x_s - (1.0 - s) * x0_pred - s * mu) / (beta * sigma.clamp(min=1e-6))
+        x_prev = (
+            (1.0 - s_prev) * x0_pred
+            + s_prev * mu
+            + s_prev * sigma * eps_hat
+        )
+
+        if eta > 0.0:
+            x_prev = x_prev + eta * s_prev * sigma * torch.randn_like(x_prev)
+
+        return x_prev
+
     # ------------------------------------------------------------------
     # 反向去噪（推理）
     # ------------------------------------------------------------------
@@ -259,6 +490,16 @@ class BridgeScheduler:
         Args:
             eta: 随机扰动强度。0 为纯 DDIM 确定性；1 为完整随机扰动。
         """
+        return self.step_trajectory(
+            x0_pred,
+            x_t,
+            timestep,
+            goal=goal,
+            theta_g=theta_g,
+            mode="pointgoal",
+            eta=eta,
+        )
+
         timestep = timestep.to(x_t.device)
         t_norm = self._normalized_time(timestep).float()
         dt = 1.0 / self.num_train_timesteps
@@ -366,11 +607,25 @@ class BridgeScheduler:
         # 计算方差：使用布朗桥在各航点弧长位置处的方差
         theta_g = torch.atan2(goal_vec[:, 1], goal_vec[:, 0])  # (B,)
         theta_g_exp = theta_g.view(-1, 1, 1)  # (B, 1, 1)
-        sigma_per_point = self.std(t_traj.expand(B, -1, -1), theta_g_exp)  # (B, T, 1)
+        sigma_per_point = self.trajectory_std(
+            shape, device, goal.dtype,
+            goal=goal, theta_g=theta_g, origin=origin, mode="pointgoal",
+        )
 
         # 采样：μ_i + σ_i · ε
-        noise = torch.randn(shape, device=device)
+        noise = torch.randn(shape, device=device, dtype=goal.dtype)
         return mu + sigma_per_point * noise
+
+    def sample_initial_noise_nogoal(
+        self,
+        shape: tuple,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """NoGoal initialization: default-front mean with growing uncertainty."""
+        mu = self.bridge_mean_nogoal(shape, device, dtype)
+        sigma = self.trajectory_std(shape, device, dtype, mode="nogoal")
+        return mu + sigma * torch.randn(shape, device=device, dtype=dtype)
 
     # ------------------------------------------------------------------
     # 序列化（兼容 config 属性访问模式）
