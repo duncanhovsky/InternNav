@@ -104,13 +104,19 @@ bridgedp_exp_cfg = ExpCfg(
         bridge_normal_sigma_ratio=0.5,
         bridge_tangent_sigma_ratio=0.05,
         bridge_theta_sigma_ratio=0.1,
+        # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
+        enable_trajectory_normalization=True,
+        trajectory_norm_target_distance=2.0,
+        trajectory_norm_min_distance_m=0.10,
+        trajectory_norm_eps=1e-6,
+        drop_short_trajectory_samples=True,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,
         goal_consistency_path_weight=0.2,
         # 距离分桶仅用于训练监控诊断，不参与模型规则。
         enable_distance_bucket_metrics=True,
-        distance_bucket_edges=(0.05, 0.5, 0.8),
+        distance_bucket_edges=(0.10, 0.5, 0.8),
         distance_bucket_names=("static", "short", "mid", "long"),
         n_prior_tokens=4,
         num_train_timesteps=10,

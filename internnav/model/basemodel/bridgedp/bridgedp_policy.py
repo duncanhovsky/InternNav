@@ -164,6 +164,10 @@ class BridgeDPNet(PreTrainedModel):
         # 动作空间归一化参数（必须与 bridgedp_lerobot_dataset.py 保持一致）
         self.action_scale_xy = 5.0
         self.action_scale_theta = 3.14159
+        self.enable_trajectory_normalization = il.get('enable_trajectory_normalization', False)
+        self.trajectory_norm_target_distance = float(il.get('trajectory_norm_target_distance', 2.0))
+        self.trajectory_norm_min_distance_m = float(il.get('trajectory_norm_min_distance_m', 0.10))
+        self.trajectory_norm_eps = float(il.get('trajectory_norm_eps', 1e-6))
 
         # ── 共享视觉编码器（与 NavDP 相同，直接 import，不修改）──────────
         self.rgbd_encoder = RGBDBackbone(
@@ -298,6 +302,40 @@ class BridgeDPNet(PreTrainedModel):
         denormed = action.clone()
         denormed[..., 0:2] = denormed[..., 0:2] * self.action_scale_xy
         denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
+        return denormed
+
+    def _normalize_trajectory_action(self, action, traj_distance_m):
+        """PointGoal 样本级轨迹归一化：xy * R / d_m, theta / pi。"""
+        normed = action.clone()
+        distances = traj_distance_m.to(device=normed.device, dtype=normed.dtype).view(-1)
+        scale = self.trajectory_norm_target_distance / distances.clamp(min=self.trajectory_norm_eps)
+        if normed.dim() == 3:
+            scale = scale.view(-1, 1, 1)
+        elif normed.dim() == 2:
+            scale = scale.view(-1, 1)
+        else:
+            while scale.dim() < normed[..., 0:2].dim():
+                scale = scale.unsqueeze(-1)
+        normed[..., 0:2] = normed[..., 0:2] * scale
+        if normed.shape[-1] >= 3:
+            normed[..., 2] = normed[..., 2] / self.action_scale_theta
+        return normed
+
+    def _denormalize_trajectory_action(self, action, traj_distance_m):
+        """PointGoal 样本级轨迹反归一化：xy * d_m / R, theta * pi。"""
+        denormed = action.clone()
+        distances = traj_distance_m.to(device=denormed.device, dtype=denormed.dtype).view(-1)
+        scale = distances / max(self.trajectory_norm_target_distance, self.trajectory_norm_eps)
+        if denormed.dim() == 3:
+            scale = scale.view(-1, 1, 1)
+        elif denormed.dim() == 2:
+            scale = scale.view(-1, 1)
+        else:
+            while scale.dim() < denormed[..., 0:2].dim():
+                scale = scale.unsqueeze(-1)
+        denormed[..., 0:2] = denormed[..., 0:2] * scale
+        if denormed.shape[-1] >= 3:
+            denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
         return denormed
 
     def _build_valid_mask(self, trajectory, threshold=1e-4, min_valid_steps=4):
@@ -474,7 +512,7 @@ class BridgeDPNet(PreTrainedModel):
         self, goal_point, goal_image, goal_pixel,
         input_images, input_depths,
         output_actions, augment_actions,
-        prior_traj, theta_g,
+        prior_traj, theta_g, nogoal_actions=None,
     ):
         """训练前向传播。
 
@@ -513,6 +551,11 @@ class BridgeDPNet(PreTrainedModel):
         tensor_point_goal = torch.as_tensor(goal_point, dtype=torch.float32).to(device)
         tensor_label_actions = torch.as_tensor(output_actions, dtype=torch.float32).to(device)
         tensor_augment_actions = torch.as_tensor(augment_actions, dtype=torch.float32).to(device)
+        tensor_nogoal_actions = (
+            torch.as_tensor(nogoal_actions, dtype=torch.float32).to(device)
+            if nogoal_actions is not None
+            else tensor_label_actions
+        )
         tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32).to(device)
         tensor_theta_g = torch.as_tensor(theta_g, dtype=torch.float32).to(device)
         input_images = input_images.to(device)
@@ -522,7 +565,7 @@ class BridgeDPNet(PreTrainedModel):
         # ng/mg 各自独立采样时间步，增加训练多样性（与 NavDP 一致）
         # sample_bridge_noise 返回 x0（干净轨迹）作为训练目标
         ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps, ng_noisy_action, ng_bridge_mu, ng_bridge_sigma, ng_s_norm = self.sample_bridge_noise(
-            tensor_label_actions, goal=None, theta_g=None, mode="nogoal"
+            tensor_nogoal_actions, goal=None, theta_g=None, mode="nogoal"
         )
         mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps, mg_noisy_action, mg_bridge_mu, mg_bridge_sigma, mg_s_norm = self.sample_bridge_noise(
             tensor_label_actions, goal=tensor_point_goal, theta_g=tensor_theta_g, mode="pointgoal"
@@ -713,6 +756,35 @@ class BridgeDPNet(PreTrainedModel):
         """
         with torch.no_grad():
             tensor_point_goal = torch.as_tensor(goal_point, dtype=torch.float32, device=self._device)
+            goal_distance_m = torch.norm(tensor_point_goal[:, :2], dim=-1)
+
+            if self.enable_trajectory_normalization:
+                arrived_mask = goal_distance_m < self.trajectory_norm_min_distance_m
+                if arrived_mask.all():
+                    zero_traj = torch.zeros((8, self.predict_size, 3), device=self._device)
+                    if return_mask:
+                        zero_mask = torch.zeros((8, self.predict_size), device=self._device, dtype=torch.bool)
+                        zero_len = torch.zeros((8,), device=self._device, dtype=torch.long)
+                        return zero_traj, zero_traj.clone(), zero_mask, zero_mask.clone(), zero_len, zero_len.clone()
+                    return zero_traj, zero_traj.clone()
+
+                if arrived_mask.any():
+                    valid_idx = torch.nonzero(~arrived_mask, as_tuple=False).flatten()
+
+                    def _select_valid(value):
+                        if value is None:
+                            return None
+                        if torch.is_tensor(value):
+                            return value[valid_idx]
+                        return value[valid_idx.detach().cpu().numpy()]
+
+                    tensor_point_goal = tensor_point_goal[valid_idx]
+                    goal_distance_m = goal_distance_m[valid_idx]
+                    input_images = _select_valid(input_images)
+                    input_depths = _select_valid(input_depths)
+                    prior_traj = _select_valid(prior_traj)
+                    if theta_g is not None:
+                        theta_g = _select_valid(torch.as_tensor(theta_g, dtype=torch.float32, device=self._device))
 
             # 计算 theta_g（在归一化之前，使用原始坐标）
             if theta_g is not None:
@@ -720,8 +792,14 @@ class BridgeDPNet(PreTrainedModel):
             else:
                 tensor_theta_g = torch.atan2(tensor_point_goal[:, 1], tensor_point_goal[:, 0])
 
-            # ── 归一化：将物理坐标映射到训练空间 ──
-            tensor_point_goal_n = self._normalize_action(tensor_point_goal)
+            # ── 归一化：将物理坐标映射到当前训练空间 ──
+            if self.enable_trajectory_normalization:
+                tensor_point_goal_n = self._normalize_trajectory_action(
+                    tensor_point_goal,
+                    goal_distance_m,
+                )
+            else:
+                tensor_point_goal_n = self._normalize_action(tensor_point_goal)
 
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
             pointgoal_embed = self.point_encoder(tensor_point_goal_n).unsqueeze(1)
@@ -729,7 +807,10 @@ class BridgeDPNet(PreTrainedModel):
             # 先验处理（归一化后编码）
             if prior_traj is not None:
                 tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32, device=self._device)
-                tensor_prior = self._normalize_action(tensor_prior)
+                if self.enable_trajectory_normalization:
+                    tensor_prior = self._normalize_trajectory_action(tensor_prior, goal_distance_m)
+                else:
+                    tensor_prior = self._normalize_action(tensor_prior)
             else:
                 tensor_prior = torch.zeros(
                     tensor_point_goal.shape[0], self.predict_size, 3, device=self._device
@@ -762,6 +843,8 @@ class BridgeDPNet(PreTrainedModel):
             goal_repeated = tensor_point_goal_n.repeat(sample_num, 1)
             origin_repeated = origin.repeat(sample_num, 1)
             theta_expanded = tensor_theta_g.repeat(sample_num)
+            if self.enable_trajectory_normalization:
+                distance_repeated = goal_distance_m.repeat(sample_num)
 
             for k in self.bridge_scheduler.timesteps:
                 x0_pred = self.predict_x0(
@@ -784,7 +867,10 @@ class BridgeDPNet(PreTrainedModel):
 
             # ── 反归一化 ──
             # smooth_trajectory_batch 暂停使用；24 点本身即为可重采样的轨迹控制点。
-            naction = self._denormalize_action(naction)
+            if self.enable_trajectory_normalization:
+                naction = self._denormalize_trajectory_action(naction, distance_repeated)
+            else:
+                naction = self._denormalize_action(naction)
             trajectory = naction
 
             negative_trajectory = trajectory[(score_values).argsort()[0:8]]

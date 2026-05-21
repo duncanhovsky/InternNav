@@ -53,6 +53,24 @@ class BridgeDPTrainer(BaseTrainer):
         self.config = config
         self.writer = None
         self.start_time = time.time()
+        il_cfg = self.config.il if hasattr(self.config, 'il') else None
+        self.action_scale_xy = 5.0
+        self.action_scale_theta = 3.14159
+        self.enable_trajectory_normalization = (
+            getattr(il_cfg, 'enable_trajectory_normalization', False) if il_cfg else False
+        )
+        self.trajectory_norm_target_distance = float(
+            getattr(il_cfg, 'trajectory_norm_target_distance', 2.0) if il_cfg else 2.0
+        )
+        self.trajectory_norm_min_distance_m = float(
+            getattr(il_cfg, 'trajectory_norm_min_distance_m', 0.10) if il_cfg else 0.10
+        )
+        self.trajectory_norm_eps = float(
+            getattr(il_cfg, 'trajectory_norm_eps', 1e-6) if il_cfg else 1e-6
+        )
+        self.drop_short_trajectory_samples = (
+            getattr(il_cfg, 'drop_short_trajectory_samples', True) if il_cfg else True
+        )
 
         if hasattr(self.model, 'module'):
             self.model_device = self.model.module.device
@@ -202,9 +220,62 @@ class BridgeDPTrainer(BaseTrainer):
     def _normalize_action_tensor(self, action: torch.Tensor) -> torch.Tensor:
         """与 BridgeDPNet/Dataset 一致的动作归一化。"""
         out = action.clone()
-        out[..., 0:2] = out[..., 0:2] / 5.0
-        out[..., 2] = out[..., 2] / 3.14159
+        out[..., 0:2] = out[..., 0:2] / self.action_scale_xy
+        out[..., 2] = out[..., 2] / self.action_scale_theta
         return out
+
+    def _trajectory_denorm_tensor(
+        self,
+        action: torch.Tensor,
+        traj_distance_m: torch.Tensor,
+    ) -> torch.Tensor:
+        """将形状空间轨迹恢复到物理 xy 坐标，theta 从 /pi 恢复为弧度。"""
+        out = action.clone()
+        distances = traj_distance_m.to(device=out.device, dtype=out.dtype).view(-1)
+        scale = distances / max(self.trajectory_norm_target_distance, self.trajectory_norm_eps)
+        if out.dim() == 3:
+            scale = scale.view(-1, 1, 1)
+        elif out.dim() == 2:
+            scale = scale.view(-1, 1)
+        else:
+            while scale.dim() < out[..., 0:2].dim():
+                scale = scale.unsqueeze(-1)
+        out[..., 0:2] = out[..., 0:2] * scale
+        if out.shape[-1] >= 3:
+            out[..., 2] = out[..., 2] * self.action_scale_theta
+        return out
+
+    def _trajectory_norm_logs(
+        self,
+        labels: torch.Tensor,
+        traj_distance_m: torch.Tensor,
+        sample_valid: torch.Tensor,
+    ) -> dict:
+        """收集样本级轨迹归一化的轻量健康检查指标。"""
+        valid = sample_valid.bool()
+        logs = {
+            "traj_norm/target_distance": self.trajectory_norm_target_distance,
+            "traj_norm/valid_count": int(valid.sum().item()),
+            "traj_norm/skipped_short_count": int((~valid).sum().item()),
+        }
+        if valid.any():
+            endpoint_dist_shape = torch.norm(labels[valid, -1, :2], dim=-1)
+            denorm = self._trajectory_denorm_tensor(labels[valid], traj_distance_m[valid])
+            safe_dist = traj_distance_m[valid].clamp(min=self.trajectory_norm_eps)
+            roundtrip = denorm.clone()
+            roundtrip[..., 0:2] = (
+                roundtrip[..., 0:2]
+                * self.trajectory_norm_target_distance
+                / safe_dist.view(-1, 1, 1)
+            )
+            roundtrip[..., 2] = roundtrip[..., 2] / self.action_scale_theta
+            roundtrip_err = torch.abs(roundtrip - labels[valid]).amax()
+            logs.update({
+                "traj_norm/mean_distance_m": traj_distance_m[valid].mean().item(),
+                "traj_norm/mean_endpoint_dist_shape": endpoint_dist_shape.mean().item(),
+                "traj_norm/roundtrip_xy_error_m": roundtrip_err.item(),
+            })
+        return logs
 
     def _generate_prior_trajectory_gpu(
         self,
@@ -245,7 +316,7 @@ class BridgeDPTrainer(BaseTrainer):
 
     def _distance_bucket_config(self):
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
-        edges = getattr(il_cfg, 'distance_bucket_edges', (0.05, 0.5, 0.8)) if il_cfg else (0.05, 0.5, 0.8)
+        edges = getattr(il_cfg, 'distance_bucket_edges', (0.10, 0.5, 0.8)) if il_cfg else (0.10, 0.5, 0.8)
         names = getattr(il_cfg, 'distance_bucket_names', ("static", "short", "mid", "long")) if il_cfg else ("static", "short", "mid", "long")
         edges = tuple(float(v) for v in edges)
         names = tuple(str(v) for v in names)
@@ -268,7 +339,13 @@ class BridgeDPTrainer(BaseTrainer):
                 return name
         return names[-1]
 
-    def _distance_bucket_logs(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
+    def _distance_bucket_logs(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        traj_distance_m: torch.Tensor = None,
+        sample_valid: torch.Tensor = None,
+    ) -> dict:
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         if not (getattr(il_cfg, 'enable_distance_bucket_metrics', False) if il_cfg else False):
             return {}
@@ -276,14 +353,31 @@ class BridgeDPTrainer(BaseTrainer):
         edges, names = self._distance_bucket_config()
         pred = pred.detach()
         target = target.detach()
-        target_dist_m = torch.norm(target[:, -1, :2], dim=-1) * 5.0
+        if self.enable_trajectory_normalization and traj_distance_m is not None:
+            target_dist_m = traj_distance_m.detach().to(device=target.device, dtype=target.dtype)
+            scale_m = (
+                target_dist_m
+                / max(self.trajectory_norm_target_distance, self.trajectory_norm_eps)
+            )
+        else:
+            target_dist_m = torch.norm(target[:, -1, :2], dim=-1) * self.action_scale_xy
+            scale_m = target.new_full((target.shape[0],), self.action_scale_xy)
+        valid = (
+            sample_valid.detach().to(device=target.device).bool()
+            if sample_valid is not None
+            else torch.ones(target.shape[0], device=target.device, dtype=torch.bool)
+        )
         point_mse = (pred - target).square().mean(dim=(1, 2))
-        terminal_err_m = torch.norm(pred[:, -1, :2] - target[:, -1, :2], dim=-1) * 5.0
-        path_len_m = torch.norm(pred[:, 1:, :2] - pred[:, :-1, :2], dim=-1).sum(dim=-1) * 5.0
+        terminal_err_m = (
+            torch.norm(pred[:, -1, :2] - target[:, -1, :2], dim=-1) * scale_m
+        )
+        path_len_m = (
+            torch.norm(pred[:, 1:, :2] - pred[:, :-1, :2], dim=-1).sum(dim=-1) * scale_m
+        )
 
         logs = {}
         for idx, name in enumerate(names):
-            bucket_mask = self._distance_bucket_mask(target_dist_m, idx, edges)
+            bucket_mask = self._distance_bucket_mask(target_dist_m, idx, edges) & valid
             count = int(bucket_mask.sum().item())
             prefix = f"bucket/{name}"
             logs[f"{prefix}_count"] = count
@@ -296,31 +390,90 @@ class BridgeDPTrainer(BaseTrainer):
     def _prepare_curve_supervision(self, inputs_on_device: dict, predict_size: int) -> None:
         """用 GPU 生成弧长样条监督标签，并原地覆盖 batch 字段。"""
         if "batch_raw_labels" not in inputs_on_device:
+            B = inputs_on_device["batch_labels"].shape[0]
+            device = inputs_on_device["batch_labels"].device
+            inputs_on_device.setdefault(
+                "batch_sample_valid",
+                torch.ones(B, device=device, dtype=torch.bool),
+            )
             return
 
-        labels_phys = self._resample_trajectories_gpu(
-            inputs_on_device["batch_raw_labels"],
-            inputs_on_device["batch_raw_lengths"],
-            predict_size,
-        )
-        augments_phys = self._resample_trajectories_gpu(
-            inputs_on_device["batch_raw_augments"],
-            inputs_on_device["batch_raw_lengths"],
-            predict_size,
-        )
-        labels = self._normalize_action_tensor(labels_phys)
-        augments = self._normalize_action_tensor(augments_phys)
         is_task_start = inputs_on_device.get(
             "batch_is_task_start",
-            torch.zeros(labels.shape[0], device=labels.device, dtype=torch.bool),
+            torch.zeros(
+                inputs_on_device["batch_raw_labels"].shape[0],
+                device=inputs_on_device["batch_raw_labels"].device,
+                dtype=torch.bool,
+            ),
         )
+
+        raw_labels = inputs_on_device["batch_raw_labels"]
+        raw_augments = inputs_on_device["batch_raw_augments"]
+        lengths = inputs_on_device["batch_raw_lengths"]
+        B = raw_labels.shape[0]
+        batch_idx = torch.arange(B, device=raw_labels.device)
+        end_idx = (lengths.long().clamp(min=1, max=raw_labels.shape[1]) - 1)
+        end_xy = raw_labels[batch_idx, end_idx, :2]
+        traj_distance_m = torch.norm(end_xy, dim=-1)
+
+        if self.enable_trajectory_normalization:
+            sample_valid = traj_distance_m >= self.trajectory_norm_min_distance_m
+            if not self.drop_short_trajectory_samples:
+                sample_valid = torch.ones_like(sample_valid, dtype=torch.bool)
+            safe_dist = traj_distance_m.clamp(min=self.trajectory_norm_eps)
+            scale_to_shape = (
+                self.trajectory_norm_target_distance
+                / safe_dist
+            ) * sample_valid.to(dtype=raw_labels.dtype)
+
+            # 只缩放 xy；theta 仍以弧度参与 unwrap/spline，重采样后再除以 pi。
+            labels_input = raw_labels.clone()
+            augments_input = raw_augments.clone()
+            labels_input[..., 0:2] = labels_input[..., 0:2] * scale_to_shape.view(B, 1, 1)
+            augments_input[..., 0:2] = augments_input[..., 0:2] * scale_to_shape.view(B, 1, 1)
+            labels_input[~sample_valid] = 0.0
+            augments_input[~sample_valid] = 0.0
+
+            labels = self._resample_trajectories_gpu(labels_input, lengths, predict_size)
+            augments = self._resample_trajectories_gpu(augments_input, lengths, predict_size)
+            labels[..., 2] = labels[..., 2] / self.action_scale_theta
+            augments[..., 2] = augments[..., 2] / self.action_scale_theta
+            labels[~sample_valid] = 0.0
+            augments[~sample_valid] = 0.0
+            # NoGoal 没有可用于反归一化的真实目标距离，保持 legacy xy/5 训练空间。
+            labels_phys = self._resample_trajectories_gpu(raw_labels, lengths, predict_size)
+            nogoal_labels = self._normalize_action_tensor(labels_phys)
+            nogoal_labels[~sample_valid] = 0.0
+
+            inputs_on_device["batch_pg"] = labels[:, -1, :].clone()
+            inputs_on_device["batch_traj_distance_m"] = traj_distance_m
+            inputs_on_device["batch_traj_denorm_scale"] = (
+                traj_distance_m / max(self.trajectory_norm_target_distance, self.trajectory_norm_eps)
+            )
+            inputs_on_device["batch_sample_valid"] = sample_valid
+            inputs_on_device["batch_traj_norm_target_distance"] = labels.new_full(
+                (B,), self.trajectory_norm_target_distance
+            )
+        else:
+            labels_phys = self._resample_trajectories_gpu(raw_labels, lengths, predict_size)
+            augments_phys = self._resample_trajectories_gpu(raw_augments, lengths, predict_size)
+            labels = self._normalize_action_tensor(labels_phys)
+            augments = self._normalize_action_tensor(augments_phys)
+            sample_valid = torch.ones(B, device=labels.device, dtype=torch.bool)
+            nogoal_labels = labels
+            inputs_on_device["batch_sample_valid"] = sample_valid
+            inputs_on_device["batch_traj_distance_m"] = traj_distance_m
+            inputs_on_device["batch_traj_denorm_scale"] = torch.full_like(
+                traj_distance_m, self.action_scale_xy
+            )
 
         inputs_on_device["batch_labels"] = labels
         inputs_on_device["batch_augments"] = augments
+        inputs_on_device["batch_nogoal_labels"] = nogoal_labels
         inputs_on_device["batch_prior"] = self._generate_prior_trajectory_gpu(labels, is_task_start)
         inputs_on_device["batch_valid_mask"] = torch.ones(
             labels.shape[:2], device=labels.device, dtype=torch.float32
-        )
+        ) * sample_valid.view(-1, 1).to(dtype=torch.float32)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """执行一次前向并计算 x₀-MSE 总损失。
@@ -364,6 +517,10 @@ class BridgeDPTrainer(BaseTrainer):
         batch_augment_critic = inputs_on_device["batch_augment_critic"]
         # valid_mask: (B, T) bool，新轨迹拟合监督下全 1，保留为兼容 loss_mask。
         valid_mask = inputs_on_device["batch_valid_mask"].bool()  # (B, T)
+        sample_valid = inputs_on_device.get(
+            "batch_sample_valid",
+            torch.ones(valid_mask.shape[0], device=valid_mask.device, dtype=torch.bool),
+        ).bool()
 
         # 前向：返回 8 值元组（x₀-prediction）
         (x0_pred_ng, x0_pred_mg,
@@ -384,10 +541,11 @@ class BridgeDPTrainer(BaseTrainer):
             inputs_on_device["batch_augments"],
             inputs_on_device["batch_prior"],
             inputs_on_device["batch_theta_g"],
+            inputs_on_device.get("batch_nogoal_labels"),
         )
 
         # ── x₀-MSE（全 24 个重采样监督点参与训练）─────────────────────
-        mask = valid_mask.unsqueeze(-1).float()  # (B, T, 1)
+        mask = (valid_mask & sample_valid.view(-1, 1)).unsqueeze(-1).float()  # (B, T, 1)
         ng_x0_loss = ((x0_pred_ng - ng_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
         mg_x0_loss = ((x0_pred_mg - mg_x0_target).square() * mask).sum() / mask.sum().clamp(min=1)
         L_x0 = 0.5 * (ng_x0_loss + mg_x0_loss)
@@ -438,15 +596,20 @@ class BridgeDPTrainer(BaseTrainer):
         action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
 
         # ── Critic 损失（与 NavDP 一致）──────────────────────────────
+        sample_weight = sample_valid.to(dtype=critic_pred.dtype)
+        sample_denom = sample_weight.sum().clamp(min=1)
         critic_loss = (
-            (critic_pred - batch_label_critic).square().mean()
-            + (augment_pred - batch_augment_critic).square().mean()
+            ((critic_pred - batch_label_critic).square() * sample_weight).sum() / sample_denom
+            + ((augment_pred - batch_augment_critic).square() * sample_weight).sum() / sample_denom
         )
 
         # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
+        aux_point = (
+            (inputs_on_device["batch_pg"] - imagegoal_aux_pred).square().mean(dim=-1)
+            + (inputs_on_device["batch_pg"] - pixelgoal_aux_pred).square().mean(dim=-1)
+        )
         aux_loss = (
-            0.5 * (inputs_on_device["batch_pg"] - imagegoal_aux_pred).square().mean()
-            + 0.5 * (inputs_on_device["batch_pg"] - pixelgoal_aux_pred).square().mean()
+            0.5 * (aux_point * sample_weight).sum() / sample_denom
         )
 
         # ── 总损失（3 项，与 NavDP 完全对齐）─────────────────────────
@@ -477,19 +640,46 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/aux":        aux_loss.item(),
                 "debug/grad_norm": grad_norm,
             }
-            pred_avg = 0.5 * (x0_pred_ng.detach() + x0_pred_mg.detach())
-            self._monitor_logs.update(
-                self._distance_bucket_logs(pred_avg, ng_x0_target.detach())
+            pred_avg = (
+                x0_pred_mg.detach()
+                if self.enable_trajectory_normalization
+                else 0.5 * (x0_pred_ng.detach() + x0_pred_mg.detach())
             )
+            bucket_target = mg_x0_target.detach() if self.enable_trajectory_normalization else ng_x0_target.detach()
+            self._monitor_logs.update(
+                self._distance_bucket_logs(
+                    pred_avg,
+                    bucket_target,
+                    traj_distance_m=inputs_on_device.get("batch_traj_distance_m"),
+                    sample_valid=sample_valid,
+                )
+            )
+            if self.enable_trajectory_normalization:
+                self._monitor_logs.update(
+                    self._trajectory_norm_logs(
+                        inputs_on_device["batch_labels"].detach(),
+                        inputs_on_device["batch_traj_distance_m"].detach(),
+                        sample_valid,
+                    )
+                )
 
             # 可视化：每 100 步执行一次真实去噪推理并写入 JSONL
             if self._log_step_count % 100 == 0:
                 pred_traj = self._infer_pred_traj_bridgedp(model, inputs_on_device)
                 # 反归一化 gt 和 prior（统一为物理坐标，米/弧度）
-                gt_phys = self._denorm_batch(inputs_on_device["batch_labels"])
-                prior_phys = self._denorm_batch(inputs_on_device["batch_prior"])
+                gt_phys = self._denorm_batch(
+                    inputs_on_device["batch_labels"],
+                    inputs_on_device.get("batch_traj_distance_m"),
+                )
+                prior_phys = self._denorm_batch(
+                    inputs_on_device["batch_prior"],
+                    inputs_on_device.get("batch_traj_distance_m"),
+                )
                 # 导航目标点（反归一化）
-                nav_goal_phys = self._denorm_batch(inputs_on_device["batch_pg"])
+                nav_goal_phys = self._denorm_batch(
+                    inputs_on_device["batch_pg"],
+                    inputs_on_device.get("batch_traj_distance_m"),
+                )
                 # 障碍物点（已在 Dataset 中做过局部化，物理坐标）
                 obstacle_pts = inputs.get("batch_obstacle_pts", None)
                 gt_spline_traj = None
@@ -558,10 +748,9 @@ class BridgeDPTrainer(BaseTrainer):
         model_ref.eval()
         try:
             with torch.no_grad():
-                # batch_pg already lives in Bridge-DP normalized action space
-                # because Dataset/Trainer apply xy / 5.0 and theta / pi before
-                # model input. Normalizing it again would shrink the visualized
-                # target by another factor of 5 in xy.
+                # batch_pg already lives in the active Bridge-DP model space.
+                # In trajectory-normalized mode that is the fixed-distance shape
+                # space; in legacy mode it is xy / 5.0 and theta / pi.
                 pg_n = inputs_on_device["batch_pg"]
                 theta_g = inputs_on_device["batch_theta_g"]
 
@@ -605,23 +794,37 @@ class BridgeDPTrainer(BaseTrainer):
                         mode="pointgoal",
                     )
 
-                pred_abs = model_ref._denormalize_action(naction)  # (B, T, 3)
+                if self.enable_trajectory_normalization:
+                    pred_abs = self._trajectory_denorm_tensor(
+                        naction,
+                        inputs_on_device["batch_traj_distance_m"],
+                    )
+                else:
+                    pred_abs = model_ref._denormalize_action(naction)  # (B, T, 3)
         finally:
             if was_training:
                 model_ref.train()
 
         return pred_abs
 
-    def _denorm_batch(self, batch_tensor):
+    def _denorm_batch(self, batch_tensor, traj_distance_m=None):
         """将归一化的 batch 轨迹/目标点反归一化为物理坐标（米/弧度）。
 
-        归一化规则与 BridgeDP_Base_Dataset.__getitem__ 一致：
-            xy / 5.0, θ / π → 反归一化：xy * 5.0, θ * π
+        legacy 模式：
+            xy / 5.0, θ / π → xy * 5.0, θ * π
+        trajectory-normalized 模式：
+            xy * R / d_m, θ / π → xy * d_m / R, θ * π
         """
-        t = batch_tensor.detach().cpu().clone()
-        t[..., 0:2] = t[..., 0:2] * 5.0
-        if t.shape[-1] >= 3:
-            t[..., 2] = t[..., 2] * 3.14159
+        if self.enable_trajectory_normalization and traj_distance_m is not None:
+            t = self._trajectory_denorm_tensor(
+                batch_tensor.detach(),
+                traj_distance_m.detach(),
+            ).cpu()
+        else:
+            t = batch_tensor.detach().cpu().clone()
+            t[..., 0:2] = t[..., 0:2] * self.action_scale_xy
+            if t.shape[-1] >= 3:
+                t[..., 2] = t[..., 2] * self.action_scale_theta
         return t
 
     def _write_traj_snapshot(self, gt_phys, pred_phys, prior_phys, gt_labels,
