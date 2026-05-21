@@ -101,9 +101,9 @@ bridgedp_exp_cfg = ExpCfg(
         # PointGoal 分支使用尺度相似的切向/法向各向异性桥方差。
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
-        bridge_normal_sigma_ratio=0.5,
-        bridge_tangent_sigma_ratio=0.05,
-        bridge_theta_sigma_ratio=0.1,
+        bridge_normal_sigma_ratio=0.25,
+        bridge_tangent_sigma_ratio=0.03,
+        bridge_theta_sigma_ratio=0.05,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,

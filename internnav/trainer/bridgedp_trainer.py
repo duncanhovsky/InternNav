@@ -243,6 +243,56 @@ class BridgeDPTrainer(BaseTrainer):
             prior[wrong] = prior_wrong
         return prior
 
+    def _distance_bucket_config(self):
+        il_cfg = self.config.il if hasattr(self.config, 'il') else None
+        edges = getattr(il_cfg, 'distance_bucket_edges', (0.05, 0.5, 0.8)) if il_cfg else (0.05, 0.5, 0.8)
+        names = getattr(il_cfg, 'distance_bucket_names', ("static", "short", "mid", "long")) if il_cfg else ("static", "short", "mid", "long")
+        edges = tuple(float(v) for v in edges)
+        names = tuple(str(v) for v in names)
+        if len(names) != len(edges) + 1:
+            names = tuple([f"bucket_{i}" for i in range(len(edges) + 1)])
+        return edges, names
+
+    def _distance_bucket_mask(self, distances: torch.Tensor, bucket_idx: int, edges: tuple) -> torch.Tensor:
+        if bucket_idx == 0:
+            return distances < edges[0]
+        if bucket_idx == len(edges):
+            return distances >= edges[-1]
+        return (distances >= edges[bucket_idx - 1]) & (distances < edges[bucket_idx])
+
+    def _distance_bucket_name(self, distance_m: float) -> str:
+        edges, names = self._distance_bucket_config()
+        value = torch.tensor([distance_m], dtype=torch.float32)
+        for idx, name in enumerate(names):
+            if bool(self._distance_bucket_mask(value, idx, edges)[0].item()):
+                return name
+        return names[-1]
+
+    def _distance_bucket_logs(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
+        il_cfg = self.config.il if hasattr(self.config, 'il') else None
+        if not (getattr(il_cfg, 'enable_distance_bucket_metrics', False) if il_cfg else False):
+            return {}
+
+        edges, names = self._distance_bucket_config()
+        pred = pred.detach()
+        target = target.detach()
+        target_dist_m = torch.norm(target[:, -1, :2], dim=-1) * 5.0
+        point_mse = (pred - target).square().mean(dim=(1, 2))
+        terminal_err_m = torch.norm(pred[:, -1, :2] - target[:, -1, :2], dim=-1) * 5.0
+        path_len_m = torch.norm(pred[:, 1:, :2] - pred[:, :-1, :2], dim=-1).sum(dim=-1) * 5.0
+
+        logs = {}
+        for idx, name in enumerate(names):
+            bucket_mask = self._distance_bucket_mask(target_dist_m, idx, edges)
+            count = int(bucket_mask.sum().item())
+            prefix = f"bucket/{name}"
+            logs[f"{prefix}_count"] = count
+            if count > 0:
+                logs[f"{prefix}_L_x0"] = point_mse[bucket_mask].mean().item()
+                logs[f"{prefix}_terminal_err_m"] = terminal_err_m[bucket_mask].mean().item()
+                logs[f"{prefix}_path_len_m"] = path_len_m[bucket_mask].mean().item()
+        return logs
+
     def _prepare_curve_supervision(self, inputs_on_device: dict, predict_size: int) -> None:
         """用 GPU 生成弧长样条监督标签，并原地覆盖 batch 字段。"""
         if "batch_raw_labels" not in inputs_on_device:
@@ -373,6 +423,11 @@ class BridgeDPTrainer(BaseTrainer):
             return ((eps_pred - eps_target).square() * mask).sum() / mask.sum().clamp(min=1)
 
         if lambda_eps > 0:
+            if getattr(getattr(model_ref, "bridge_scheduler", None), "bridge_scale_invariant_sigma", False):
+                raise ValueError(
+                    "lambda_eps must stay 0 when bridge_scale_invariant_sigma=True; "
+                    "eps consistency needs tangent/normal local-coordinate handling."
+                )
             L_eps = 0.5 * (
                 _eps_loss(x0_pred_ng, ng_x0_target, ng_noisy_action, ng_bridge_mu, ng_bridge_sigma, ng_s_norm)
                 + _eps_loss(x0_pred_mg, mg_x0_target, mg_noisy_action, mg_bridge_mu, mg_bridge_sigma, mg_s_norm)
@@ -422,6 +477,10 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/aux":        aux_loss.item(),
                 "debug/grad_norm": grad_norm,
             }
+            pred_avg = 0.5 * (x0_pred_ng.detach() + x0_pred_mg.detach())
+            self._monitor_logs.update(
+                self._distance_bucket_logs(pred_avg, ng_x0_target.detach())
+            )
 
             # 可视化：每 100 步执行一次真实去噪推理并写入 JSONL
             if self._log_step_count % 100 == 0:
@@ -630,6 +689,8 @@ class BridgeDPTrainer(BaseTrainer):
                         "prior_traj":   prior_phys[i].tolist() if hasattr(prior_phys[i], 'tolist') else prior_phys[i],
                         "theta_g":      theta_g_list[i],
                         "nav_goal":     nav_goal_list[i],
+                        "traj_length_m": float(torch.norm(gt_phys[i, -1, :2]).item()),
+                        "length_bucket": self._distance_bucket_name(float(torch.norm(gt_phys[i, -1, :2]).item())),
                         "obstacle_pts": obs_list[i],
                         "gt_spline_traj": (gt_spline_traj[i].tolist() if gt_spline_traj is not None else None),
                         "gt_valid_mask": (gt_valid_mask[i].tolist() if gt_valid_mask is not None else None),

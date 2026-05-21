@@ -147,6 +147,14 @@ class BridgeDPNet(PreTrainedModel):
         self.nogoal_sigma_y_end = il.get('nogoal_sigma_y_end', 0.80)
         self.nogoal_sigma_theta_end = il.get('nogoal_sigma_theta_end', 0.60)
         self.nogoal_sigma_power = il.get('nogoal_sigma_power', 2.0)
+        self.bridge_scale_invariant_sigma = il.get('bridge_scale_invariant_sigma', False)
+        self.bridge_anisotropic_xy = il.get('bridge_anisotropic_xy', True)
+        self.bridge_normal_sigma_ratio = il.get('bridge_normal_sigma_ratio', 0.25)
+        self.bridge_tangent_sigma_ratio = il.get('bridge_tangent_sigma_ratio', 0.03)
+        self.bridge_theta_sigma_ratio = il.get('bridge_theta_sigma_ratio', 0.05)
+        self.enable_goal_consistency_score = il.get('enable_goal_consistency_score', False)
+        self.goal_consistency_terminal_weight = il.get('goal_consistency_terminal_weight', 1.0)
+        self.goal_consistency_path_weight = il.get('goal_consistency_path_weight', 0.2)
         self.num_train_timesteps = il.get('num_train_timesteps', 100)
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
         # 训练时是否使用“原点→目标”的布朗桥（前向加噪起点固定为零向量）
@@ -228,6 +236,11 @@ class BridgeDPNet(PreTrainedModel):
             nogoal_sigma_y_end=self.nogoal_sigma_y_end,
             nogoal_sigma_theta_end=self.nogoal_sigma_theta_end,
             nogoal_sigma_power=self.nogoal_sigma_power,
+            bridge_scale_invariant_sigma=self.bridge_scale_invariant_sigma,
+            bridge_anisotropic_xy=self.bridge_anisotropic_xy,
+            bridge_normal_sigma_ratio=self.bridge_normal_sigma_ratio,
+            bridge_tangent_sigma_ratio=self.bridge_tangent_sigma_ratio,
+            bridge_theta_sigma_ratio=self.bridge_theta_sigma_ratio,
         )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
@@ -428,6 +441,30 @@ class BridgeDPNet(PreTrainedModel):
         critic_output = self.layernorm(critic_output)
         critic_output = self.critic_head(critic_output.mean(dim=1))[:, 0]
         return critic_output
+
+    def _apply_goal_consistency_score(self, critic_values, trajectories, goals, origins=None):
+        """Optionally combine critic score with goal-consistency penalties."""
+        if not self.enable_goal_consistency_score:
+            return critic_values
+
+        if goals.dim() == 3:
+            goals = goals[:, -1, :]
+        if origins is None:
+            origins = torch.zeros_like(goals)
+        elif origins.dim() == 3:
+            origins = origins[:, -1, :]
+
+        terminal_err = torch.norm(trajectories[:, -1, :2] - goals[:, :2], dim=-1)
+        path_len = torch.norm(
+            trajectories[:, 1:, :2] - trajectories[:, :-1, :2], dim=-1
+        ).sum(dim=-1)
+        goal_dist = torch.norm(goals[:, :2] - origins[:, :2], dim=-1)
+
+        penalty = (
+            self.goal_consistency_terminal_weight * terminal_err
+            + self.goal_consistency_path_weight * torch.relu(path_len - goal_dist)
+        )
+        return critic_values - penalty
 
     # ------------------------------------------------------------------
     # 训练前向
@@ -741,14 +778,17 @@ class BridgeDPNet(PreTrainedModel):
 
             # Critic 排序
             critic_values = self.predict_critic(naction, rgbd_embed)
+            score_values = self._apply_goal_consistency_score(
+                critic_values, naction, goal_repeated, origin_repeated
+            )
 
             # ── 反归一化 ──
             # smooth_trajectory_batch 暂停使用；24 点本身即为可重采样的轨迹控制点。
             naction = self._denormalize_action(naction)
             trajectory = naction
 
-            negative_trajectory = trajectory[(critic_values).argsort()[0:8]]
-            positive_trajectory = trajectory[(-critic_values).argsort()[0:8]]
+            negative_trajectory = trajectory[(score_values).argsort()[0:8]]
+            positive_trajectory = trajectory[(-score_values).argsort()[0:8]]
             if return_mask:
                 negative_mask = self._build_valid_mask(
                     negative_trajectory, threshold=valid_threshold, min_valid_steps=min_valid_steps
