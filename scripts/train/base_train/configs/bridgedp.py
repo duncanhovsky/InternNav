@@ -114,6 +114,10 @@ bridgedp_exp_cfg = ExpCfg(
         enable_scale_condition_token=True,
         scale_condition_clamp_min_m=0.10,
         scale_condition_clamp_max_m=20.0,
+        enable_scale_rgbd_film=True,
+        scale_rgbd_film_alpha=1.0,
+        scale_rgbd_film_zero_init=True,
+        scale_rgbd_film_use_layernorm=True,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,

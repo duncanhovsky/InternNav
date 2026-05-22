@@ -173,6 +173,10 @@ class BridgeDPNet(PreTrainedModel):
         self.scale_condition_clamp_min_m = float(il.get('scale_condition_clamp_min_m', 0.10))
         self.scale_condition_clamp_max_m = float(il.get('scale_condition_clamp_max_m', 20.0))
         self.n_scale_tokens = 1 if self.enable_scale_condition_token else 0
+        self.enable_scale_rgbd_film = il.get('enable_scale_rgbd_film', False)
+        self.scale_rgbd_film_alpha = float(il.get('scale_rgbd_film_alpha', 1.0))
+        self.scale_rgbd_film_zero_init = il.get('scale_rgbd_film_zero_init', True)
+        self.scale_rgbd_film_use_layernorm = il.get('scale_rgbd_film_use_layernorm', True)
 
         # ── 共享视觉编码器（与 NavDP 相同，直接 import，不修改）──────────
         self.rgbd_encoder = RGBDBackbone(
@@ -232,6 +236,17 @@ class BridgeDPNet(PreTrainedModel):
                 nn.GELU(),
                 nn.Linear(self.token_dim, self.token_dim),
             )
+        if self.enable_scale_rgbd_film:
+            self.scale_rgbd_film = nn.Sequential(
+                nn.Linear(4, self.token_dim),
+                nn.GELU(),
+                nn.Linear(self.token_dim, 2 * self.token_dim),
+            )
+            if self.scale_rgbd_film_use_layernorm:
+                self.scale_rgbd_film_norm = nn.LayerNorm(self.token_dim)
+            if self.scale_rgbd_film_zero_init:
+                nn.init.zeros_(self.scale_rgbd_film[-1].weight)
+                nn.init.zeros_(self.scale_rgbd_film[-1].bias)
 
         # ── Bridge-DP 新增模块 ────────────────────────────────────────────
         self.prior_encoder = PriorEncoder(
@@ -386,6 +401,35 @@ class BridgeDPNet(PreTrainedModel):
         if like_token is not None:
             token = token.to(device=like_token.device, dtype=like_token.dtype)
         return token
+
+    def _apply_scale_rgbd_film(self, rgbd_embed, traj_distance_m):
+        """Use metric/shape scale features to FiLM-modulate RGBD tokens."""
+        if not self.enable_scale_rgbd_film:
+            return rgbd_embed
+
+        feat = self._build_scale_features(traj_distance_m)
+        batch_size = rgbd_embed.shape[0]
+        if feat.shape[0] == 1 and batch_size > 1:
+            feat = feat.expand(batch_size, -1)
+        elif feat.shape[0] != batch_size:
+            raise ValueError(
+                f"scale batch size {feat.shape[0]} does not match rgbd batch size {batch_size}"
+            )
+
+        gamma_beta = self.scale_rgbd_film(feat).to(
+            device=rgbd_embed.device,
+            dtype=rgbd_embed.dtype,
+        )
+        gamma, beta = gamma_beta.chunk(2, dim=-1)
+        gamma = gamma.unsqueeze(1)
+        beta = beta.unsqueeze(1)
+
+        base = (
+            self.scale_rgbd_film_norm(rgbd_embed)
+            if self.scale_rgbd_film_use_layernorm
+            else rgbd_embed
+        )
+        return rgbd_embed + self.scale_rgbd_film_alpha * (base * gamma + beta)
 
     def _build_valid_mask(self, trajectory, threshold=1e-4, min_valid_steps=4):
         """基于位移阈值构建有效步掩码（推理专用）。"""
@@ -649,7 +693,7 @@ class BridgeDPNet(PreTrainedModel):
         )
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
-        rgbd_embed = self.rgbd_encoder(input_images, input_depths)
+        rgbd_embed_base = self.rgbd_encoder(input_images, input_depths)
         pointgoal_embed = self.point_encoder(tensor_point_goal).unsqueeze(1)
         nogoal_embed = torch.zeros_like(pointgoal_embed)
         scale_embed_mg = self._build_scale_token(tensor_traj_distance_m, like_token=pointgoal_embed)
@@ -657,6 +701,8 @@ class BridgeDPNet(PreTrainedModel):
             tensor_point_goal.shape[0], device, dtype=torch.float32
         )
         scale_embed_ng = self._build_scale_token(nogoal_distance_m, like_token=pointgoal_embed)
+        rgbd_embed_mg = self._apply_scale_rgbd_film(rgbd_embed_base, tensor_traj_distance_m)
+        rgbd_embed_ng = self._apply_scale_rgbd_film(rgbd_embed_base, nogoal_distance_m)
         imagegoal_embed = self.image_encoder(goal_image).unsqueeze(1)
         pixelgoal_embed = self.pixel_encoder(goal_pixel).unsqueeze(1)
 
@@ -667,15 +713,19 @@ class BridgeDPNet(PreTrainedModel):
         # ── 先验编码 + 视觉门控（Bridge-DP 新增）─────────────────────────
         if self.use_prior_traj:
             prior_tokens = self.prior_encoder(tensor_prior)  # (B, N_p, d)
-            vis_global = rgbd_embed.mean(dim=1)  # (B, d) mean pooling
-            gate = self.visual_gate(vis_global)  # (B, 1, 1)
-            gated_prior = gate * prior_tokens  # (B, N_p, d)
+            vis_global_mg = rgbd_embed_mg.mean(dim=1)  # (B, d) mean pooling
+            gate_mg = self.visual_gate(vis_global_mg)  # (B, 1, 1)
+            gated_prior_mg = gate_mg * prior_tokens  # (B, N_p, d)
+            vis_global_ng = rgbd_embed_ng.mean(dim=1)
+            gate_ng = self.visual_gate(vis_global_ng)
+            gated_prior_ng = gate_ng * prior_tokens
         else:
             # use_prior_traj=False: 完全忽略先验，用零 token 填充
-            gated_prior = torch.zeros(
+            gated_prior_mg = torch.zeros(
                 tensor_prior.shape[0], self.n_prior_tokens, self.token_dim,
                 device=device
             )
+            gated_prior_ng = gated_prior_mg
 
         # ── 标签/增强轨迹嵌入（用于 critic，与 NavDP 一致）────────────────
         label_embed = self.input_embed(tensor_label_actions).detach()
@@ -686,7 +736,7 @@ class BridgeDPNet(PreTrainedModel):
             [
                 ng_time_embed, scale_embed_ng,
                 nogoal_embed, imagegoal_embed, pixelgoal_embed,
-                rgbd_embed, gated_prior,
+                rgbd_embed_ng, gated_prior_ng,
             ],
             dim=1
         )
@@ -698,7 +748,7 @@ class BridgeDPNet(PreTrainedModel):
                 [
                     ng_time_embed, scale_embed_ng,
                     nogoal_embed, nogoal_embed, nogoal_embed,
-                    rgbd_embed, gated_prior,
+                    rgbd_embed_ng, gated_prior_ng,
                 ],
                 dim=1
             ) + cond_pos_embed
@@ -720,11 +770,22 @@ class BridgeDPNet(PreTrainedModel):
             [
                 mg_time_embed, scale_embed_mg,
                 selected_0, selected_1, selected_2,
-                rgbd_embed, gated_prior,
+                rgbd_embed_mg, gated_prior_mg,
             ],
             dim=1
         )
         mg_cond_embeddings = self.drop(mg_cond_embed + cond_pos_embed)
+
+        critic_cond_embeddings = self.drop(
+            torch.cat(
+                [
+                    ng_time_embed, scale_embed_mg,
+                    nogoal_embed, nogoal_embed, nogoal_embed,
+                    rgbd_embed_mg, gated_prior_mg,
+                ],
+                dim=1
+            ) + cond_pos_embed
+        )
 
         # ── Transformer Decoder 前向 ─────────────────────────────────────
         out_pos_embed = self.out_pos_embed(ng_noisy_embed)
@@ -749,14 +810,14 @@ class BridgeDPNet(PreTrainedModel):
 
         # Critic 分支（与 NavDP 一致，不使用先验）
         cr_label_output = self.decoder(
-            tgt=label_action_embeddings, memory=ng_cond_embeddings,
+            tgt=label_action_embeddings, memory=critic_cond_embeddings,
             memory_mask=self.cond_critic_mask.to(self._device)
         )
         cr_label_output = self.layernorm(cr_label_output)
         cr_label_pred = self.critic_head(cr_label_output.mean(dim=1))[:, 0]
 
         cr_augment_output = self.decoder(
-            tgt=augment_action_embeddings, memory=ng_cond_embeddings,
+            tgt=augment_action_embeddings, memory=critic_cond_embeddings,
             memory_mask=self.cond_critic_mask.to(self._device)
         )
         cr_augment_output = self.layernorm(cr_augment_output)
@@ -898,6 +959,7 @@ class BridgeDPNet(PreTrainedModel):
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
             pointgoal_embed = self.point_encoder(tensor_point_goal_n).unsqueeze(1)
             scale_embed = self._build_scale_token(goal_distance_m, like_token=pointgoal_embed)
+            rgbd_embed = self._apply_scale_rgbd_film(rgbd_embed, goal_distance_m)
 
             # 先验处理（归一化后编码）
             if prior_traj is not None:
@@ -1021,6 +1083,7 @@ class BridgeDPNet(PreTrainedModel):
                 B, self._device, dtype=rgbd_embed.dtype
             )
             scale_embed = self._build_scale_token(nogoal_distance_m, like_token=nogoal_embed)
+            rgbd_embed = self._apply_scale_rgbd_film(rgbd_embed, nogoal_distance_m)
 
             # NoGoal: goal = 0, theta_g = 0（归一化空间中 0 仍然是 0）
             zero_goal = torch.zeros(B, 3, device=self._device)

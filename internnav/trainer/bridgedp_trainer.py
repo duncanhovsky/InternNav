@@ -764,6 +764,10 @@ class BridgeDPTrainer(BaseTrainer):
                     inputs_on_device["batch_rgb"],
                     inputs_on_device["batch_depth"],
                 )
+                rgbd_embed = model_ref._apply_scale_rgbd_film(
+                    rgbd_embed,
+                    inputs_on_device["batch_traj_distance_m"],
+                )
 
                 if getattr(model_ref, "use_prior_traj", False):
                     prior_tokens = model_ref.prior_encoder(inputs_on_device["batch_prior"])
