@@ -74,11 +74,12 @@ class BridgeDPNet(PreTrainedModel):
 
         memory = [
             time_token,          # 1 token  (SinusoidalPosEmb)
+            scale_token,         # optional 1 token ([d_m, log(d_m), R/d_m, d_m/R])
             goal_tokens × 3,     # 3 tokens (point/image/pixel goal)
             rgbd_tokens,         # memory_size × 16 tokens
             G · prior_tokens,    # n_prior_tokens tokens (新增)
         ]
-        total_cond_len = 1 + 3 + memory_size*16 + n_prior_tokens
+        total_cond_len = 1 + n_scale_tokens + 3 + memory_size*16 + n_prior_tokens
 
     Attributes:
         config_class: 对应的配置类。
@@ -168,6 +169,10 @@ class BridgeDPNet(PreTrainedModel):
         self.trajectory_norm_target_distance = float(il.get('trajectory_norm_target_distance', 2.0))
         self.trajectory_norm_min_distance_m = float(il.get('trajectory_norm_min_distance_m', 0.10))
         self.trajectory_norm_eps = float(il.get('trajectory_norm_eps', 1e-6))
+        self.enable_scale_condition_token = il.get('enable_scale_condition_token', False)
+        self.scale_condition_clamp_min_m = float(il.get('scale_condition_clamp_min_m', 0.10))
+        self.scale_condition_clamp_max_m = float(il.get('scale_condition_clamp_max_m', 20.0))
+        self.n_scale_tokens = 1 if self.enable_scale_condition_token else 0
 
         # ── 共享视觉编码器（与 NavDP 相同，直接 import，不修改）──────────
         self.rgbd_encoder = RGBDBackbone(
@@ -200,10 +205,10 @@ class BridgeDPNet(PreTrainedModel):
         self.decoder = nn.TransformerDecoder(decoder_layer=decoder_layer, num_layers=self.temporal_depth)
         self.input_embed = nn.Linear(3, self.token_dim)
 
-        # ── 位置编码（memory 长度增加了 n_prior_tokens）──────────────────
+        # ── 位置编码（memory 长度增加了 scale token 和 n_prior_tokens）────
         # NavDP: memory_size*16 + 4 (time+goal×3)
-        # Bridge-DP: memory_size*16 + 4 + n_prior_tokens
-        cond_len = self.memory_size * 16 + 4 + self.n_prior_tokens
+        # Bridge-DP: memory_size*16 + 4 + scale + n_prior_tokens
+        cond_len = self.memory_size * 16 + 4 + self.n_scale_tokens + self.n_prior_tokens
         self.cond_pos_embed = LearnablePositionalEncoding(self.token_dim, cond_len)
         self.out_pos_embed = LearnablePositionalEncoding(self.token_dim, self.predict_size)
 
@@ -221,6 +226,12 @@ class BridgeDPNet(PreTrainedModel):
         # 辅助头（与 NavDP 一致）
         self.pixel_aux_head = nn.Linear(self.token_dim, 3)
         self.image_aux_head = nn.Linear(self.token_dim, 3)
+        if self.enable_scale_condition_token:
+            self.scale_encoder = nn.Sequential(
+                nn.Linear(4, self.token_dim),
+                nn.GELU(),
+                nn.Linear(self.token_dim, self.token_dim),
+            )
 
         # ── Bridge-DP 新增模块 ────────────────────────────────────────────
         self.prior_encoder = PriorEncoder(
@@ -256,13 +267,14 @@ class BridgeDPNet(PreTrainedModel):
         )
         self.tgt_mask = self.tgt_mask.to(self._device)
 
-        # Critic 掩码：屏蔽 goal token（前 4 个），与 NavDP 一致
+        # Critic 掩码：屏蔽 time/scale/goal token，与 NavDP 一致不泄露 goal
         # Bridge-DP 的 critic 不引入先验信息（用户决策），
-        # 因此掩码长度需要覆盖 4 + memory_size*16 + n_prior_tokens
+        # 因此掩码长度需要覆盖 4 + scale + memory_size*16 + n_prior_tokens
         self.cond_critic_mask = torch.zeros((self.predict_size, cond_len))
-        self.cond_critic_mask[:, 0:4] = float('-inf')  # 屏蔽 time + goal×3
+        rgbd_start = 4 + self.n_scale_tokens
+        self.cond_critic_mask[:, 0:rgbd_start] = float('-inf')  # 屏蔽 time + scale + goal×3
         # 同时屏蔽 prior tokens（critic 不使用先验）
-        self.cond_critic_mask[:, 4 + self.memory_size * 16:] = float('-inf')
+        self.cond_critic_mask[:, rgbd_start + self.memory_size * 16:] = float('-inf')
 
     def to(self, device, *args, **kwargs):
         """将模型及缓冲区迁移到指定设备。"""
@@ -338,6 +350,43 @@ class BridgeDPNet(PreTrainedModel):
             denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
         return denormed
 
+    def _default_nogoal_distance(self, batch_size, device, dtype=torch.float32):
+        """NoGoal 没有真实目标距离，使用默认前向距离构造尺度 token。"""
+        distance = self.nogoal_front_distance * self.action_scale_xy
+        return torch.full((batch_size,), distance, device=device, dtype=dtype)
+
+    def _build_scale_features(self, traj_distance_m):
+        """构造 [d_m, log(d_m), R/d_m, d_m/R] 尺度条件特征。"""
+        d = traj_distance_m.to(device=self._device, dtype=torch.float32).view(-1)
+        d = d.clamp(
+            min=max(self.scale_condition_clamp_min_m, self.trajectory_norm_eps),
+            max=self.scale_condition_clamp_max_m,
+        )
+        target = max(self.trajectory_norm_target_distance, self.trajectory_norm_eps)
+        return torch.stack(
+            [
+                d,
+                torch.log(d),
+                d.new_full(d.shape, target) / d,
+                d / target,
+            ],
+            dim=-1,
+        )
+
+    def _build_scale_token(self, traj_distance_m, like_token=None):
+        """将尺度特征编码为 memory token；关闭时返回空 token 序列。"""
+        if not self.enable_scale_condition_token:
+            if like_token is not None:
+                B = like_token.shape[0]
+                return like_token.new_zeros((B, 0, like_token.shape[-1]))
+            B = traj_distance_m.shape[0]
+            return torch.zeros((B, 0, self.token_dim), device=self._device)
+        feat = self._build_scale_features(traj_distance_m)
+        token = self.scale_encoder(feat).unsqueeze(1)
+        if like_token is not None:
+            token = token.to(device=like_token.device, dtype=like_token.dtype)
+        return token
+
     def _build_valid_mask(self, trajectory, threshold=1e-4, min_valid_steps=4):
         """基于位移阈值构建有效步掩码（推理专用）。"""
         if trajectory.dim() != 3:
@@ -405,7 +454,7 @@ class BridgeDPNet(PreTrainedModel):
     # 去噪预测
     # ------------------------------------------------------------------
 
-    def predict_x0(self, noisy_actions, timestep, goal_embed, rgbd_embed, prior_embed):
+    def predict_x0(self, noisy_actions, timestep, goal_embed, rgbd_embed, prior_embed, scale_embed=None):
         """直接预测干净轨迹 x̂₀（x₀-prediction 模式）。
 
         与 ε-prediction 的区别：
@@ -429,9 +478,15 @@ class BridgeDPNet(PreTrainedModel):
         if time_embeds.shape[0] == 1 and cond_batch > 1:
             time_embeds = time_embeds.expand(cond_batch, -1, -1)
 
-        # memory = [time(1), goal×3, rgbd(mem×16), G·prior(N_p)]
+        if scale_embed is None:
+            scale_embed = self._build_scale_token(
+                self._default_nogoal_distance(cond_batch, self._device),
+                like_token=goal_embed,
+            )
+
+        # memory = [time(1), scale(optional), goal×3, rgbd(mem×16), G·prior(N_p)]
         cond_tokens = torch.cat(
-            [time_embeds, goal_embed, goal_embed, goal_embed, rgbd_embed, prior_embed],
+            [time_embeds, scale_embed, goal_embed, goal_embed, goal_embed, rgbd_embed, prior_embed],
             dim=1
         )
         cond_embedding = cond_tokens + self.cond_pos_embed(cond_tokens)
@@ -446,7 +501,7 @@ class BridgeDPNet(PreTrainedModel):
         x0_pred = self.action_head(output)
         return x0_pred
 
-    def predict_critic(self, predict_trajectory, rgbd_embed):
+    def predict_critic(self, predict_trajectory, rgbd_embed, scale_embed=None):
         """Critic 分支，与 NavDP 完全一致，不引入先验信息。
 
         Args:
@@ -459,6 +514,12 @@ class BridgeDPNet(PreTrainedModel):
         repeat_factor = max(1, predict_trajectory.shape[0] // rgbd_embed.shape[0])
         repeat_rgbd_embed = rgbd_embed.repeat(repeat_factor, 1, 1)
         nogoal_embed = torch.zeros_like(repeat_rgbd_embed[:, 0:1])
+        if scale_embed is None:
+            scale_embed = self._build_scale_token(
+                self._default_nogoal_distance(rgbd_embed.shape[0], rgbd_embed.device, rgbd_embed.dtype),
+                like_token=rgbd_embed[:, 0:1],
+            )
+        repeat_scale_embed = scale_embed.repeat(repeat_factor, 1, 1)
         # 先验位置用零填充（critic 不使用先验）
         zero_prior = torch.zeros(
             repeat_rgbd_embed.shape[0], self.n_prior_tokens, self.token_dim,
@@ -468,7 +529,11 @@ class BridgeDPNet(PreTrainedModel):
         action_embeddings = self.input_embed(predict_trajectory)
         action_embeddings = action_embeddings + self.out_pos_embed(action_embeddings)
         cond_tokens = torch.cat(
-            [nogoal_embed, nogoal_embed, nogoal_embed, nogoal_embed, repeat_rgbd_embed, zero_prior],
+            [
+                nogoal_embed, repeat_scale_embed,
+                nogoal_embed, nogoal_embed, nogoal_embed,
+                repeat_rgbd_embed, zero_prior,
+            ],
             dim=1
         )
         cond_embeddings = cond_tokens + self.cond_pos_embed(cond_tokens)
@@ -512,7 +577,7 @@ class BridgeDPNet(PreTrainedModel):
         self, goal_point, goal_image, goal_pixel,
         input_images, input_depths,
         output_actions, augment_actions,
-        prior_traj, theta_g, nogoal_actions=None,
+        prior_traj, theta_g, nogoal_actions=None, traj_distance_m=None,
     ):
         """训练前向传播。
 
@@ -558,6 +623,18 @@ class BridgeDPNet(PreTrainedModel):
         )
         tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32).to(device)
         tensor_theta_g = torch.as_tensor(theta_g, dtype=torch.float32).to(device)
+        if traj_distance_m is None:
+            if self.enable_trajectory_normalization:
+                tensor_traj_distance_m = torch.full(
+                    (tensor_point_goal.shape[0],),
+                    self.trajectory_norm_target_distance * self.action_scale_xy,
+                    device=device,
+                    dtype=torch.float32,
+                )
+            else:
+                tensor_traj_distance_m = torch.norm(tensor_point_goal[:, :2], dim=-1) * self.action_scale_xy
+        else:
+            tensor_traj_distance_m = torch.as_tensor(traj_distance_m, dtype=torch.float32).to(device).view(-1)
         input_images = input_images.to(device)
         input_depths = input_depths.to(device)
 
@@ -575,6 +652,11 @@ class BridgeDPNet(PreTrainedModel):
         rgbd_embed = self.rgbd_encoder(input_images, input_depths)
         pointgoal_embed = self.point_encoder(tensor_point_goal).unsqueeze(1)
         nogoal_embed = torch.zeros_like(pointgoal_embed)
+        scale_embed_mg = self._build_scale_token(tensor_traj_distance_m, like_token=pointgoal_embed)
+        nogoal_distance_m = self._default_nogoal_distance(
+            tensor_point_goal.shape[0], device, dtype=torch.float32
+        )
+        scale_embed_ng = self._build_scale_token(nogoal_distance_m, like_token=pointgoal_embed)
         imagegoal_embed = self.image_encoder(goal_image).unsqueeze(1)
         pixelgoal_embed = self.pixel_encoder(goal_pixel).unsqueeze(1)
 
@@ -601,7 +683,11 @@ class BridgeDPNet(PreTrainedModel):
 
         # ── 构建 memory + 位置编码 ──────────────────────────────────────
         cond_base = torch.cat(
-            [ng_time_embed, nogoal_embed, imagegoal_embed, pixelgoal_embed, rgbd_embed, gated_prior],
+            [
+                ng_time_embed, scale_embed_ng,
+                nogoal_embed, imagegoal_embed, pixelgoal_embed,
+                rgbd_embed, gated_prior,
+            ],
             dim=1
         )
         cond_pos_embed = self.cond_pos_embed(cond_base)
@@ -609,7 +695,11 @@ class BridgeDPNet(PreTrainedModel):
         # no-goal 分支 memory
         ng_cond_embeddings = self.drop(
             torch.cat(
-                [ng_time_embed, nogoal_embed, nogoal_embed, nogoal_embed, rgbd_embed, gated_prior],
+                [
+                    ng_time_embed, scale_embed_ng,
+                    nogoal_embed, nogoal_embed, nogoal_embed,
+                    rgbd_embed, gated_prior,
+                ],
                 dim=1
             ) + cond_pos_embed
         )
@@ -627,7 +717,11 @@ class BridgeDPNet(PreTrainedModel):
         selected_1 = goal_embeds[sel_1, torch.arange(batch_size), :, :]
         selected_2 = goal_embeds[sel_2, torch.arange(batch_size), :, :]
         mg_cond_embed = torch.cat(
-            [mg_time_embed, selected_0, selected_1, selected_2, rgbd_embed, gated_prior],
+            [
+                mg_time_embed, scale_embed_mg,
+                selected_0, selected_1, selected_2,
+                rgbd_embed, gated_prior,
+            ],
             dim=1
         )
         mg_cond_embeddings = self.drop(mg_cond_embed + cond_pos_embed)
@@ -803,6 +897,7 @@ class BridgeDPNet(PreTrainedModel):
 
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
             pointgoal_embed = self.point_encoder(tensor_point_goal_n).unsqueeze(1)
+            scale_embed = self._build_scale_token(goal_distance_m, like_token=pointgoal_embed)
 
             # 先验处理（归一化后编码）
             if prior_traj is not None:
@@ -849,7 +944,7 @@ class BridgeDPNet(PreTrainedModel):
             for k in self.bridge_scheduler.timesteps:
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
-                    pointgoal_embed, rgbd_embed, gated_prior
+                    pointgoal_embed, rgbd_embed, gated_prior, scale_embed
                 )
                 naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
@@ -860,7 +955,7 @@ class BridgeDPNet(PreTrainedModel):
                 )
 
             # Critic 排序
-            critic_values = self.predict_critic(naction, rgbd_embed)
+            critic_values = self.predict_critic(naction, rgbd_embed, scale_embed)
             score_values = self._apply_goal_consistency_score(
                 critic_values, naction, goal_repeated, origin_repeated
             )
@@ -922,6 +1017,10 @@ class BridgeDPNet(PreTrainedModel):
             rgbd_embed = self.rgbd_encoder(input_images, input_depths)
             nogoal_embed = torch.zeros_like(rgbd_embed[:, 0:1])
             B = rgbd_embed.shape[0]
+            nogoal_distance_m = self._default_nogoal_distance(
+                B, self._device, dtype=rgbd_embed.dtype
+            )
+            scale_embed = self._build_scale_token(nogoal_distance_m, like_token=nogoal_embed)
 
             # NoGoal: goal = 0, theta_g = 0（归一化空间中 0 仍然是 0）
             zero_goal = torch.zeros(B, 3, device=self._device)
@@ -955,14 +1054,14 @@ class BridgeDPNet(PreTrainedModel):
             for k in self.bridge_scheduler.timesteps:
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
-                    nogoal_embed, rgbd_embed, gated_prior
+                    nogoal_embed, rgbd_embed, gated_prior, scale_embed
                 )
                 naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
                     mode="nogoal",
                 )
 
-            critic_values = self.predict_critic(naction, rgbd_embed)
+            critic_values = self.predict_critic(naction, rgbd_embed, scale_embed)
 
             # ── 反归一化 ──
             # smooth_trajectory_batch 暂停使用；部署端可按机器人运动属性另行重采样。

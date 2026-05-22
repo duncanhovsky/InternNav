@@ -110,6 +110,10 @@ bridgedp_exp_cfg = ExpCfg(
         trajectory_norm_min_distance_m=0.10,
         trajectory_norm_eps=1e-6,
         drop_short_trajectory_samples=True,
+        # 尺度条件 token：显式告诉模型米制深度与形状空间之间的比例。
+        enable_scale_condition_token=True,
+        scale_condition_clamp_min_m=0.10,
+        scale_condition_clamp_max_m=20.0,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,

@@ -542,6 +542,7 @@ class BridgeDPTrainer(BaseTrainer):
             inputs_on_device["batch_prior"],
             inputs_on_device["batch_theta_g"],
             inputs_on_device.get("batch_nogoal_labels"),
+            inputs_on_device.get("batch_traj_distance_m"),
         )
 
         # ── x₀-MSE（全 24 个重采样监督点参与训练）─────────────────────
@@ -755,6 +756,10 @@ class BridgeDPTrainer(BaseTrainer):
                 theta_g = inputs_on_device["batch_theta_g"]
 
                 pointgoal_embed = model_ref.point_encoder(pg_n).unsqueeze(1)
+                scale_embed = model_ref._build_scale_token(
+                    inputs_on_device["batch_traj_distance_m"],
+                    like_token=pointgoal_embed,
+                )
                 rgbd_embed = model_ref.rgbd_encoder(
                     inputs_on_device["batch_rgb"],
                     inputs_on_device["batch_depth"],
@@ -784,7 +789,7 @@ class BridgeDPTrainer(BaseTrainer):
                 for k in model_ref.bridge_scheduler.timesteps:
                     x0_pred = model_ref.predict_x0(
                         naction, k.to(device).unsqueeze(0),
-                        pointgoal_embed, rgbd_embed, gated_prior,
+                        pointgoal_embed, rgbd_embed, gated_prior, scale_embed,
                     )
                     naction = model_ref.bridge_scheduler.step_trajectory(
                         x0_pred, naction, k.to(device),
