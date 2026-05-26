@@ -641,6 +641,24 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/aux":        aux_loss.item(),
                 "debug/grad_norm": grad_norm,
             }
+            bridge_scheduler = getattr(model_ref, "bridge_scheduler", None)
+            self._monitor_logs["bridge/frontload"] = float(
+                getattr(bridge_scheduler, "bridge_envelope_frontload", 0.0)
+            )
+            valid_bridge_sigma = mg_bridge_sigma.detach()[sample_valid]
+            if valid_bridge_sigma.numel() > 0 and valid_bridge_sigma.shape[-1] >= 2:
+                waypoint_6 = min(5, valid_bridge_sigma.shape[1] - 1)
+                waypoint_mid = min(
+                    max(valid_bridge_sigma.shape[1] // 2 - 1, 0),
+                    valid_bridge_sigma.shape[1] - 1,
+                )
+                self._monitor_logs.update(
+                    {
+                        "bridge/normal_sigma_wp1": valid_bridge_sigma[:, 0, 1].mean().item(),
+                        "bridge/normal_sigma_wp6": valid_bridge_sigma[:, waypoint_6, 1].mean().item(),
+                        "bridge/normal_sigma_mid": valid_bridge_sigma[:, waypoint_mid, 1].mean().item(),
+                    }
+                )
             pred_avg = (
                 x0_pred_mg.detach()
                 if self.enable_trajectory_normalization

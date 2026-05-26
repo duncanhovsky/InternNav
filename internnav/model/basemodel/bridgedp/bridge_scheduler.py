@@ -78,6 +78,7 @@ class BridgeScheduler:
         bridge_normal_sigma_ratio: float = 0.25,
         bridge_tangent_sigma_ratio: float = 0.03,
         bridge_theta_sigma_ratio: float = 0.05,
+        bridge_envelope_frontload: float = 0.0,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
@@ -94,6 +95,9 @@ class BridgeScheduler:
         self.bridge_normal_sigma_ratio = bridge_normal_sigma_ratio
         self.bridge_tangent_sigma_ratio = bridge_tangent_sigma_ratio
         self.bridge_theta_sigma_ratio = bridge_theta_sigma_ratio
+        self.bridge_envelope_frontload = float(bridge_envelope_frontload)
+        if self.bridge_envelope_frontload < 0.0:
+            raise ValueError("bridge_envelope_frontload must be non-negative")
 
         # 推理时使用的时间步序列（由 set_timesteps 设置）
         self._timesteps: Optional[torch.Tensor] = None
@@ -222,6 +226,23 @@ class BridgeScheduler:
             dtype=dtype,
         ).view(1, predict_size, 1)
 
+    def trajectory_time_envelopes(
+        self,
+        tau: torch.Tensor,
+        p: torch.Tensor,
+    ):
+        """Return symmetric and front-loaded turn envelopes for waypoint noise."""
+        t_prod = (tau * (1.0 - tau)).clamp(min=0.0)
+        symmetric = (t_prod / 0.25).clamp(min=0.0).pow(p)
+        if self.bridge_envelope_frontload == 0.0:
+            return symmetric, symmetric
+
+        q = 1.0 + self.bridge_envelope_frontload
+        turn_peak = (q**q) / ((q + 1.0) ** (q + 1.0))
+        turn_prod = (tau * (1.0 - tau).pow(q)).clamp(min=0.0)
+        turn = (turn_prod / turn_peak).clamp(min=0.0).pow(p)
+        return symmetric, turn
+
     def _batch_endpoint(
         self,
         value: Optional[torch.Tensor],
@@ -315,13 +336,12 @@ class BridgeScheduler:
 
         tau = self.trajectory_time(T_pred, device, dtype)
         p = self.direction_adaptive_exponent(theta_g).view(B, 1, 1)
-        t_prod = (tau * (1.0 - tau)).clamp(min=0.0)
-        shape_tau = (t_prod / 0.25).clamp(min=0.0).pow(p)
+        shape_tau, turn_shape_tau = self.trajectory_time_envelopes(tau, p)
         dist_scale = dist.view(B, 1, 1)
 
-        sigma_normal = dist_scale * self.bridge_normal_sigma_ratio * shape_tau
+        sigma_normal = dist_scale * self.bridge_normal_sigma_ratio * turn_shape_tau
         sigma_tangent = dist_scale * self.bridge_tangent_sigma_ratio * shape_tau
-        sigma_theta = dist_scale * self.bridge_theta_sigma_ratio * shape_tau
+        sigma_theta = dist_scale * self.bridge_theta_sigma_ratio * turn_shape_tau
         if not self.bridge_anisotropic_xy:
             sigma_tangent = sigma_normal
 

@@ -101,9 +101,11 @@ bridgedp_exp_cfg = ExpCfg(
         # PointGoal 分支使用尺度相似的切向/法向各向异性桥方差。
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
-        bridge_normal_sigma_ratio=0.5,
+        bridge_normal_sigma_ratio=1.0,
         bridge_tangent_sigma_ratio=0.05,
-        bridge_theta_sigma_ratio=0.1,
+        bridge_theta_sigma_ratio=0.3,
+        # 法向/航向自由度的前置程度；0.0 严格关闭前置影响，1.0 为温和前置实验。
+        bridge_envelope_frontload=1.0,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
         trajectory_norm_target_distance=2.0,
@@ -121,7 +123,7 @@ bridgedp_exp_cfg = ExpCfg(
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,
-        goal_consistency_path_weight=0.2,
+        goal_consistency_path_weight=0.05,
         # 距离分桶仅用于训练监控诊断，不参与模型规则。
         enable_distance_bucket_metrics=True,
         distance_bucket_edges=(0.10, 0.5, 0.8),
