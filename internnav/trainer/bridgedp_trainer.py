@@ -71,6 +71,15 @@ class BridgeDPTrainer(BaseTrainer):
         self.drop_short_trajectory_samples = (
             getattr(il_cfg, 'drop_short_trajectory_samples', True) if il_cfg else True
         )
+        self.safety_clearance_m = float(
+            getattr(il_cfg, 'safety_clearance_m', 0.25) if il_cfg else 0.25
+        )
+        self.lambda_collision = float(
+            getattr(il_cfg, 'lambda_collision', 1.0) if il_cfg else 1.0
+        )
+        self.collision_sample_spacing_m = float(
+            getattr(il_cfg, 'collision_sample_spacing_m', 0.05) if il_cfg else 0.05
+        )
 
         if hasattr(self.model, 'module'):
             self.model_device = self.model.module.device
@@ -244,6 +253,70 @@ class BridgeDPTrainer(BaseTrainer):
         if out.shape[-1] >= 3:
             out[..., 2] = out[..., 2] * self.action_scale_theta
         return out
+
+    def _legacy_denorm_action_tensor(self, action: torch.Tensor) -> torch.Tensor:
+        """Restore legacy normalized trajectory actions to physical meters/radians."""
+        out = action.clone()
+        out[..., 0:2] = out[..., 0:2] * self.action_scale_xy
+        if out.shape[-1] >= 3:
+            out[..., 2] = out[..., 2] * self.action_scale_theta
+        return out
+
+    def _dense_collision_points(self, trajectory_phys: torch.Tensor) -> torch.Tensor:
+        """Densify every path segment at a bounded physical spacing."""
+        xy = trajectory_phys[..., :2]
+        origin = torch.zeros_like(xy[:1])
+        points = torch.cat([origin, xy], dim=0)
+        dense_segments = []
+        spacing = max(self.collision_sample_spacing_m, 1e-6)
+        for start, end in zip(points[:-1], points[1:]):
+            delta = end - start
+            length = float(torch.linalg.vector_norm(delta.detach()).item())
+            steps = max(1, int(math.ceil(length / spacing)))
+            alpha = torch.linspace(
+                1.0 / steps, 1.0, steps, device=xy.device, dtype=xy.dtype
+            ).unsqueeze(-1)
+            dense_segments.append(start.unsqueeze(0) + alpha * delta.unsqueeze(0))
+        if not dense_segments:
+            return xy[:0]
+        return torch.cat(dense_segments, dim=0)
+
+    def _collision_loss(
+        self,
+        trajectories_phys: torch.Tensor,
+        obstacle_points,
+        sample_valid: torch.Tensor,
+    ):
+        """Compute a full-trajectory clearance penalty in physical meters."""
+        losses = []
+        min_clearances = []
+        collision_flags = []
+        for bid in range(trajectories_phys.shape[0]):
+            if not bool(sample_valid[bid].item()):
+                continue
+            if obstacle_points is None or bid >= len(obstacle_points):
+                continue
+            obs = obstacle_points[bid]
+            if obs is None or obs.numel() == 0:
+                continue
+            dense = self._dense_collision_points(trajectories_phys[bid])
+            if dense.numel() == 0:
+                continue
+            obs = obs.to(device=dense.device, dtype=dense.dtype)
+            clearance = torch.cdist(dense, obs[:, :2]).amin(dim=-1)
+            violation = torch.relu(self.safety_clearance_m - clearance)
+            losses.append(violation.square().mean())
+            min_clearances.append(clearance.amin())
+            collision_flags.append((clearance < self.safety_clearance_m).any().float())
+
+        if not losses:
+            zero = trajectories_phys.new_tensor(0.0)
+            return zero, zero, zero
+        return (
+            torch.stack(losses).mean(),
+            torch.stack(min_clearances).mean(),
+            torch.stack(collision_flags).mean(),
+        )
 
     def _trajectory_norm_logs(
         self,
@@ -478,8 +551,9 @@ class BridgeDPTrainer(BaseTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """执行一次前向并计算 x₀-MSE 总损失。
 
-        损失结构与 NavDP 对齐：
-            loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
+        损失结构：
+            loss = 0.8 * action_loss + lambda_collision * L_collision
+                   + 0.2 * critic_loss + 0.5 * aux_loss
         其中 action_loss = L_x0 + λ_delta * L_delta，均为均匀 MSE（无 SNR 加权）。
         轨迹监督由原始 GT 曲线在 GPU 上按弧长样条重采样得到，valid_mask 固定全 1。
         """
@@ -498,6 +572,9 @@ class BridgeDPTrainer(BaseTrainer):
             "batch_prior":          inputs["batch_prior"].to(model_device),
             "batch_theta_g":        inputs["batch_theta_g"].to(model_device),
             "batch_valid_mask":     inputs["batch_valid_mask"].to(model_device),
+            "batch_obstacle_pts":   [
+                pts.to(model_device) for pts in inputs.get("batch_obstacle_pts", [])
+            ],
         }
         if "batch_raw_labels" in inputs:
             inputs_on_device.update({
@@ -596,6 +673,23 @@ class BridgeDPTrainer(BaseTrainer):
 
         action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
 
+        ng_phys = self._legacy_denorm_action_tensor(x0_pred_ng)
+        if self.enable_trajectory_normalization:
+            mg_phys = self._trajectory_denorm_tensor(
+                x0_pred_mg, inputs_on_device["batch_traj_distance_m"]
+            )
+        else:
+            mg_phys = self._legacy_denorm_action_tensor(x0_pred_mg)
+        ng_collision_loss, ng_min_clearance, ng_collision_rate = self._collision_loss(
+            ng_phys, inputs_on_device.get("batch_obstacle_pts"), sample_valid
+        )
+        mg_collision_loss, mg_min_clearance, mg_collision_rate = self._collision_loss(
+            mg_phys, inputs_on_device.get("batch_obstacle_pts"), sample_valid
+        )
+        L_collision = 0.5 * (ng_collision_loss + mg_collision_loss)
+        collision_min_clearance = 0.5 * (ng_min_clearance + mg_min_clearance)
+        collision_rate = 0.5 * (ng_collision_rate + mg_collision_rate)
+
         # ── Critic 损失（与 NavDP 一致）──────────────────────────────
         sample_weight = sample_valid.to(dtype=critic_pred.dtype)
         sample_denom = sample_weight.sum().clamp(min=1)
@@ -613,8 +707,13 @@ class BridgeDPTrainer(BaseTrainer):
             0.5 * (aux_point * sample_weight).sum() / sample_denom
         )
 
-        # ── 总损失（3 项，与 NavDP 完全对齐）─────────────────────────
-        loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
+        # ── 总损失：轨迹拟合、整段碰撞、critic 与辅助目标 ────────────
+        loss = (
+            0.8 * action_loss
+            + self.lambda_collision * L_collision
+            + 0.2 * critic_loss
+            + 0.5 * aux_loss
+        )
 
         # ── 监控日志 ──────────────────────────────────────────────────
         rank = dist.get_rank() if dist.is_initialized() else 0
@@ -626,6 +725,7 @@ class BridgeDPTrainer(BaseTrainer):
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f} "
                       f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}), "
+                      f"collision={L_collision.item():.4f}, "
                       f"critic={critic_loss.item():.4f}, aux={aux_loss.item():.4f}")
 
             grad_norm = self._compute_grad_norm(model)
@@ -635,10 +735,15 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/L_x0":       L_x0.item(),
                 "loss/L_delta":    L_delta.item(),
                 "loss/L_eps":      L_eps.item(),
+                "loss/L_collision": L_collision.item(),
                 "loss/ng_x0":      ng_x0_loss.item(),
                 "loss/mg_x0":      mg_x0_loss.item(),
                 "loss/critic":     critic_loss.item(),
                 "loss/aux":        aux_loss.item(),
+                "safety/min_clearance_m": collision_min_clearance.item(),
+                "safety/collision_rate": collision_rate.item(),
+                "safety/clearance_threshold_m": self.safety_clearance_m,
+                "safety/collision_sample_spacing_m": self.collision_sample_spacing_m,
                 "debug/grad_norm": grad_norm,
             }
             bridge_scheduler = getattr(model_ref, "bridge_scheduler", None)
@@ -731,6 +836,7 @@ class BridgeDPTrainer(BaseTrainer):
             'L_x0':        L_x0.item(),
             'L_delta':     L_delta.item(),
             'L_eps':       L_eps.item(),
+            'L_collision': L_collision.item(),
             'critic_loss': critic_loss,
             'aux_loss':    aux_loss,
         }

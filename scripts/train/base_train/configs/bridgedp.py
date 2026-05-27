@@ -101,11 +101,11 @@ bridgedp_exp_cfg = ExpCfg(
         # PointGoal 分支使用尺度相似的切向/法向各向异性桥方差。
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
-        bridge_normal_sigma_ratio=1.0,
-        bridge_tangent_sigma_ratio=0.05,
+        bridge_normal_sigma_ratio=1.2,
+        bridge_tangent_sigma_ratio=0.2,
         bridge_theta_sigma_ratio=0.3,
-        # 法向/航向自由度的前置程度；0.0 严格关闭前置影响，1.0 为温和前置实验。
-        bridge_envelope_frontload=1.0,
+        # Disable front-loaded freedom: every waypoint uses the symmetric envelope.
+        bridge_envelope_frontload=0.0,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
         trajectory_norm_target_distance=2.0,
@@ -139,8 +139,17 @@ bridgedp_exp_cfg = ExpCfg(
         #   action_loss = L_x0 + lambda_delta * L_delta
         lambda_delta=0.1,
         # lambda_eps: x0 -> eps 反推噪声回归权重
-        #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
+        #   loss also includes lambda_collision * L_collision over the full path.
         lambda_eps=0.0,
+        # Generator-only full-trajectory clearance loss in physical meters.
+        safety_clearance_m=0.25,
+        lambda_collision=1.0,
+        # Match deployment safety checks with bounded physical path sampling.
+        collision_sample_spacing_m=0.05,
+        collision_obstacle_max_points=512,
+        # Include hazards around alternate generated routes, not only label curves.
+        collision_obstacle_workspace_margin_m=1.0,
+        collision_obstacle_voxel_size_m=0.05,
     ),
     model=bridgedp_cfg,
 )

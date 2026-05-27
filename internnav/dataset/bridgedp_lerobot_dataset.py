@@ -77,6 +77,9 @@ class BridgeDP_Base_Dataset(Dataset):
         random_digit=False,
         prior_sample=False,
         sigma_base=1.0,
+        collision_obstacle_max_points=512,
+        collision_obstacle_workspace_margin_m=1.0,
+        collision_obstacle_voxel_size_m=0.05,
     ):
         """初始化数据集。仿照 NavDP_Base_Datset.__init__（L77-183）。
 
@@ -106,6 +109,13 @@ class BridgeDP_Base_Dataset(Dataset):
         self.action_dim = action_dim
         self.debug = debug
         self.sigma_base = sigma_base
+        self.collision_obstacle_max_points = max(1, int(collision_obstacle_max_points))
+        self.collision_obstacle_workspace_margin_m = max(
+            0.0, float(collision_obstacle_workspace_margin_m)
+        )
+        self.collision_obstacle_voxel_size_m = max(
+            1e-6, float(collision_obstacle_voxel_size_m)
+        )
 
         # ── 动作空间归一化参数 ──────────────────────────────────────────
         # 将绝对坐标从 [0, ~10m] 归一化到 [-2, 2]，使训练目标尺度与 NavDP 的
@@ -446,6 +456,55 @@ class BridgeDP_Base_Dataset(Dataset):
             xyt_actions.append([xyz_actions[i][0], xyz_actions[i][1], theta])
         return np.array(xyt_actions)
 
+    def _critic_from_obstacle_distance(self, world_points, obstacle_points, action_indexes):
+        """Score relative obstacle-distance progress without a collision threshold."""
+        distances = np.linalg.norm(
+            world_points[:, None, 0:2] - obstacle_points[None, :, 0:2],
+            axis=-1,
+        ).min(axis=-1)
+        indexed = distances[action_indexes]
+        return 0.5 * float((indexed[1:] - indexed[:-1]).sum())
+
+    def _select_collision_obstacle_points(self, obs_xy, reference_xy):
+        """Keep hazard detail near supervised curves and spatial coverage around them."""
+        if obs_xy.shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+
+        reference_radius = float(np.linalg.norm(reference_xy, axis=-1).max())
+        workspace_radius = reference_radius + self.collision_obstacle_workspace_margin_m
+        in_workspace = np.linalg.norm(obs_xy, axis=-1) <= workspace_radius
+        local_obs = obs_xy[in_workspace]
+        if local_obs.shape[0] <= self.collision_obstacle_max_points:
+            return local_obs.astype(np.float32)
+
+        path_dist = np.linalg.norm(
+            local_obs[:, None, :] - reference_xy[None, :, :],
+            axis=-1,
+        ).min(axis=-1)
+        critical_count = max(1, self.collision_obstacle_max_points // 2)
+        critical_idx = np.argpartition(path_dist, critical_count - 1)[:critical_count]
+        critical = local_obs[critical_idx]
+
+        remaining_mask = np.ones(local_obs.shape[0], dtype=bool)
+        remaining_mask[critical_idx] = False
+        remaining = local_obs[remaining_mask]
+        slots = self.collision_obstacle_max_points - critical.shape[0]
+        if slots <= 0 or remaining.shape[0] == 0:
+            return critical.astype(np.float32)
+
+        voxel_size = max(self.collision_obstacle_voxel_size_m, 1e-6)
+        voxel_keys = np.floor(remaining / voxel_size).astype(np.int64)
+        _, cell_first_idx = np.unique(voxel_keys, axis=0, return_index=True)
+        coverage = remaining[np.sort(cell_first_idx)]
+        if coverage.shape[0] > slots:
+            radius = np.linalg.norm(coverage, axis=-1)
+            angle = np.arctan2(coverage[:, 1], coverage[:, 0])
+            spatial_order = np.lexsort((radius, angle))
+            positions = np.linspace(0, spatial_order.shape[0] - 1, slots).astype(np.int64)
+            coverage = coverage[spatial_order[positions]]
+
+        return np.concatenate([critical, coverage], axis=0).astype(np.float32)
+
     def process_actions(self, extrinsics, base_extrinsic, start_step, end_step, pred_digit=1):
         """处理动作轨迹（含旋转增强+样条插值）。仿照 NavDP L507-590。"""
         label_linear_pos = []
@@ -594,23 +653,13 @@ class BridgeDP_Base_Dataset(Dataset):
         init_vector = target_local_points[1] - target_local_points[0]
         target_xyt_actions = self.xyz_to_xyt(target_local_points, init_vector)
         augment_xyt_actions = self.xyz_to_xyt(augment_local_points, init_vector)
-        # Critic 评分（与 NavDP 一致）
+        # Critic ranks relative obstacle-distance progress; hard safety is enforced separately.
         if trajectory_obstacle_points.shape[0] != 0:
-            pred_distance = (
-                np.abs(target_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
-                .sum(axis=-1).min(axis=-1)
+            pred_critic = self._critic_from_obstacle_distance(
+                target_world_points, trajectory_obstacle_points, action_indexes
             )
-            augment_distance = (
-                np.abs(augment_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
-                .sum(axis=-1).min(axis=-1)
-            )
-            pred_critic = (
-                -5.0 * (pred_distance[action_indexes[:-1]] < 0.1).mean()
-                + 0.5 * (pred_distance[action_indexes][1:] - pred_distance[action_indexes][:-1]).sum()
-            )
-            augment_critic = (
-                -5.0 * (augment_distance[action_indexes[:-1]] < 0.1).mean()
-                + 0.5 * (augment_distance[action_indexes][1:] - augment_distance[action_indexes][:-1]).sum()
+            augment_critic = self._critic_from_obstacle_distance(
+                augment_world_points, trajectory_obstacle_points, action_indexes
             )
         else:
             pred_critic = 2.0
@@ -666,8 +715,8 @@ class BridgeDP_Base_Dataset(Dataset):
         # 5. 先验轨迹在 Trainer 中随 GPU 重采样标签同步生成。
         is_task_start = (memory_start_choice == pixel_start_choice)
 
-        # 6. 障碍物点局部化（世界坐标 → 局部坐标，取最近 64 个点的水平面 xy）
-        #    用于前端可视化面板叠加显示障碍物层
+        # 6. Cover the local reachable workspace while preserving hazards nearest the
+        #    supervised curves. Predicted paths may deviate from both supervised paths.
         if trajectory_obstacle_points.shape[0] > 0:
             _, obs_local = self.relative_pose(
                 trajectory_extrinsics[memory_start_choice][0:3, 0:3],
@@ -677,9 +726,15 @@ class BridgeDP_Base_Dataset(Dataset):
                 trajectory_base_extrinsic,
             )
             obs_xy = obs_local[:, 0:2].astype(np.float32)
-            dists = np.linalg.norm(obs_xy, axis=-1)
-            top_k = min(64, obs_xy.shape[0])
-            obs_local_xy = obs_xy[np.argsort(dists)[:top_k]]  # (K, 2)
+            reference_xy = np.concatenate(
+                [
+                    np.zeros((1, 2), dtype=np.float32),
+                    raw_pred_actions[:, 0:2],
+                    raw_augment_actions[:, 0:2],
+                ],
+                axis=0,
+            )
+            obs_local_xy = self._select_collision_obstacle_points(obs_xy, reference_xy)
         else:
             obs_local_xy = np.zeros((0, 2), dtype=np.float32)
 

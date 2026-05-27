@@ -622,6 +622,13 @@ def main(config, model_class, model_config_class):
                 preload=config.il.preload,
                 random_digit=config.il.random_digit,
                 prior_sample=config.il.prior_sample,
+                collision_obstacle_max_points=getattr(config.il, "collision_obstacle_max_points", 512),
+                collision_obstacle_workspace_margin_m=getattr(
+                    config.il, "collision_obstacle_workspace_margin_m", 1.0
+                ),
+                collision_obstacle_voxel_size_m=getattr(
+                    config.il, "collision_obstacle_voxel_size_m", 0.05
+                ),
             )
         elif config.model_name == "flownav_static":
             train_dataset_data = FlowNav_Base_Datset(
