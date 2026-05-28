@@ -666,7 +666,7 @@ class BridgeDP_Base_Dataset(Dataset):
         # 5. 先验轨迹在 Trainer 中随 GPU 重采样标签同步生成。
         is_task_start = (memory_start_choice == pixel_start_choice)
 
-        # 6. 障碍物点局部化（世界坐标 → 局部坐标，取最近 64 个点的水平面 xy）
+        # 6. 障碍物点局部化（世界坐标 → 局部坐标，取最近 512 个点的水平面 xy）
         #    用于前端可视化面板叠加显示障碍物层
         if trajectory_obstacle_points.shape[0] > 0:
             _, obs_local = self.relative_pose(
@@ -678,7 +678,7 @@ class BridgeDP_Base_Dataset(Dataset):
             )
             obs_xy = obs_local[:, 0:2].astype(np.float32)
             dists = np.linalg.norm(obs_xy, axis=-1)
-            top_k = min(64, obs_xy.shape[0])
+            top_k = min(512, obs_xy.shape[0])
             obs_local_xy = obs_xy[np.argsort(dists)[:top_k]]  # (K, 2)
         else:
             obs_local_xy = np.zeros((0, 2), dtype=np.float32)

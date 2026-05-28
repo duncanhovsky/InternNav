@@ -801,6 +801,7 @@ class BridgeDPTrainer(BaseTrainer):
                         theta_g=theta_exp,
                         origin=origin,
                         mode="pointgoal",
+                        eta=getattr(model_ref, "inference_eta", 0.0),
                     )
 
                 if self.enable_trajectory_normalization:

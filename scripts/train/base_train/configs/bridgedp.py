@@ -61,8 +61,10 @@ bridgedp_exp_cfg = ExpCfg(
         image_size=224,
         scene_scale=1.0,
         preload=True,
-        random_digit=False,
-        prior_sample=False,
+        # 训练数据多样性：随机 memory/pred 时间步长，扩大 24 点轨迹的尺度与曲率分布。
+        random_digit=True,
+        # 困难样本采样：按障碍密度偏置起终点选择，增加绕障片段占比。
+        prior_sample=True,
         memory_size=8,
         predict_size=24,
         pixel_channel=4,
@@ -99,11 +101,15 @@ bridgedp_exp_cfg = ExpCfg(
         nogoal_sigma_theta_end=0.60,
         nogoal_sigma_power=2.0,
         # PointGoal 分支使用尺度相似的切向/法向各向异性桥方差。
+        # 这些桥方差会进入训练前向 sample_bridge_noise()，不是仅用于推理采样。
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
-        bridge_normal_sigma_ratio=0.5,
-        bridge_tangent_sigma_ratio=0.05,
-        bridge_theta_sigma_ratio=0.1,
+        # 横向扰动，最直接增加左右绕障、多路径绕行的可能性。这个增大最有利于绕障多样性。
+        bridge_normal_sigma_ratio=2.0,
+        # 沿目标方向的前后扰动，增大会让轨迹更容易提前/滞后、拉长/回退。它会增加差异，但对绕障帮助不如 normal，太大会带来绕路、抖动或目标一致性下降。
+        bridge_tangent_sigma_ratio=0.3,
+        # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
+        bridge_theta_sigma_ratio=0.6,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
         trajectory_norm_target_distance=2.0,
@@ -121,7 +127,7 @@ bridgedp_exp_cfg = ExpCfg(
         # 推理候选排序：critic 分数减去目标一致性惩罚。
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,
-        goal_consistency_path_weight=0.2,
+        goal_consistency_path_weight=0.1,
         # 距离分桶仅用于训练监控诊断，不参与模型规则。
         enable_distance_bucket_metrics=True,
         distance_bucket_edges=(0.10, 0.5, 0.8),
@@ -129,6 +135,7 @@ bridgedp_exp_cfg = ExpCfg(
         n_prior_tokens=4,
         num_train_timesteps=10,
         num_inference_timesteps=10,
+        inference_eta=0.10,
         # use_origin_bridge_train: 训练时布朗桥起点固定为零向量（原点→目标）
         use_origin_bridge_train=False,
         use_prior_traj=False,

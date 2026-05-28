@@ -158,6 +158,7 @@ class BridgeDPNet(PreTrainedModel):
         self.goal_consistency_path_weight = il.get('goal_consistency_path_weight', 0.2)
         self.num_train_timesteps = il.get('num_train_timesteps', 100)
         self.num_inference_timesteps = il.get('num_inference_timesteps', 100)
+        self.inference_eta = float(il.get('inference_eta', 0.0))
         # 训练时是否使用“原点→目标”的布朗桥（前向加噪起点固定为零向量）
         self.use_origin_bridge_train = il.get('use_origin_bridge_train', False)
         # use_prior_traj=False 时完全忽略先验轨迹输入（等价于全零先验）
@@ -1014,6 +1015,7 @@ class BridgeDPNet(PreTrainedModel):
                     theta_g=theta_expanded,
                     origin=origin_repeated,
                     mode="pointgoal",
+                    eta=self.inference_eta,
                 )
 
             # Critic 排序
@@ -1122,6 +1124,7 @@ class BridgeDPNet(PreTrainedModel):
                 naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
                     mode="nogoal",
+                    eta=self.inference_eta,
                 )
 
             critic_values = self.predict_critic(naction, rgbd_embed, scale_embed)
