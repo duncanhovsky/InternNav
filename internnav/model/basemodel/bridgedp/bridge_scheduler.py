@@ -78,6 +78,7 @@ class BridgeScheduler:
         bridge_normal_sigma_ratio: float = 0.25,
         bridge_tangent_sigma_ratio: float = 0.03,
         bridge_theta_sigma_ratio: float = 0.05,
+        bridge_virtual_prefix_steps: float = 8.0,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
@@ -94,6 +95,7 @@ class BridgeScheduler:
         self.bridge_normal_sigma_ratio = bridge_normal_sigma_ratio
         self.bridge_tangent_sigma_ratio = bridge_tangent_sigma_ratio
         self.bridge_theta_sigma_ratio = bridge_theta_sigma_ratio
+        self.bridge_virtual_prefix_steps = float(bridge_virtual_prefix_steps)
 
         # 推理时使用的时间步序列（由 set_timesteps 设置）
         self._timesteps: Optional[torch.Tensor] = None
@@ -222,6 +224,18 @@ class BridgeScheduler:
             dtype=dtype,
         ).view(1, predict_size, 1)
 
+    def trajectory_noise_time(
+        self,
+        predict_size: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Return tau_i=(k+i)/(T+k) for point-goal bridge noise."""
+        k = max(self.bridge_virtual_prefix_steps, 0.0)
+        idx = torch.arange(1, predict_size + 1, device=device, dtype=dtype)
+        tau = (idx + k) / (float(predict_size) + k)
+        return tau.view(1, predict_size, 1)
+
     def _batch_endpoint(
         self,
         value: Optional[torch.Tensor],
@@ -313,7 +327,7 @@ class BridgeScheduler:
             tangent = torch.where(zero_dist.view(B, 1), default_tangent.view(1, 2), tangent)
             normal = torch.where(zero_dist.view(B, 1), default_normal.view(1, 2), normal)
 
-        tau = self.trajectory_time(T_pred, device, dtype)
+        tau = self.trajectory_noise_time(T_pred, device, dtype)
         p = self.direction_adaptive_exponent(theta_g).view(B, 1, 1)
         t_prod = (tau * (1.0 - tau)).clamp(min=0.0)
         shape_tau = (t_prod / 0.25).clamp(min=0.0).pow(p)
@@ -396,9 +410,8 @@ class BridgeScheduler:
         the far end, especially laterally and in heading.
         """
         B, T_pred, dim = shape
-        tau = self.trajectory_time(T_pred, device, dtype)
-
         if mode == "nogoal":
+            tau = self.trajectory_time(T_pred, device, dtype)
             grow = tau.pow(self.nogoal_sigma_power)
             end = torch.tensor(
                 [
@@ -431,6 +444,7 @@ class BridgeScheduler:
             if theta_g.shape[0] == 1 and B > 1:
                 theta_g = theta_g.expand(B)
 
+        tau = self.trajectory_noise_time(T_pred, device, dtype)
         p = self.direction_adaptive_exponent(theta_g).view(B, 1, 1)
         t_prod = (tau * (1.0 - tau)).clamp(min=0.0)
         var = (self.sigma_base ** 2) * (t_prod ** p) + (self.sigma_floor ** 2)

@@ -110,6 +110,7 @@ bridgedp_exp_cfg = ExpCfg(
         bridge_tangent_sigma_ratio=0.3,
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
         bridge_theta_sigma_ratio=0.6,
+        bridge_virtual_prefix_steps=8.0,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
         trajectory_norm_target_distance=2.0,
@@ -125,9 +126,10 @@ bridgedp_exp_cfg = ExpCfg(
         scale_rgbd_film_zero_init=True,
         scale_rgbd_film_use_layernorm=True,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
-        enable_goal_consistency_score=True,
-        goal_consistency_terminal_weight=1.0,
-        goal_consistency_path_weight=0.1,
+        enable_goal_consistency_score=False,
+        goal_consistency_terminal_weight=0.0,
+        goal_consistency_path_weight=0.0,
+        critic_near_threshold=0.2,
         # 距离分桶仅用于训练监控诊断，不参与模型规则。
         enable_distance_bucket_metrics=True,
         distance_bucket_edges=(0.10, 0.5, 0.8),
@@ -142,7 +144,7 @@ bridgedp_exp_cfg = ExpCfg(
         # ── 增量一致性正则超参数 ──
         # lambda_delta: 增量一致性正则权重
         #   action_loss = L_x0 + lambda_delta * L_delta
-        lambda_delta=0.1,
+        lambda_delta=0.0,
         # lambda_eps: x0 -> eps 反推噪声回归权重
         #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
         lambda_eps=0.0,

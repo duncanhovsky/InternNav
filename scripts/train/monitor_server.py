@@ -359,6 +359,7 @@ def get_training_config(exp_name='bridgedp_train'):
         'predict_size': 24,
         'sigma_base': 1.0,
         'sigma_goal': 0.1,
+        'bridge_virtual_prefix_steps': 8.0,
         'n_prior_tokens': 4,
         'report_to': 'tensorboard',
         'num_workers': 4,

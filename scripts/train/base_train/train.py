@@ -622,6 +622,7 @@ def main(config, model_class, model_config_class):
                 preload=config.il.preload,
                 random_digit=config.il.random_digit,
                 prior_sample=config.il.prior_sample,
+                critic_near_threshold=getattr(config.il, "critic_near_threshold", 0.2),
             )
         elif config.model_name == "flownav_static":
             train_dataset_data = FlowNav_Base_Datset(

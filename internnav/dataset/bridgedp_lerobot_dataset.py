@@ -77,6 +77,7 @@ class BridgeDP_Base_Dataset(Dataset):
         random_digit=False,
         prior_sample=False,
         sigma_base=1.0,
+        critic_near_threshold=0.2,
     ):
         """初始化数据集。仿照 NavDP_Base_Datset.__init__（L77-183）。
 
@@ -106,6 +107,7 @@ class BridgeDP_Base_Dataset(Dataset):
         self.action_dim = action_dim
         self.debug = debug
         self.sigma_base = sigma_base
+        self.critic_near_threshold = float(critic_near_threshold)
 
         # ── 动作空间归一化参数 ──────────────────────────────────────────
         # 将绝对坐标从 [0, ~10m] 归一化到 [-2, 2]，使训练目标尺度与 NavDP 的
@@ -605,11 +607,11 @@ class BridgeDP_Base_Dataset(Dataset):
                 .sum(axis=-1).min(axis=-1)
             )
             pred_critic = (
-                -5.0 * (pred_distance[action_indexes[:-1]] < 0.1).mean()
+                -5.0 * (pred_distance[action_indexes[:-1]] < self.critic_near_threshold).mean()
                 + 0.5 * (pred_distance[action_indexes][1:] - pred_distance[action_indexes][:-1]).sum()
             )
             augment_critic = (
-                -5.0 * (augment_distance[action_indexes[:-1]] < 0.1).mean()
+                -5.0 * (augment_distance[action_indexes[:-1]] < self.critic_near_threshold).mean()
                 + 0.5 * (augment_distance[action_indexes][1:] - augment_distance[action_indexes][:-1]).sum()
             )
         else:

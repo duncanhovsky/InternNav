@@ -153,6 +153,7 @@ class BridgeDPNet(PreTrainedModel):
         self.bridge_normal_sigma_ratio = il.get('bridge_normal_sigma_ratio', 0.25)
         self.bridge_tangent_sigma_ratio = il.get('bridge_tangent_sigma_ratio', 0.03)
         self.bridge_theta_sigma_ratio = il.get('bridge_theta_sigma_ratio', 0.05)
+        self.bridge_virtual_prefix_steps = il.get('bridge_virtual_prefix_steps', 8.0)
         self.enable_goal_consistency_score = il.get('enable_goal_consistency_score', False)
         self.goal_consistency_terminal_weight = il.get('goal_consistency_terminal_weight', 1.0)
         self.goal_consistency_path_weight = il.get('goal_consistency_path_weight', 0.2)
@@ -272,6 +273,7 @@ class BridgeDPNet(PreTrainedModel):
             bridge_normal_sigma_ratio=self.bridge_normal_sigma_ratio,
             bridge_tangent_sigma_ratio=self.bridge_tangent_sigma_ratio,
             bridge_theta_sigma_ratio=self.bridge_theta_sigma_ratio,
+            bridge_virtual_prefix_steps=self.bridge_virtual_prefix_steps,
         )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
