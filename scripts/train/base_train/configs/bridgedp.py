@@ -109,7 +109,7 @@ bridgedp_exp_cfg = ExpCfg(
         # 沿目标方向的前后扰动，增大会让轨迹更容易提前/滞后、拉长/回退。它会增加差异，但对绕障帮助不如 normal，太大会带来绕路、抖动或目标一致性下降。
         bridge_tangent_sigma_ratio=0.3,
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
-        bridge_theta_sigma_ratio=0.6,
+        bridge_theta_sigma_ratio=1.2,
         bridge_virtual_prefix_steps=8.0,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
