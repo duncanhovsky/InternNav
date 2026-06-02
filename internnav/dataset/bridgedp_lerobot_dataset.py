@@ -31,6 +31,8 @@ from scipy.interpolate import CubicSpline
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
+from internnav.dataset.bridgedp_critic import compute_bridge_dp_critic_score
+
 original_print = builtins.print
 
 
@@ -78,6 +80,12 @@ class BridgeDP_Base_Dataset(Dataset):
         prior_sample=False,
         sigma_base=1.0,
         critic_near_threshold=0.2,
+        critic_hard_threshold=0.1,
+        critic_soft_beta=4.0,
+        critic_max_weight=5.0,
+        critic_mean_weight=2.0,
+        critic_trend_weight=0.5,
+        critic_safe_score=2.0,
     ):
         """初始化数据集。仿照 NavDP_Base_Datset.__init__（L77-183）。
 
@@ -108,6 +116,12 @@ class BridgeDP_Base_Dataset(Dataset):
         self.debug = debug
         self.sigma_base = sigma_base
         self.critic_near_threshold = float(critic_near_threshold)
+        self.critic_hard_threshold = float(critic_hard_threshold)
+        self.critic_soft_beta = float(critic_soft_beta)
+        self.critic_max_weight = float(critic_max_weight)
+        self.critic_mean_weight = float(critic_mean_weight)
+        self.critic_trend_weight = float(critic_trend_weight)
+        self.critic_safe_score = float(critic_safe_score)
 
         # ── 动作空间归一化参数 ──────────────────────────────────────────
         # 将绝对坐标从 [0, ~10m] 归一化到 [-2, 2]，使训练目标尺度与 NavDP 的
@@ -596,27 +610,31 @@ class BridgeDP_Base_Dataset(Dataset):
         init_vector = target_local_points[1] - target_local_points[0]
         target_xyt_actions = self.xyz_to_xyt(target_local_points, init_vector)
         augment_xyt_actions = self.xyz_to_xyt(augment_local_points, init_vector)
-        # Critic 评分（与 NavDP 一致）
-        if trajectory_obstacle_points.shape[0] != 0:
-            pred_distance = (
-                np.abs(target_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
-                .sum(axis=-1).min(axis=-1)
-            )
-            augment_distance = (
-                np.abs(augment_world_points[:, np.newaxis, 0:2] - trajectory_obstacle_points[np.newaxis, :, 0:2])
-                .sum(axis=-1).min(axis=-1)
-            )
-            pred_critic = (
-                -5.0 * (pred_distance[action_indexes[:-1]] < self.critic_near_threshold).mean()
-                + 0.5 * (pred_distance[action_indexes][1:] - pred_distance[action_indexes][:-1]).sum()
-            )
-            augment_critic = (
-                -5.0 * (augment_distance[action_indexes[:-1]] < self.critic_near_threshold).mean()
-                + 0.5 * (augment_distance[action_indexes][1:] - augment_distance[action_indexes][:-1]).sum()
-            )
-        else:
-            pred_critic = 2.0
-            augment_critic = 2.0
+        # Critic label: L2 clearance + hard/soft risk + max/mean aggregation.
+        pred_critic = compute_bridge_dp_critic_score(
+            target_world_points,
+            trajectory_obstacle_points,
+            action_indexes,
+            hard_threshold=self.critic_hard_threshold,
+            soft_threshold=self.critic_near_threshold,
+            beta=self.critic_soft_beta,
+            max_weight=self.critic_max_weight,
+            mean_weight=self.critic_mean_weight,
+            trend_weight=self.critic_trend_weight,
+            safe_score=self.critic_safe_score,
+        )
+        augment_critic = compute_bridge_dp_critic_score(
+            augment_world_points,
+            trajectory_obstacle_points,
+            action_indexes,
+            hard_threshold=self.critic_hard_threshold,
+            soft_threshold=self.critic_near_threshold,
+            beta=self.critic_soft_beta,
+            max_weight=self.critic_max_weight,
+            mean_weight=self.critic_mean_weight,
+            trend_weight=self.critic_trend_weight,
+            safe_score=self.critic_safe_score,
+        )
 
         # point_goal 已在下方 "Bridge-DP 核心差异点" 中重新赋值为导航目标
         image_goal = np.concatenate((

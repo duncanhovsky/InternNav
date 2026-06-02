@@ -623,6 +623,12 @@ def main(config, model_class, model_config_class):
                 random_digit=config.il.random_digit,
                 prior_sample=config.il.prior_sample,
                 critic_near_threshold=getattr(config.il, "critic_near_threshold", 0.2),
+                critic_hard_threshold=getattr(config.il, "critic_hard_threshold", 0.1),
+                critic_soft_beta=getattr(config.il, "critic_soft_beta", 4.0),
+                critic_max_weight=getattr(config.il, "critic_max_weight", 5.0),
+                critic_mean_weight=getattr(config.il, "critic_mean_weight", 2.0),
+                critic_trend_weight=getattr(config.il, "critic_trend_weight", 0.5),
+                critic_safe_score=getattr(config.il, "critic_safe_score", 2.0),
             )
         elif config.model_name == "flownav_static":
             train_dataset_data = FlowNav_Base_Datset(
