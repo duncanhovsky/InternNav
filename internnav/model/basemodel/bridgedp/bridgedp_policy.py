@@ -154,6 +154,13 @@ class BridgeDPNet(PreTrainedModel):
         self.bridge_tangent_sigma_ratio = il.get('bridge_tangent_sigma_ratio', 0.03)
         self.bridge_theta_sigma_ratio = il.get('bridge_theta_sigma_ratio', 0.05)
         self.bridge_virtual_prefix_steps = il.get('bridge_virtual_prefix_steps', 8.0)
+        self.enable_bridge_anchor_sampling = il.get('enable_bridge_anchor_sampling', False)
+        self.bridge_anchor_train_prob = float(il.get('bridge_anchor_train_prob', 0.0))
+        self.bridge_anchor_keep_original_sample = il.get('bridge_anchor_keep_original_sample', True)
+        self.bridge_anchor_angle_std = float(il.get('bridge_anchor_angle_std', 0.0))
+        self.bridge_anchor_angle_max = float(il.get('bridge_anchor_angle_max', 0.0))
+        self.bridge_anchor_uniform_prob = float(il.get('bridge_anchor_uniform_prob', 0.0))
+        self.bridge_anchor_edge_prob = float(il.get('bridge_anchor_edge_prob', 0.0))
         self.enable_goal_consistency_score = il.get('enable_goal_consistency_score', False)
         self.goal_consistency_terminal_weight = il.get('goal_consistency_terminal_weight', 1.0)
         self.goal_consistency_path_weight = il.get('goal_consistency_path_weight', 0.2)
@@ -274,6 +281,10 @@ class BridgeDPNet(PreTrainedModel):
             bridge_tangent_sigma_ratio=self.bridge_tangent_sigma_ratio,
             bridge_theta_sigma_ratio=self.bridge_theta_sigma_ratio,
             bridge_virtual_prefix_steps=self.bridge_virtual_prefix_steps,
+            bridge_anchor_angle_std=self.bridge_anchor_angle_std,
+            bridge_anchor_angle_max=self.bridge_anchor_angle_max,
+            bridge_anchor_uniform_prob=self.bridge_anchor_uniform_prob,
+            bridge_anchor_edge_prob=self.bridge_anchor_edge_prob,
         )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
@@ -688,11 +699,36 @@ class BridgeDPNet(PreTrainedModel):
         # ── 布朗桥加噪（x₀-prediction 版本）──────────────────────────────
         # ng/mg 各自独立采样时间步，增加训练多样性（与 NavDP 一致）
         # sample_bridge_noise 返回 x0（干净轨迹）作为训练目标
+        mg_bridge_goal = tensor_point_goal
+        mg_bridge_theta_g = tensor_theta_g
+        if self.enable_bridge_anchor_sampling and self.bridge_anchor_train_prob > 0.0:
+            origin_train = torch.zeros_like(tensor_point_goal)
+            sampled_goal, sampled_theta = self.bridge_scheduler.sample_bridge_anchor_goals(
+                tensor_point_goal,
+                origin_train,
+                sample_num=1,
+                keep_first_sample=False,
+            )
+            if self.bridge_anchor_train_prob < 1.0:
+                use_anchor = (
+                    torch.rand(tensor_point_goal.shape[0], device=device)
+                    < self.bridge_anchor_train_prob
+                )
+                mg_bridge_goal = torch.where(
+                    use_anchor.view(-1, 1),
+                    sampled_goal,
+                    tensor_point_goal,
+                )
+                mg_bridge_theta_g = torch.where(use_anchor, sampled_theta, tensor_theta_g)
+            else:
+                mg_bridge_goal = sampled_goal
+                mg_bridge_theta_g = sampled_theta
+
         ng_x0_target, ng_time_embed, ng_noisy_embed, ng_timesteps, ng_noisy_action, ng_bridge_mu, ng_bridge_sigma, ng_s_norm = self.sample_bridge_noise(
             tensor_nogoal_actions, goal=None, theta_g=None, mode="nogoal"
         )
         mg_x0_target, mg_time_embed, mg_noisy_embed, mg_timesteps, mg_noisy_action, mg_bridge_mu, mg_bridge_sigma, mg_s_norm = self.sample_bridge_noise(
-            tensor_label_actions, goal=tensor_point_goal, theta_g=tensor_theta_g, mode="pointgoal"
+            tensor_label_actions, goal=mg_bridge_goal, theta_g=mg_bridge_theta_g, mode="pointgoal"
         )
 
         # ── 视觉编码（与 NavDP 相同）──────────────────────────────────────
@@ -991,18 +1027,30 @@ class BridgeDPNet(PreTrainedModel):
             # 输出航点不包含起点，覆盖 (origin, goal]，与弧长重采样监督一致。
             B = tensor_point_goal_n.shape[0]
             origin = torch.zeros_like(tensor_point_goal_n)  # 起点 = 机器人当前位置（归一化空间中的原点）
+            goal_repeated = tensor_point_goal_n.repeat(sample_num, 1)
+            origin_repeated = origin.repeat(sample_num, 1)
+            theta_expanded = tensor_theta_g.repeat(sample_num)
+            bridge_goal_repeated = goal_repeated
+            bridge_theta_expanded = theta_expanded
+            if self.enable_bridge_anchor_sampling:
+                bridge_goal_repeated, bridge_theta_expanded = (
+                    self.bridge_scheduler.sample_bridge_anchor_goals(
+                        tensor_point_goal_n,
+                        origin,
+                        sample_num=sample_num,
+                        keep_first_sample=self.bridge_anchor_keep_original_sample,
+                    )
+                )
             naction = self.bridge_scheduler.sample_initial_noise_ordered(
-                goal=tensor_point_goal_n.repeat(sample_num, 1),
-                origin=origin.repeat(sample_num, 1),
+                goal=bridge_goal_repeated,
+                origin=origin_repeated,
                 shape=(sample_num * B, self.predict_size, 3),
                 device=self._device,
             )
 
-            # 去噪时 goal 仍为导航目标（保持桥的一致性）
+            # 去噪时 scheduler 使用 bridge anchor；真实 pointgoal 保留给条件 token
+            # 和后续 goal-consistency score。
             self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
-            goal_repeated = tensor_point_goal_n.repeat(sample_num, 1)
-            origin_repeated = origin.repeat(sample_num, 1)
-            theta_expanded = tensor_theta_g.repeat(sample_num)
             if self.enable_trajectory_normalization:
                 distance_repeated = goal_distance_m.repeat(sample_num)
 
@@ -1013,8 +1061,8 @@ class BridgeDPNet(PreTrainedModel):
                 )
                 naction = self.bridge_scheduler.step_trajectory(
                     x0_pred, naction, k,
-                    goal=goal_repeated,
-                    theta_g=theta_expanded,
+                    goal=bridge_goal_repeated,
+                    theta_g=bridge_theta_expanded,
                     origin=origin_repeated,
                     mode="pointgoal",
                     eta=self.inference_eta,

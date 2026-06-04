@@ -105,12 +105,37 @@ bridgedp_exp_cfg = ExpCfg(
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
         # 横向扰动，最直接增加左右绕障、多路径绕行的可能性。这个增大最有利于绕障多样性。
-        bridge_normal_sigma_ratio=2.0,
+        bridge_normal_sigma_ratio=6.0,
         # 沿目标方向的前后扰动，增大会让轨迹更容易提前/滞后、拉长/回退。它会增加差异，但对绕障帮助不如 normal，太大会带来绕路、抖动或目标一致性下降。
         bridge_tangent_sigma_ratio=0.3,
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
         bridge_theta_sigma_ratio=1.2,
         bridge_virtual_prefix_steps=8.0,
+        # v1.0.3: PointGoal bridge anchor sampling。真实 pointgoal 仍作为任务目标；
+        # sampled anchor 只用于布朗桥均值、方差坐标系、推理初始化和反向 step。
+        enable_bridge_anchor_sampling=True,
+        # 训练时使用 sampled anchor 的样本比例；0 表示训练完全保持原行为。
+        bridge_anchor_train_prob=0.5,
+        # 推理候选中保留第一组原始 pointgoal anchor，保证有无偏移候选可回退。
+        bridge_anchor_keep_original_sample=True,
+
+        # anchor 角度扰动：中心候选使用截断高斯，边缘候选使用左右成对的反高斯/edge-biased 扰动。
+        # 表示主要采样分布的高斯标准差，单位是 rad。
+        bridge_anchor_angle_std=0.25,
+        # 这是硬限制。只要该值大于 0，扰动角会被限制在 [-max, max] 范围内。过大可能导致训练不稳定，过小可能限制多样性。
+        bridge_anchor_angle_max=0.65,
+        # 旧版 uniform 混合，默认关闭；需要完全随机覆盖边界时再打开。
+        bridge_anchor_uniform_prob=0.0,
+        # 一半扰动候选改用 edge-biased 分布；推理多候选时按左右成对分配，训练 sample_num=1 时按 batch 概率生效。
+        bridge_anchor_edge_prob=0.5,
+
+        # v1.0.3: 监督重采样模式。
+        # arc_length 保持旧行为；projection 强制按起终点 chord 投影均匀；
+        # hybrid_projection 在投影单调且覆盖充分时使用 projection，否则回退 arc_length。
+        trajectory_resample_mode="hybrid_projection",
+        trajectory_projection_monotonic_eps=1e-4,
+        trajectory_projection_min_span=0.80,
+        trajectory_projection_flat_lateral_eps=1e-3,
         # PointGoal 样本级轨迹尺度归一化：有效轨迹统一到固定终点距离的形状空间。
         enable_trajectory_normalization=True,
         trajectory_norm_target_distance=2.0,
@@ -126,9 +151,9 @@ bridgedp_exp_cfg = ExpCfg(
         scale_rgbd_film_zero_init=True,
         scale_rgbd_film_use_layernorm=True,
         # 推理候选排序：critic 分数减去目标一致性惩罚。
-        enable_goal_consistency_score=False,
-        goal_consistency_terminal_weight=0.0,
-        goal_consistency_path_weight=0.0,
+        enable_goal_consistency_score=True,
+        goal_consistency_terminal_weight=1.0,
+        goal_consistency_path_weight=0.05,
         critic_near_threshold=0.3,
         critic_hard_threshold=0.1,
         critic_soft_beta=4.0,

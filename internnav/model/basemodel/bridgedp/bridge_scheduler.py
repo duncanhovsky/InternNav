@@ -23,7 +23,7 @@
 """
 
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -79,6 +79,10 @@ class BridgeScheduler:
         bridge_tangent_sigma_ratio: float = 0.03,
         bridge_theta_sigma_ratio: float = 0.05,
         bridge_virtual_prefix_steps: float = 8.0,
+        bridge_anchor_angle_std: float = 0.0,
+        bridge_anchor_angle_max: float = 0.0,
+        bridge_anchor_uniform_prob: float = 0.0,
+        bridge_anchor_edge_prob: float = 0.0,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
@@ -96,6 +100,14 @@ class BridgeScheduler:
         self.bridge_tangent_sigma_ratio = bridge_tangent_sigma_ratio
         self.bridge_theta_sigma_ratio = bridge_theta_sigma_ratio
         self.bridge_virtual_prefix_steps = float(bridge_virtual_prefix_steps)
+        self.bridge_anchor_angle_std = float(max(bridge_anchor_angle_std, 0.0))
+        self.bridge_anchor_angle_max = float(max(bridge_anchor_angle_max, 0.0))
+        self.bridge_anchor_uniform_prob = float(
+            min(max(bridge_anchor_uniform_prob, 0.0), 1.0)
+        )
+        self.bridge_anchor_edge_prob = float(
+            min(max(bridge_anchor_edge_prob, 0.0), 1.0)
+        )
 
         # 推理时使用的时间步序列（由 set_timesteps 设置）
         self._timesteps: Optional[torch.Tensor] = None
@@ -255,6 +267,166 @@ class BridgeScheduler:
         if value.shape[0] == 1 and batch_size > 1:
             value = value.expand(batch_size, -1)
         return value
+
+    def _edge_anchor_count(self, available_samples: int) -> int:
+        if available_samples <= 0 or self.bridge_anchor_edge_prob <= 0.0:
+            return 0
+        count = int(math.ceil(float(available_samples) * self.bridge_anchor_edge_prob))
+        count = min(max(count, 0), available_samples)
+        if available_samples > 1 and count == 1:
+            count = 2
+        if count % 2 == 1 and count < available_samples:
+            count += 1
+        elif count % 2 == 1 and count > 1:
+            count -= 1
+        return min(count, available_samples)
+
+    def _sample_edge_anchor_delta(
+        self,
+        num: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        signs: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if num <= 0 or self.bridge_anchor_angle_max <= 0.0:
+            return torch.zeros(num, device=device, dtype=dtype)
+
+        angle_max = self.bridge_anchor_angle_max
+        angle_std = self.bridge_anchor_angle_std
+        magnitude = torch.empty(num, device=device, dtype=dtype)
+
+        if angle_std > 0.0:
+            max_accept = 1.0 - math.exp(-(angle_max ** 2) / (2.0 * angle_std ** 2))
+            filled = torch.zeros(num, device=device, dtype=torch.bool)
+            for _ in range(16):
+                remaining = (~filled).nonzero(as_tuple=False).view(-1)
+                if remaining.numel() == 0:
+                    break
+                candidate = torch.rand(remaining.numel(), device=device, dtype=dtype) * angle_max
+                accept_prob = (
+                    1.0 - torch.exp(-(candidate ** 2) / (2.0 * angle_std ** 2))
+                ) / max(max_accept, 1e-8)
+                accepted = torch.rand(remaining.numel(), device=device) < accept_prob
+                if accepted.any():
+                    accepted_idx = remaining[accepted]
+                    magnitude[accepted_idx] = candidate[accepted]
+                    filled[accepted_idx] = True
+            if (~filled).any():
+                fallback_count = int((~filled).sum().item())
+                magnitude[~filled] = angle_max * torch.sqrt(
+                    torch.rand(fallback_count, device=device, dtype=dtype)
+                )
+        else:
+            magnitude = angle_max * torch.sqrt(torch.rand(num, device=device, dtype=dtype))
+
+        if signs is None:
+            signs = torch.where(
+                torch.rand(num, device=device) < 0.5,
+                torch.full((num,), -1.0, device=device, dtype=dtype),
+                torch.ones(num, device=device, dtype=dtype),
+            )
+        else:
+            signs = signs.to(device=device, dtype=dtype).view(num)
+        return magnitude * signs
+
+    def sample_bridge_anchor_goals(
+        self,
+        goal: torch.Tensor,
+        origin: Optional[torch.Tensor] = None,
+        sample_num: int = 1,
+        keep_first_sample: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sample radius-preserving bridge anchors around the true point goal.
+
+        The returned anchor is only intended for the Brownian-bridge mean/noise
+        geometry. The task goal used by the policy condition and goal-consistency
+        score should remain the original point goal.
+        """
+        if sample_num < 1:
+            raise ValueError("sample_num must be >= 1")
+
+        if goal.dim() == 1:
+            base_batch = 1
+        else:
+            base_batch = goal.shape[0]
+        dim = goal.shape[-1]
+        device = goal.device
+        dtype = goal.dtype
+        goal_b = self._batch_endpoint(goal, base_batch, dim, device, dtype)
+        origin_b = self._batch_endpoint(origin, base_batch, dim, device, dtype)
+
+        goal_rep = goal_b.repeat(sample_num, 1)
+        origin_rep = origin_b.repeat(sample_num, 1)
+        vec_xy = goal_rep[:, :2] - origin_rep[:, :2]
+        radius = torch.norm(vec_xy, dim=-1)
+        base_theta = torch.atan2(vec_xy[:, 1], vec_xy[:, 0])
+
+        if self.bridge_anchor_angle_max <= 0.0 and self.bridge_anchor_angle_std <= 0.0:
+            return goal_rep, base_theta
+
+        num = goal_rep.shape[0]
+        delta = torch.zeros(num, device=device, dtype=dtype)
+        if self.bridge_anchor_angle_std > 0.0:
+            delta = torch.randn(num, device=device, dtype=dtype) * self.bridge_anchor_angle_std
+        if self.bridge_anchor_angle_max > 0.0:
+            delta = delta.clamp(
+                min=-self.bridge_anchor_angle_max,
+                max=self.bridge_anchor_angle_max,
+            )
+            if self.bridge_anchor_uniform_prob > 0.0:
+                uniform_delta = (
+                    torch.rand(num, device=device, dtype=dtype) * 2.0 - 1.0
+                ) * self.bridge_anchor_angle_max
+                use_uniform = (
+                    torch.rand(num, device=device) < self.bridge_anchor_uniform_prob
+                )
+                delta = torch.where(use_uniform, uniform_delta, delta)
+
+        if self.bridge_anchor_edge_prob > 0.0 and self.bridge_anchor_angle_max > 0.0:
+            if sample_num > 1:
+                start_sample = 1 if keep_first_sample else 0
+                edge_count = self._edge_anchor_count(sample_num - start_sample)
+                if edge_count > 0:
+                    delta_view = delta.view(sample_num, base_batch)
+                    edge_signs = torch.where(
+                        torch.arange(edge_count, device=device) % 2 == 0,
+                        torch.full((edge_count,), -1.0, device=device, dtype=dtype),
+                        torch.ones(edge_count, device=device, dtype=dtype),
+                    )
+                    edge_signs = edge_signs.view(edge_count, 1).expand(edge_count, base_batch)
+                    edge_delta = self._sample_edge_anchor_delta(
+                        edge_count * base_batch,
+                        device,
+                        dtype,
+                        signs=edge_signs.reshape(-1),
+                    ).view(edge_count, base_batch)
+                    delta_view[-edge_count:, :] = edge_delta
+                    delta = delta_view.reshape(-1)
+            else:
+                use_edge = torch.rand(num, device=device) < self.bridge_anchor_edge_prob
+                if use_edge.any():
+                    edge_idx = use_edge.nonzero(as_tuple=False).view(-1)
+                    edge_signs = torch.where(
+                        torch.arange(edge_idx.numel(), device=device) % 2 == 0,
+                        torch.full((edge_idx.numel(),), -1.0, device=device, dtype=dtype),
+                        torch.ones(edge_idx.numel(), device=device, dtype=dtype),
+                    )
+                    delta[edge_idx] = self._sample_edge_anchor_delta(
+                        edge_idx.numel(),
+                        device,
+                        dtype,
+                        signs=edge_signs,
+                    )
+
+        if keep_first_sample and sample_num > 1:
+            delta[:base_batch] = 0.0
+
+        anchor_theta = base_theta + delta
+        anchor = goal_rep.clone()
+        if dim >= 2:
+            anchor[:, 0] = origin_rep[:, 0] + radius * torch.cos(anchor_theta)
+            anchor[:, 1] = origin_rep[:, 1] + radius * torch.sin(anchor_theta)
+        return anchor, anchor_theta
 
     def bridge_mean_ordered(
         self,
