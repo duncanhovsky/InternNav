@@ -71,6 +71,18 @@ class BridgeDPTrainer(BaseTrainer):
         self.drop_short_trajectory_samples = (
             getattr(il_cfg, 'drop_short_trajectory_samples', True) if il_cfg else True
         )
+        self.trajectory_resample_mode = (
+            getattr(il_cfg, 'trajectory_resample_mode', 'arc_length') if il_cfg else 'arc_length'
+        )
+        self.trajectory_projection_monotonic_eps = float(
+            getattr(il_cfg, 'trajectory_projection_monotonic_eps', 1e-4) if il_cfg else 1e-4
+        )
+        self.trajectory_projection_min_span = float(
+            getattr(il_cfg, 'trajectory_projection_min_span', 0.80) if il_cfg else 0.80
+        )
+        self.trajectory_projection_flat_lateral_eps = float(
+            getattr(il_cfg, 'trajectory_projection_flat_lateral_eps', 1e-3) if il_cfg else 1e-3
+        )
 
         if hasattr(self.model, 'module'):
             self.model_device = self.model.module.device
@@ -164,6 +176,17 @@ class BridgeDPTrainer(BaseTrainer):
         include_start: bool = False,
     ) -> torch.Tensor:
         """用 x/y 弧长参数在当前 GPU 上把一条原始轨迹重采样为指定数量的点。"""
+        mode = getattr(self, "trajectory_resample_mode", "arc_length")
+        if mode in ("projection", "hybrid_projection"):
+            sampled = self._resample_one_trajectory_projection_gpu(
+                traj,
+                num_points,
+                include_start=include_start,
+                strict=(mode == "hybrid_projection"),
+            )
+            if sampled is not None:
+                return sampled
+
         traj = traj[:, :3]
         if traj.shape[0] == 0:
             return torch.zeros((num_points, 3), device=traj.device, dtype=traj.dtype)
@@ -189,6 +212,75 @@ class BridgeDPTrainer(BaseTrainer):
         # 若末端是重复静止点，用最后一帧的 theta 覆盖同弧长末端，保留 GT 姿态监督。
         y[-1] = curve[-1]
         s = s / total
+
+        q_start = 0.0 if include_start else 1.0 / float(num_points)
+        q = torch.linspace(q_start, 1.0, num_points, device=traj.device, dtype=traj.dtype)
+        sampled = self._natural_cubic_eval(s, y, q)
+        sampled[:, 2] = self._wrap_to_pi(sampled[:, 2])
+        return sampled
+
+    def _resample_one_trajectory_projection_gpu(
+        self,
+        traj: torch.Tensor,
+        num_points: int,
+        include_start: bool = False,
+        strict: bool = True,
+    ) -> torch.Tensor:
+        """Resample by uniform projection progress on the origin-to-end chord."""
+        traj = traj[:, :3]
+        if traj.shape[0] == 0:
+            return torch.zeros((num_points, 3), device=traj.device, dtype=traj.dtype)
+        if traj.shape[0] == 1:
+            return traj[-1:].expand(num_points, -1)
+
+        theta_unwrapped = self._unwrap_angles(traj[:, 2])
+        curve = torch.cat([traj[:, :2], theta_unwrapped.unsqueeze(-1)], dim=-1)
+        end_xy = curve[-1, :2]
+        chord_sq = torch.dot(end_xy, end_xy)
+        if chord_sq <= 1e-8:
+            return None
+
+        origin = torch.zeros((1, 3), device=traj.device, dtype=traj.dtype)
+        curve = torch.cat([origin, curve], dim=0)
+        progress = torch.matmul(curve[:, :2], end_xy) / chord_sq
+        progress = progress.clamp(0.0, 1.0)
+        progress[-1] = 1.0
+
+        diffs = progress[1:] - progress[:-1]
+        monotonic_eps = getattr(self, "trajectory_projection_monotonic_eps", 1e-4)
+        if strict and (diffs < -monotonic_eps).any():
+            return None
+        flat_lateral_eps = getattr(self, "trajectory_projection_flat_lateral_eps", 1e-3)
+        flat_progress = diffs.abs() <= monotonic_eps
+        segment_xy = torch.norm(curve[1:, :2] - curve[:-1, :2], dim=-1)
+        if strict and (flat_progress & (segment_xy > flat_lateral_eps)).any():
+            return None
+        min_span = getattr(self, "trajectory_projection_min_span", 0.80)
+        if strict and (progress.max() - progress.min()) < min_span:
+            return None
+
+        keep = torch.cat([
+            torch.ones(1, device=traj.device, dtype=torch.bool),
+            diffs > monotonic_eps,
+        ])
+        keep[-1] = True
+        s = progress[keep]
+        y = curve[keep]
+        if s.shape[0] < 2:
+            return None
+        if (s[1:] - s[:-1] <= 0.0).any():
+            unique_keep = torch.cat([
+                torch.ones(1, device=traj.device, dtype=torch.bool),
+                (s[1:] - s[:-1]) > monotonic_eps,
+            ])
+            if not unique_keep[-1]:
+                unique_keep[-2] = False
+                unique_keep[-1] = True
+            s = s[unique_keep]
+            y = y[unique_keep]
+        if s.shape[0] < 2:
+            return None
+        y[-1] = curve[-1]
 
         q_start = 0.0 if include_start else 1.0 / float(num_points)
         q = torch.linspace(q_start, 1.0, num_points, device=traj.device, dtype=traj.dtype)
