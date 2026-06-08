@@ -83,6 +83,13 @@ class BridgeScheduler:
         bridge_anchor_angle_max: float = 0.0,
         bridge_anchor_uniform_prob: float = 0.0,
         bridge_anchor_edge_prob: float = 0.0,
+        bridge_noise_edge_prob: float = 0.0,
+        bridge_noise_edge_train_prob: float = 0.0,
+        bridge_noise_edge_warmup_steps: float = 4.0,
+        bridge_noise_edge_terminal_guard_steps: float = 3.0,
+        bridge_noise_edge_normal_max: float = 1.0,
+        bridge_noise_edge_tangent_scale: float = 0.15,
+        bridge_noise_edge_theta_scale: float = 0.25,
     ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.sigma_base = sigma_base
@@ -108,6 +115,17 @@ class BridgeScheduler:
         self.bridge_anchor_edge_prob = float(
             min(max(bridge_anchor_edge_prob, 0.0), 1.0)
         )
+        self.bridge_noise_edge_prob = float(min(max(bridge_noise_edge_prob, 0.0), 1.0))
+        self.bridge_noise_edge_train_prob = float(
+            min(max(bridge_noise_edge_train_prob, 0.0), 1.0)
+        )
+        self.bridge_noise_edge_warmup_steps = float(max(bridge_noise_edge_warmup_steps, 0.0))
+        self.bridge_noise_edge_terminal_guard_steps = float(
+            max(bridge_noise_edge_terminal_guard_steps, 0.0)
+        )
+        self.bridge_noise_edge_normal_max = float(max(bridge_noise_edge_normal_max, 0.0))
+        self.bridge_noise_edge_tangent_scale = float(max(bridge_noise_edge_tangent_scale, 0.0))
+        self.bridge_noise_edge_theta_scale = float(max(bridge_noise_edge_theta_scale, 0.0))
 
         # 推理时使用的时间步序列（由 set_timesteps 设置）
         self._timesteps: Optional[torch.Tensor] = None
@@ -268,10 +286,10 @@ class BridgeScheduler:
             value = value.expand(batch_size, -1)
         return value
 
-    def _edge_anchor_count(self, available_samples: int) -> int:
-        if available_samples <= 0 or self.bridge_anchor_edge_prob <= 0.0:
+    def _edge_sample_count(self, available_samples: int, prob: float) -> int:
+        if available_samples <= 0 or prob <= 0.0:
             return 0
-        count = int(math.ceil(float(available_samples) * self.bridge_anchor_edge_prob))
+        count = int(math.ceil(float(available_samples) * prob))
         count = min(max(count, 0), available_samples)
         if available_samples > 1 and count == 1:
             count = 2
@@ -280,6 +298,40 @@ class BridgeScheduler:
         elif count % 2 == 1 and count > 1:
             count -= 1
         return min(count, available_samples)
+
+    def _edge_anchor_count(self, available_samples: int) -> int:
+        return self._edge_sample_count(available_samples, self.bridge_anchor_edge_prob)
+
+    def _sample_edge_unit_magnitude(
+        self,
+        num: int,
+        max_value: float,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if num <= 0 or max_value <= 0.0:
+            return torch.zeros(num, device=device, dtype=dtype)
+
+        max_accept = 1.0 - math.exp(-(max_value ** 2) / 2.0)
+        magnitude = torch.empty(num, device=device, dtype=dtype)
+        filled = torch.zeros(num, device=device, dtype=torch.bool)
+        for _ in range(16):
+            remaining = (~filled).nonzero(as_tuple=False).view(-1)
+            if remaining.numel() == 0:
+                break
+            candidate = torch.rand(remaining.numel(), device=device, dtype=dtype) * max_value
+            accept_prob = (1.0 - torch.exp(-(candidate ** 2) / 2.0)) / max(max_accept, 1e-8)
+            accepted = torch.rand(remaining.numel(), device=device) < accept_prob
+            if accepted.any():
+                accepted_idx = remaining[accepted]
+                magnitude[accepted_idx] = candidate[accepted]
+                filled[accepted_idx] = True
+        if (~filled).any():
+            fallback_count = int((~filled).sum().item())
+            magnitude[~filled] = max_value * torch.sqrt(
+                torch.rand(fallback_count, device=device, dtype=dtype)
+            )
+        return magnitude
 
     def _sample_edge_anchor_delta(
         self,
@@ -328,6 +380,115 @@ class BridgeScheduler:
         else:
             signs = signs.to(device=device, dtype=dtype).view(num)
         return magnitude * signs
+
+    def _edge_trajectory_gate(
+        self,
+        predict_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        idx = torch.arange(predict_size, device=device, dtype=dtype)
+        gate = torch.ones(predict_size, device=device, dtype=dtype)
+
+        if self.bridge_noise_edge_warmup_steps > 0.0:
+            start = (idx / self.bridge_noise_edge_warmup_steps).clamp(0.0, 1.0)
+            start = start * start * (3.0 - 2.0 * start)
+            gate = gate * start
+
+        if self.bridge_noise_edge_terminal_guard_steps > 0.0:
+            end = ((predict_size - 1 - idx) / self.bridge_noise_edge_terminal_guard_steps).clamp(0.0, 1.0)
+            end = end * end * (3.0 - 2.0 * end)
+            gate = gate * end
+
+        if predict_size > 0:
+            gate[-1] = 0.0
+        return gate.view(1, predict_size)
+
+    def _edge_noise_indices_and_signs(
+        self,
+        total: int,
+        edge_prob: float,
+        sample_num: int,
+        keep_first_sample: bool,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if total <= 0 or edge_prob <= 0.0:
+            empty_idx = torch.empty(0, device=device, dtype=torch.long)
+            empty_sign = torch.empty(0, device=device, dtype=dtype)
+            return empty_idx, empty_sign
+
+        if sample_num > 1 and total % sample_num == 0:
+            base_batch = total // sample_num
+            start_sample = 1 if keep_first_sample else 0
+            edge_count = self._edge_sample_count(sample_num - start_sample, edge_prob)
+            if edge_count <= 0:
+                empty_idx = torch.empty(0, device=device, dtype=torch.long)
+                empty_sign = torch.empty(0, device=device, dtype=dtype)
+                return empty_idx, empty_sign
+
+            groups = torch.arange(sample_num - edge_count, sample_num, device=device)
+            offsets = torch.arange(base_batch, device=device)
+            indices = (groups.view(-1, 1) * base_batch + offsets.view(1, -1)).reshape(-1)
+            group_signs = torch.where(
+                torch.arange(edge_count, device=device) % 2 == 0,
+                torch.full((edge_count,), -1.0, device=device, dtype=dtype),
+                torch.ones(edge_count, device=device, dtype=dtype),
+            )
+            signs = group_signs.view(-1, 1).expand(edge_count, base_batch).reshape(-1)
+            return indices.long(), signs
+
+        use_edge = torch.rand(total, device=device) < edge_prob
+        indices = use_edge.nonzero(as_tuple=False).view(-1)
+        if indices.numel() == 0:
+            return indices.long(), torch.empty(0, device=device, dtype=dtype)
+        signs = torch.where(
+            torch.arange(indices.numel(), device=device) % 2 == 0,
+            torch.full((indices.numel(),), -1.0, device=device, dtype=dtype),
+            torch.ones(indices.numel(), device=device, dtype=dtype),
+        )
+        return indices.long(), signs
+
+    def _apply_edge_bridge_noise_eps(
+        self,
+        eps: torch.Tensor,
+        edge_prob: float,
+        sample_num: int = 1,
+        keep_first_sample: bool = False,
+    ) -> torch.Tensor:
+        B, T_pred, dim = eps.shape
+        if edge_prob <= 0.0 or self.bridge_noise_edge_normal_max <= 0.0 or dim < 2:
+            return eps
+
+        indices, signs = self._edge_noise_indices_and_signs(
+            B,
+            edge_prob,
+            sample_num,
+            keep_first_sample,
+            eps.device,
+            eps.dtype,
+        )
+        if indices.numel() == 0:
+            return eps
+
+        eps = eps.clone()
+        gate = self._edge_trajectory_gate(T_pred, eps.device, eps.dtype)
+        magnitude = self._sample_edge_unit_magnitude(
+            indices.numel(),
+            self.bridge_noise_edge_normal_max,
+            eps.device,
+            eps.dtype,
+        ).view(-1, 1)
+        signed_mag = signs.view(-1, 1) * magnitude
+
+        eps[indices, :, 1] = signed_mag * gate
+        if dim >= 1 and self.bridge_noise_edge_tangent_scale > 0.0:
+            tangent_mag = torch.randn(indices.numel(), 1, device=eps.device, dtype=eps.dtype)
+            tangent_mag = tangent_mag * magnitude * self.bridge_noise_edge_tangent_scale
+            eps[indices, :, 0] = tangent_mag * gate
+        if dim >= 3 and self.bridge_noise_edge_theta_scale > 0.0:
+            eps[indices, :, 2] = signed_mag * self.bridge_noise_edge_theta_scale * gate
+        return eps
 
     def sample_bridge_anchor_goals(
         self,
@@ -530,6 +691,9 @@ class BridgeScheduler:
         theta_g: Optional[torch.Tensor] = None,
         origin: Optional[torch.Tensor] = None,
         noise: Optional[torch.Tensor] = None,
+        edge_prob: float = 0.0,
+        sample_num: int = 1,
+        keep_first_sample: bool = False,
     ):
         """Sample scale-similar tangent/normal bridge noise in global x/y/theta."""
         B, T_pred, dim = shape
@@ -547,6 +711,12 @@ class BridgeScheduler:
             eps = torch.randn(shape, device=device, dtype=dtype)
         else:
             eps = noise.to(device=device, dtype=dtype)
+        eps = self._apply_edge_bridge_noise_eps(
+            eps,
+            edge_prob=edge_prob,
+            sample_num=sample_num,
+            keep_first_sample=keep_first_sample,
+        )
 
         bridge_noise = torch.zeros(shape, device=device, dtype=dtype)
         if dim >= 2:
@@ -661,6 +831,7 @@ class BridgeScheduler:
                 theta_g=theta_g,
                 origin=origin,
                 noise=noise,
+                edge_prob=self.bridge_noise_edge_train_prob,
             )
             beta = s_norm.clamp(min=1e-6)
             noisy = (1.0 - s_norm) * x0 + s_norm * mu + beta * bridge_noise
@@ -912,6 +1083,8 @@ class BridgeScheduler:
         origin: torch.Tensor,
         shape: tuple,
         device: torch.device,
+        sample_num: int = 1,
+        keep_first_sample: bool = False,
     ) -> torch.Tensor:
         """有序区间初始化：24 个航点从起点到导航目标线性分布，方差来自布朗桥。
 
@@ -945,6 +1118,9 @@ class BridgeScheduler:
                 goal.dtype,
                 goal=goal,
                 origin=origin,
+                edge_prob=self.bridge_noise_edge_prob,
+                sample_num=sample_num,
+                keep_first_sample=keep_first_sample,
             )
             return mu + bridge_noise
 

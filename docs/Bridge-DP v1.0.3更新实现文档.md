@@ -116,6 +116,17 @@ q_i = (i+1) / T
 - 终点偏移过大：减小 `bridge_anchor_angle_max`，或增大 goal-consistency terminal 权重。
 - 训练不稳定：降低 `bridge_anchor_train_prob`，先只做推理侧 ablation。
 
+### 4.1.1 Edge bridge noise
+
+在 `bridge_scale_invariant_sigma=True` 且 PointGoal 分支下，支持结构化 edge bridge noise：
+
+- `bridge_noise_edge_prob=0.5`：推理初始化候选中使用 edge noise 的比例。多候选时第一组原始候选保持普通初始化，其余 edge 候选按左右成对分配。
+- `bridge_noise_edge_train_prob=0.2`：训练前向加噪中使用 edge noise 的样本概率。建议低于推理值，避免训练分布被边缘样本主导。
+- `bridge_noise_edge_warmup_steps=4.0`：起点保护 gate，第一个 waypoint 的 edge 噪声为 0，随后平滑增大，避免 origin 到第一个航点横跳。
+- `bridge_noise_edge_terminal_guard_steps=3.0`：终点保护 gate，最后一个 waypoint 的 edge 噪声强制为 0，终点附近平滑衰减。
+- `bridge_noise_edge_normal_max=1.0`：法向反高斯 eps 最大幅值，最终偏移仍会乘以 `sigma_normal`。
+- `bridge_noise_edge_tangent_scale=0.15`、`bridge_noise_edge_theta_scale=0.25`：切向与航向弱耦合比例，用于增加形状/姿态多样性，但不主导绕障。
+
 ### 4.2 监督重采样
 
 | 参数 | 默认值 | 作用 |

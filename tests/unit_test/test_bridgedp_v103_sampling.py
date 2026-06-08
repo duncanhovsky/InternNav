@@ -90,6 +90,106 @@ def test_bridge_anchor_edge_probability_applies_to_single_sample_batches():
     assert torch.count_nonzero(delta > 0).item() == 1
 
 
+def test_edge_bridge_noise_keeps_start_smooth_and_terminal_fixed():
+    torch.manual_seed(17)
+    scheduler = BridgeScheduler(
+        bridge_scale_invariant_sigma=True,
+        bridge_normal_sigma_ratio=1.0,
+        bridge_tangent_sigma_ratio=0.1,
+        bridge_theta_sigma_ratio=0.1,
+        bridge_noise_edge_prob=1.0,
+        bridge_noise_edge_train_prob=1.0,
+        bridge_noise_edge_warmup_steps=4.0,
+        bridge_noise_edge_terminal_guard_steps=3.0,
+        bridge_noise_edge_normal_max=1.0,
+        bridge_noise_edge_tangent_scale=0.0,
+        bridge_noise_edge_theta_scale=0.0,
+    )
+    goal = torch.tensor([[2.0, 0.0, 0.0]])
+    origin = torch.zeros_like(goal)
+
+    bridge_noise, _, _ = scheduler.sample_pointgoal_bridge_noise(
+        shape=(1, 8, 3),
+        device=goal.device,
+        dtype=goal.dtype,
+        goal=goal,
+        origin=origin,
+        edge_prob=1.0,
+        noise=torch.zeros(1, 8, 3),
+    )
+
+    assert torch.allclose(bridge_noise[:, -1, :], torch.zeros_like(bridge_noise[:, -1, :]), atol=1e-6)
+    assert torch.norm(bridge_noise[:, 0, :2], dim=-1).max() < torch.norm(
+        bridge_noise[:, 3, :2],
+        dim=-1,
+    ).max()
+
+
+def test_edge_bridge_noise_pairs_left_and_right_in_inference_candidates():
+    torch.manual_seed(19)
+    scheduler = BridgeScheduler(
+        bridge_scale_invariant_sigma=True,
+        bridge_normal_sigma_ratio=1.0,
+        bridge_tangent_sigma_ratio=0.0,
+        bridge_theta_sigma_ratio=0.0,
+        bridge_noise_edge_prob=0.5,
+        bridge_noise_edge_warmup_steps=2.0,
+        bridge_noise_edge_terminal_guard_steps=2.0,
+        bridge_noise_edge_normal_max=1.0,
+    )
+    goal = torch.tensor([[2.0, 0.0, 0.0]]).repeat(9, 1)
+    origin = torch.zeros_like(goal)
+
+    bridge_noise, _, _ = scheduler.sample_pointgoal_bridge_noise(
+        shape=(9, 8, 3),
+        device=goal.device,
+        dtype=goal.dtype,
+        goal=goal,
+        origin=origin,
+        edge_prob=scheduler.bridge_noise_edge_prob,
+        sample_num=9,
+        keep_first_sample=True,
+        noise=torch.zeros(9, 8, 3),
+    )
+    normal_offsets = bridge_noise[:, 3, 1]
+
+    assert torch.allclose(normal_offsets[:5], torch.zeros_like(normal_offsets[:5]), atol=1e-6)
+    assert torch.count_nonzero(normal_offsets[5:] < 0).item() == 2
+    assert torch.count_nonzero(normal_offsets[5:] > 0).item() == 2
+
+
+def test_training_forward_edge_noise_uses_train_probability():
+    torch.manual_seed(23)
+    scheduler = BridgeScheduler(
+        bridge_scale_invariant_sigma=True,
+        bridge_normal_sigma_ratio=1.0,
+        bridge_tangent_sigma_ratio=0.0,
+        bridge_theta_sigma_ratio=0.0,
+        bridge_noise_edge_prob=0.0,
+        bridge_noise_edge_train_prob=1.0,
+        bridge_noise_edge_warmup_steps=2.0,
+        bridge_noise_edge_terminal_guard_steps=2.0,
+        bridge_noise_edge_normal_max=1.0,
+    )
+    x0 = torch.zeros(4, 8, 3)
+    goal = torch.tensor([[2.0, 0.0, 0.0]]).repeat(4, 1)
+    timesteps = torch.full((4,), scheduler.num_train_timesteps - 1, dtype=torch.long)
+
+    _, bridge_noise, _, _, _ = scheduler.add_noise_trajectory(
+        x0,
+        timesteps,
+        goal=goal,
+        theta_g=torch.zeros(4),
+        origin=torch.zeros_like(goal),
+        mode="pointgoal",
+        noise=torch.zeros_like(x0),
+    )
+
+    assert torch.count_nonzero(bridge_noise[:, 3, 1] < 0).item() == 2
+    assert torch.count_nonzero(bridge_noise[:, 3, 1] > 0).item() == 2
+    assert torch.allclose(bridge_noise[:, -1, :], torch.zeros_like(bridge_noise[:, -1, :]), atol=1e-6)
+
+
 def test_projection_resampling_uses_uniform_chord_progress():
     trainer = BridgeDPTrainer.__new__(BridgeDPTrainer)
     trainer.trajectory_resample_mode = "projection"

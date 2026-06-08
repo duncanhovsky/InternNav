@@ -161,6 +161,15 @@ class BridgeDPNet(PreTrainedModel):
         self.bridge_anchor_angle_max = float(il.get('bridge_anchor_angle_max', 0.0))
         self.bridge_anchor_uniform_prob = float(il.get('bridge_anchor_uniform_prob', 0.0))
         self.bridge_anchor_edge_prob = float(il.get('bridge_anchor_edge_prob', 0.0))
+        self.bridge_noise_edge_prob = float(il.get('bridge_noise_edge_prob', 0.0))
+        self.bridge_noise_edge_train_prob = float(il.get('bridge_noise_edge_train_prob', 0.0))
+        self.bridge_noise_edge_warmup_steps = float(il.get('bridge_noise_edge_warmup_steps', 4.0))
+        self.bridge_noise_edge_terminal_guard_steps = float(
+            il.get('bridge_noise_edge_terminal_guard_steps', 3.0)
+        )
+        self.bridge_noise_edge_normal_max = float(il.get('bridge_noise_edge_normal_max', 1.0))
+        self.bridge_noise_edge_tangent_scale = float(il.get('bridge_noise_edge_tangent_scale', 0.15))
+        self.bridge_noise_edge_theta_scale = float(il.get('bridge_noise_edge_theta_scale', 0.25))
         self.enable_goal_consistency_score = il.get('enable_goal_consistency_score', False)
         self.goal_consistency_terminal_weight = il.get('goal_consistency_terminal_weight', 1.0)
         self.goal_consistency_path_weight = il.get('goal_consistency_path_weight', 0.2)
@@ -285,6 +294,13 @@ class BridgeDPNet(PreTrainedModel):
             bridge_anchor_angle_max=self.bridge_anchor_angle_max,
             bridge_anchor_uniform_prob=self.bridge_anchor_uniform_prob,
             bridge_anchor_edge_prob=self.bridge_anchor_edge_prob,
+            bridge_noise_edge_prob=self.bridge_noise_edge_prob,
+            bridge_noise_edge_train_prob=self.bridge_noise_edge_train_prob,
+            bridge_noise_edge_warmup_steps=self.bridge_noise_edge_warmup_steps,
+            bridge_noise_edge_terminal_guard_steps=self.bridge_noise_edge_terminal_guard_steps,
+            bridge_noise_edge_normal_max=self.bridge_noise_edge_normal_max,
+            bridge_noise_edge_tangent_scale=self.bridge_noise_edge_tangent_scale,
+            bridge_noise_edge_theta_scale=self.bridge_noise_edge_theta_scale,
         )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
@@ -1046,6 +1062,8 @@ class BridgeDPNet(PreTrainedModel):
                 origin=origin_repeated,
                 shape=(sample_num * B, self.predict_size, 3),
                 device=self._device,
+                sample_num=sample_num,
+                keep_first_sample=self.bridge_anchor_keep_original_sample,
             )
 
             # 去噪时 scheduler 使用 bridge anchor；真实 pointgoal 保留给条件 token

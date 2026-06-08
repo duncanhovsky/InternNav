@@ -111,6 +111,37 @@ bridgedp_exp_cfg = ExpCfg(
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
         bridge_theta_sigma_ratio=1.2,
         bridge_virtual_prefix_steps=8.0,
+        # v1.0.3: 结构化 edge bridge noise。仅在 bridge_scale_invariant_sigma=True 的 PointGoal 分支生效；
+        # NoGoal 分支仍使用 nogoal_* 方差，非尺度相似方差路径仍使用普通高斯噪声。
+        # 作用位置：
+        #   1) 训练前向 add_noise_trajectory()/sample_bridge_noise()：由 bridge_noise_edge_train_prob 控制；
+        #   2) 推理初始化 sample_initial_noise_ordered()：由 bridge_noise_edge_prob 控制。
+        # 采样方式：
+        #   - 普通候选仍使用 eps~N(0,1)；
+        #   - edge 候选把法向 eps 替换为 edge-biased/反高斯幅值，左右符号成对，增加左右绕障覆盖；
+        #   - 切向和航向只做弱耦合，避免强回退、终点拉扯和姿态抖动。
+        # 推理候选使用 edge noise 的比例，值域 [0,1]。
+        # sample_num>1 时按候选组分配，并保留第一组原始候选不加 edge noise；
+        # 值越大，初始化候选越容易出现左右边界轨迹，但 critic/goal-consistency 排序压力也越大。
+        bridge_noise_edge_prob=0.5,
+        # 训练 PointGoal 前向加噪使用 edge noise 的样本概率，值域 [0,1]。
+        # 建议低于推理值，让模型见过边缘初始化分布但不被它主导；0 表示训练仍完全普通高斯。
+        bridge_noise_edge_train_prob=0.2,
+        # 起点保护步数。第 1 个 waypoint 的 edge gate 为 0，随后在该步数内平滑增大到 1；
+        # 值越大，origin->第一个航点越平滑，但早期绕障展开更慢；0 表示不做起点 warmup。
+        bridge_noise_edge_warmup_steps=4.0,
+        # 终点保护步数。最后一个 waypoint 的 edge gate 强制为 0，前若干步平滑衰减；
+        # 值越大，越保护终点/anchor 一致性，但终点附近侧向绕行会更保守。
+        bridge_noise_edge_terminal_guard_steps=3.0,
+        # edge 法向 eps 最大幅值，单位是“标准化 eps 倍数”，之后仍会乘以 sigma_normal。
+        # 值越大，左右偏移越极端；当 bridge_normal_sigma_ratio 已较大时不宜再过大。
+        bridge_noise_edge_normal_max=1.0,
+        # edge 切向扰动相对法向幅值的比例，值域建议 [0,0.5]。
+        # 增大会增加提前/滞后、拉长/回退多样性；过大容易破坏路径进度和终点一致性。
+        bridge_noise_edge_tangent_scale=0.15,
+        # edge 航向扰动相对法向幅值的比例，且符号与左右法向一致。
+        # 增大会增强转向探索；过大容易带来角速度尖峰或姿态摆动。
+        bridge_noise_edge_theta_scale=0.25,
         # v1.0.3: PointGoal bridge anchor sampling。真实 pointgoal 仍作为任务目标；
         # sampled anchor 只用于布朗桥均值、方差坐标系、推理初始化和反向 step。
         enable_bridge_anchor_sampling=True,
