@@ -629,6 +629,7 @@ def main(config, model_class, model_config_class):
                 critic_mean_weight=getattr(config.il, "critic_mean_weight", 2.0),
                 critic_trend_weight=getattr(config.il, "critic_trend_weight", 0.5),
                 critic_safe_score=getattr(config.il, "critic_safe_score", 2.0),
+                critic_densify_step=getattr(config.il, "critic_densify_step", 0.05),
             )
         elif config.model_name == "flownav_static":
             train_dataset_data = FlowNav_Base_Datset(

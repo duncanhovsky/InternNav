@@ -5,6 +5,31 @@ from __future__ import annotations
 import numpy as np
 
 
+def densify_trajectory_xy(points_xy: np.ndarray, max_step: float = 0.05) -> np.ndarray:
+    """Sample a sparse XY trajectory so segment interiors contribute to clearance."""
+    points = np.asarray(points_xy, dtype=np.float32)[..., :2]
+    if points.size == 0 or points.shape[0] <= 1:
+        return points.reshape((-1, 2)).astype(np.float32)
+
+    step = float(max_step)
+    if step <= 0.0:
+        return points.astype(np.float32)
+
+    dense_parts = [points[0:1]]
+    for start, end in zip(points[:-1], points[1:]):
+        delta = end - start
+        length = float(np.linalg.norm(delta))
+        if length < 1e-6:
+            continue
+        count = max(1, int(np.ceil(length / step)))
+        alpha = np.linspace(1.0 / count, 1.0, count, dtype=np.float32)[:, None]
+        dense_parts.append(start[None, :] + alpha * delta[None, :])
+
+    if len(dense_parts) == 1:
+        return dense_parts[0].astype(np.float32)
+    return np.concatenate(dense_parts, axis=0).astype(np.float32)
+
+
 def min_l2_distances_xy(points_xy: np.ndarray, obstacle_xy: np.ndarray) -> np.ndarray:
     """Return each point's minimum planar L2 distance to obstacle points."""
     points = np.asarray(points_xy, dtype=np.float32)[..., :2]
@@ -108,11 +133,15 @@ def compute_bridge_dp_critic_score(
     mean_weight: float = 2.0,
     trend_weight: float = 0.5,
     safe_score: float = 2.0,
+    densify_step: float = 0.05,
 ) -> float:
     """Compute Bridge-DP's geometric critic label for one trajectory."""
     if obstacle_points is None or np.asarray(obstacle_points).shape[0] == 0:
         return float(safe_score)
-    distances = min_l2_distances_xy(trajectory_world_points, obstacle_points)
+    dense_points = densify_trajectory_xy(trajectory_world_points, max_step=densify_step)
+    distances = min_l2_distances_xy(dense_points, obstacle_points)
+    if float(densify_step) > 0.0:
+        action_indexes = np.arange(distances.shape[0], dtype=np.int64)
     return compute_bridge_dp_critic_score_from_distances(
         distances,
         action_indexes,

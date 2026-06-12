@@ -86,6 +86,7 @@ class BridgeDP_Base_Dataset(Dataset):
         critic_mean_weight=2.0,
         critic_trend_weight=0.5,
         critic_safe_score=2.0,
+        critic_densify_step=0.05,
     ):
         """初始化数据集。仿照 NavDP_Base_Datset.__init__（L77-183）。
 
@@ -122,6 +123,7 @@ class BridgeDP_Base_Dataset(Dataset):
         self.critic_mean_weight = float(critic_mean_weight)
         self.critic_trend_weight = float(critic_trend_weight)
         self.critic_safe_score = float(critic_safe_score)
+        self.critic_densify_step = float(critic_densify_step)
 
         # ── 动作空间归一化参数 ──────────────────────────────────────────
         # 将绝对坐标从 [0, ~10m] 归一化到 [-2, 2]，使训练目标尺度与 NavDP 的
@@ -622,6 +624,7 @@ class BridgeDP_Base_Dataset(Dataset):
             mean_weight=self.critic_mean_weight,
             trend_weight=self.critic_trend_weight,
             safe_score=self.critic_safe_score,
+            densify_step=self.critic_densify_step,
         )
         augment_critic = compute_bridge_dp_critic_score(
             augment_world_points,
@@ -634,6 +637,7 @@ class BridgeDP_Base_Dataset(Dataset):
             mean_weight=self.critic_mean_weight,
             trend_weight=self.critic_trend_weight,
             safe_score=self.critic_safe_score,
+            densify_step=self.critic_densify_step,
         )
 
         # point_goal 已在下方 "Bridge-DP 核心差异点" 中重新赋值为导航目标

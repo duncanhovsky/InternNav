@@ -154,13 +154,16 @@ bridgedp_exp_cfg = ExpCfg(
         enable_goal_consistency_score=True,
         goal_consistency_terminal_weight=1.0,
         goal_consistency_path_weight=0.05,
-        critic_near_threshold=0.3,
-        critic_hard_threshold=0.1,
+        # Treat the hard core as an approximate robot footprint and the near
+        # shell as a clearance margin, not just a sparse centerline distance.
+        critic_near_threshold=0.45,
+        critic_hard_threshold=0.25,
         critic_soft_beta=4.0,
-        critic_max_weight=5.0,
-        critic_mean_weight=2.0,
-        critic_trend_weight=0.5,
+        critic_max_weight=8.0,
+        critic_mean_weight=3.0,
+        critic_trend_weight=0.25,
         critic_safe_score=2.0,
+        critic_densify_step=0.05,
         # 距离分桶仅用于训练监控诊断，不参与模型规则。
         enable_distance_bucket_metrics=True,
         distance_bucket_edges=(0.10, 0.5, 0.8),
@@ -175,10 +178,15 @@ bridgedp_exp_cfg = ExpCfg(
         # ── 增量一致性正则超参数 ──
         # lambda_delta: 增量一致性正则权重
         #   action_loss = L_x0 + lambda_delta * L_delta
-        lambda_delta=0.0,
+        lambda_delta=0.05,
         # lambda_eps: x0 -> eps 反推噪声回归权重
         #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
         lambda_eps=0.0,
+        # Pairwise critic ranking: when label/augment have different geometric
+        # safety scores, train the critic to order the safer trajectory higher.
+        lambda_critic_rank=0.2,
+        critic_rank_margin=0.5,
+        critic_rank_target_min_gap=0.05,
     ),
     model=bridgedp_cfg,
 )

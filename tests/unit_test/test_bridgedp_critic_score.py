@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from internnav.dataset.bridgedp_critic import (
     bridge_dp_soft_risk,
+    compute_bridge_dp_critic_score,
     compute_bridge_dp_critic_score_from_distances,
     min_l2_distances_xy,
 )
@@ -72,6 +73,52 @@ class BridgeDPCriticScoreTest(unittest.TestCase):
         )
 
         self.assertTrue(np.isclose(score, 0.5 * (0.9 - 0.4)))
+
+
+    def test_critic_score_penalizes_collision_between_sparse_control_points(self):
+        trajectory = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+        obstacle = np.array([[0.5, 0.0, 0.0]], dtype=np.float32)
+        action_indexes = np.arange(trajectory.shape[0])
+
+        score = compute_bridge_dp_critic_score(
+            trajectory,
+            obstacle,
+            action_indexes,
+            hard_threshold=0.25,
+            soft_threshold=0.45,
+            trend_weight=0.0,
+            densify_step=0.05,
+        )
+
+        self.assertLess(score, -5.0)
+
+
+    def test_critic_score_penalizes_near_miss_without_treating_it_as_collision(self):
+        trajectory = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+        obstacle = np.array([[0.5, 0.35, 0.0]], dtype=np.float32)
+        action_indexes = np.arange(trajectory.shape[0])
+
+        near_score = compute_bridge_dp_critic_score(
+            trajectory,
+            obstacle,
+            action_indexes,
+            hard_threshold=0.25,
+            soft_threshold=0.45,
+            trend_weight=0.0,
+            densify_step=0.05,
+        )
+        collision_score = compute_bridge_dp_critic_score(
+            trajectory,
+            np.array([[0.5, 0.0, 0.0]], dtype=np.float32),
+            action_indexes,
+            hard_threshold=0.25,
+            soft_threshold=0.45,
+            trend_weight=0.0,
+            densify_step=0.05,
+        )
+
+        self.assertLess(near_score, -0.1)
+        self.assertGreater(near_score, collision_score)
 
 
 if __name__ == "__main__":

@@ -567,12 +567,33 @@ class BridgeDPTrainer(BaseTrainer):
             labels.shape[:2], device=labels.device, dtype=torch.float32
         ) * sample_valid.view(-1, 1).to(dtype=torch.float32)
 
+    @staticmethod
+    def _critic_pairwise_ranking_loss(
+        label_pred: torch.Tensor,
+        augment_pred: torch.Tensor,
+        label_target: torch.Tensor,
+        augment_target: torch.Tensor,
+        sample_weight: torch.Tensor,
+        margin: float,
+        target_min_gap: float,
+    ) -> torch.Tensor:
+        """Rank the safer trajectory above the riskier one when labels disagree."""
+        target_gap = label_target - augment_target
+        valid = (target_gap.abs() >= float(target_min_gap)).to(dtype=label_pred.dtype)
+        valid = valid * sample_weight.to(dtype=label_pred.dtype)
+        direction = torch.sign(target_gap).to(dtype=label_pred.dtype)
+        pred_gap = (label_pred - augment_pred) * direction
+        rank_error = torch.relu(label_pred.new_tensor(float(margin)) - pred_gap)
+        denom = valid.sum().clamp(min=1)
+        return (rank_error * valid).sum() / denom
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """执行一次前向并计算 x₀-MSE 总损失。
 
-        损失结构与 NavDP 对齐：
+        损失主体沿用 NavDP 的 action/critic/aux 结构：
             loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
-        其中 action_loss = L_x0 + λ_delta * L_delta，均为均匀 MSE（无 SNR 加权）。
+        其中 action_loss = L_x0 + λ_delta * L_delta，critic_loss 可叠加
+        label/augment 之间的 pairwise safety ranking 约束。
         轨迹监督由原始 GT 曲线在 GPU 上按弧长样条重采样得到，valid_mask 固定全 1。
         """
         model_device = next(model.parameters()).device
@@ -659,6 +680,9 @@ class BridgeDPTrainer(BaseTrainer):
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
         lambda_eps = getattr(il_cfg, 'lambda_eps', 0.0) if il_cfg else 0.0
+        lambda_critic_rank = getattr(il_cfg, 'lambda_critic_rank', 0.0) if il_cfg else 0.0
+        critic_rank_margin = getattr(il_cfg, 'critic_rank_margin', 0.5) if il_cfg else 0.5
+        critic_rank_target_min_gap = getattr(il_cfg, 'critic_rank_target_min_gap', 0.05) if il_cfg else 0.05
 
         # ── optional eps-consistency under the trajectory-time bridge ──────
         # Disabled by default because it is effectively an SNR-weighted x0 loss.
@@ -688,13 +712,23 @@ class BridgeDPTrainer(BaseTrainer):
 
         action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
 
-        # ── Critic 损失（与 NavDP 一致）──────────────────────────────
+        # ── Critic 损失：标量回归 + 可选 pairwise safety ranking ─────────
         sample_weight = sample_valid.to(dtype=critic_pred.dtype)
         sample_denom = sample_weight.sum().clamp(min=1)
-        critic_loss = (
+        critic_mse_loss = (
             ((critic_pred - batch_label_critic).square() * sample_weight).sum() / sample_denom
             + ((augment_pred - batch_augment_critic).square() * sample_weight).sum() / sample_denom
         )
+        critic_rank_loss = self._critic_pairwise_ranking_loss(
+            critic_pred,
+            augment_pred,
+            batch_label_critic,
+            batch_augment_critic,
+            sample_weight,
+            margin=critic_rank_margin,
+            target_min_gap=critic_rank_target_min_gap,
+        )
+        critic_loss = critic_mse_loss + lambda_critic_rank * critic_rank_loss
 
         # ── 辅助损失（与 NavDP 一致）──────────────────────────────────
         aux_point = (
@@ -705,7 +739,7 @@ class BridgeDPTrainer(BaseTrainer):
             0.5 * (aux_point * sample_weight).sum() / sample_denom
         )
 
-        # ── 总损失（3 项，与 NavDP 完全对齐）─────────────────────────
+        # ── 总损失 ──────────────────────────────────────────────────
         loss = 0.8 * action_loss + 0.2 * critic_loss + 0.5 * aux_loss
 
         # ── 监控日志 ──────────────────────────────────────────────────
@@ -718,7 +752,8 @@ class BridgeDPTrainer(BaseTrainer):
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f} "
                       f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}), "
-                      f"critic={critic_loss.item():.4f}, aux={aux_loss.item():.4f}")
+                      f"critic={critic_loss.item():.4f}, "
+                      f"rank={critic_rank_loss.item():.4f}, aux={aux_loss.item():.4f}")
 
             grad_norm = self._compute_grad_norm(model)
             self._monitor_logs = {
@@ -730,6 +765,8 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/ng_x0":      ng_x0_loss.item(),
                 "loss/mg_x0":      mg_x0_loss.item(),
                 "loss/critic":     critic_loss.item(),
+                "loss/critic_mse": critic_mse_loss.item(),
+                "loss/critic_rank": critic_rank_loss.item(),
                 "loss/aux":        aux_loss.item(),
                 "debug/grad_norm": grad_norm,
             }
@@ -806,6 +843,8 @@ class BridgeDPTrainer(BaseTrainer):
             'L_delta':     L_delta.item(),
             'L_eps':       L_eps.item(),
             'critic_loss': critic_loss,
+            'critic_mse_loss': critic_mse_loss,
+            'critic_rank_loss': critic_rank_loss,
             'aux_loss':    aux_loss,
         }
 

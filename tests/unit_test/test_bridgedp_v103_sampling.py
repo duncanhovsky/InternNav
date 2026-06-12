@@ -150,3 +150,43 @@ def test_hybrid_projection_falls_back_on_flat_lateral_motion():
         torch.tensor([0.25, 0.50, 0.75, 1.00]),
         atol=1e-4,
     )
+
+
+def test_critic_pairwise_ranking_loss_penalizes_reversed_safety_order():
+    label_pred = torch.tensor([0.0, 1.0], dtype=torch.float32)
+    augment_pred = torch.tensor([1.0, 0.0], dtype=torch.float32)
+    label_target = torch.tensor([2.0, -4.0], dtype=torch.float32)
+    augment_target = torch.tensor([-4.0, 2.0], dtype=torch.float32)
+    sample_weight = torch.ones(2, dtype=torch.float32)
+
+    loss = BridgeDPTrainer._critic_pairwise_ranking_loss(
+        label_pred,
+        augment_pred,
+        label_target,
+        augment_target,
+        sample_weight,
+        margin=0.5,
+        target_min_gap=0.05,
+    )
+
+    assert torch.isclose(loss, torch.tensor(1.5))
+
+
+def test_critic_pairwise_ranking_loss_ignores_already_separated_pairs():
+    label_pred = torch.tensor([2.0], dtype=torch.float32)
+    augment_pred = torch.tensor([0.0], dtype=torch.float32)
+    label_target = torch.tensor([2.0], dtype=torch.float32)
+    augment_target = torch.tensor([-4.0], dtype=torch.float32)
+    sample_weight = torch.ones(1, dtype=torch.float32)
+
+    loss = BridgeDPTrainer._critic_pairwise_ranking_loss(
+        label_pred,
+        augment_pred,
+        label_target,
+        augment_target,
+        sample_weight,
+        margin=0.5,
+        target_min_gap=0.05,
+    )
+
+    assert torch.isclose(loss, torch.tensor(0.0))
