@@ -337,6 +337,102 @@ class BridgeDPTrainer(BaseTrainer):
             out[..., 2] = out[..., 2] * self.action_scale_theta
         return out
 
+    def _prediction_to_physical_tensor(
+        self,
+        action: torch.Tensor,
+        traj_distance_m: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """Restore predicted x0 trajectories to local physical coordinates."""
+        if self.enable_trajectory_normalization and traj_distance_m is not None:
+            return self._trajectory_denorm_tensor(action, traj_distance_m)
+        out = action.clone()
+        out[..., 0:2] = out[..., 0:2] * self.action_scale_xy
+        if out.shape[-1] >= 3:
+            out[..., 2] = out[..., 2] * self.action_scale_theta
+        return out
+
+    @staticmethod
+    def _densify_xy_fixed_steps(
+        traj_xy: torch.Tensor,
+        segment_substeps: int,
+    ) -> torch.Tensor:
+        """Densify consecutive XY segments with a fixed differentiable stencil."""
+        if traj_xy.numel() == 0:
+            return traj_xy.reshape(0, 2)
+        steps = max(1, int(segment_substeps))
+        origin = traj_xy.new_zeros((1, 2))
+        starts = torch.cat([origin, traj_xy[:-1]], dim=0)
+        ends = traj_xy
+        alpha = torch.linspace(
+            1.0 / steps,
+            1.0,
+            steps,
+            device=traj_xy.device,
+            dtype=traj_xy.dtype,
+        ).view(1, steps, 1)
+        dense = starts[:, None, :] * (1.0 - alpha) + ends[:, None, :] * alpha
+        return dense.reshape(-1, 2)
+
+    @staticmethod
+    def _generator_safety_loss(
+        pred_traj_phys: torch.Tensor,
+        obstacle_points,
+        sample_valid: torch.Tensor,
+        hard_threshold: float,
+        near_threshold: float,
+        hard_weight: float,
+        near_weight: float,
+        segment_substeps: int,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Penalize predicted trajectories whose swept centerline is unsafe."""
+        if obstacle_points is None:
+            return pred_traj_phys.new_tensor(0.0)
+
+        device = pred_traj_phys.device
+        dtype = pred_traj_phys.dtype
+        valid = sample_valid.to(device=device).bool()
+        losses = []
+        for bid in range(pred_traj_phys.shape[0]):
+            if bid >= len(obstacle_points):
+                continue
+            if not bool(valid[bid].item()):
+                continue
+            obs = obstacle_points[bid]
+            if obs is None or obs.numel() == 0:
+                continue
+            obs = obs.to(device=device, dtype=dtype)
+            obs = obs[:, :2]
+            if obs.numel() == 0:
+                continue
+
+            dense_xy = BridgeDPTrainer._densify_xy_fixed_steps(
+                pred_traj_phys[bid, :, :2],
+                segment_substeps=segment_substeps,
+            )
+            if dense_xy.numel() == 0:
+                continue
+
+            delta = dense_xy[:, None, :] - obs[None, :, :]
+            clearance = torch.sqrt(delta.square().sum(dim=-1).clamp(min=eps)).min(dim=1).values
+            hard_violation = torch.relu(pred_traj_phys.new_tensor(float(hard_threshold)) - clearance)
+            near_violation = torch.relu(pred_traj_phys.new_tensor(float(near_threshold)) - clearance)
+            sample_loss = (
+                float(hard_weight) * (hard_violation.square().max() + hard_violation.square().mean())
+                + float(near_weight) * near_violation.square().mean()
+            )
+            losses.append(sample_loss)
+
+        if not losses:
+            return pred_traj_phys.new_tensor(0.0)
+        return torch.stack(losses).mean()
+
+    @staticmethod
+    def _warmup_scale(current_step: int, warmup_steps: int) -> float:
+        if int(warmup_steps) <= 0:
+            return 1.0
+        return min(1.0, float(max(0, int(current_step)) + 1) / float(warmup_steps))
+
     def _trajectory_norm_logs(
         self,
         labels: torch.Tensor,
@@ -612,6 +708,7 @@ class BridgeDPTrainer(BaseTrainer):
             "batch_theta_g":        inputs["batch_theta_g"].to(model_device),
             "batch_valid_mask":     inputs["batch_valid_mask"].to(model_device),
         }
+        batch_obstacle_pts = inputs.get("batch_obstacle_pts")
         if "batch_raw_labels" in inputs:
             inputs_on_device.update({
                 "batch_raw_labels":     inputs["batch_raw_labels"].to(model_device),
@@ -683,6 +780,13 @@ class BridgeDPTrainer(BaseTrainer):
         lambda_critic_rank = getattr(il_cfg, 'lambda_critic_rank', 0.0) if il_cfg else 0.0
         critic_rank_margin = getattr(il_cfg, 'critic_rank_margin', 0.5) if il_cfg else 0.5
         critic_rank_target_min_gap = getattr(il_cfg, 'critic_rank_target_min_gap', 0.05) if il_cfg else 0.05
+        lambda_generator_safety = getattr(il_cfg, 'lambda_generator_safety', 0.0) if il_cfg else 0.0
+        generator_safety_hard_threshold = getattr(il_cfg, 'generator_safety_hard_threshold', 0.25) if il_cfg else 0.25
+        generator_safety_near_threshold = getattr(il_cfg, 'generator_safety_near_threshold', 0.45) if il_cfg else 0.45
+        generator_safety_hard_weight = getattr(il_cfg, 'generator_safety_hard_weight', 8.0) if il_cfg else 8.0
+        generator_safety_near_weight = getattr(il_cfg, 'generator_safety_near_weight', 1.0) if il_cfg else 1.0
+        generator_safety_segment_substeps = getattr(il_cfg, 'generator_safety_segment_substeps', 4) if il_cfg else 4
+        generator_safety_warmup_steps = getattr(il_cfg, 'generator_safety_warmup_steps', 0) if il_cfg else 0
 
         # ── optional eps-consistency under the trajectory-time bridge ──────
         # Disabled by default because it is effectively an SNR-weighted x0 loss.
@@ -710,7 +814,34 @@ class BridgeDPTrainer(BaseTrainer):
         else:
             L_eps = L_x0.new_tensor(0.0)
 
-        action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
+        if lambda_generator_safety > 0 and batch_obstacle_pts is not None:
+            pred_mg_phys = self._prediction_to_physical_tensor(
+                x0_pred_mg,
+                inputs_on_device.get("batch_traj_distance_m"),
+            )
+            generator_safety_loss = self._generator_safety_loss(
+                pred_mg_phys,
+                batch_obstacle_pts,
+                sample_valid,
+                hard_threshold=generator_safety_hard_threshold,
+                near_threshold=generator_safety_near_threshold,
+                hard_weight=generator_safety_hard_weight,
+                near_weight=generator_safety_near_weight,
+                segment_substeps=generator_safety_segment_substeps,
+            )
+        else:
+            generator_safety_loss = L_x0.new_tensor(0.0)
+        generator_safety_scale = self._warmup_scale(
+            getattr(getattr(self, "state", None), "global_step", 0),
+            generator_safety_warmup_steps,
+        )
+
+        action_loss = (
+            L_x0
+            + lambda_delta * L_delta
+            + lambda_eps * L_eps
+            + float(lambda_generator_safety) * generator_safety_scale * generator_safety_loss
+        )
 
         # ── Critic 损失：标量回归 + 可选 pairwise safety ranking ─────────
         sample_weight = sample_valid.to(dtype=critic_pred.dtype)
@@ -751,7 +882,8 @@ class BridgeDPTrainer(BaseTrainer):
             if self._log_step_count % 50 == 1:
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f} "
-                      f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}), "
+                      f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}, "
+                      f"L_safe={generator_safety_loss.item():.4f}), "
                       f"critic={critic_loss.item():.4f}, "
                       f"rank={critic_rank_loss.item():.4f}, aux={aux_loss.item():.4f}")
 
@@ -762,6 +894,8 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/L_x0":       L_x0.item(),
                 "loss/L_delta":    L_delta.item(),
                 "loss/L_eps":      L_eps.item(),
+                "loss/generator_safety": generator_safety_loss.item(),
+                "loss/generator_safety_scale": generator_safety_scale,
                 "loss/ng_x0":      ng_x0_loss.item(),
                 "loss/mg_x0":      mg_x0_loss.item(),
                 "loss/critic":     critic_loss.item(),
@@ -842,6 +976,7 @@ class BridgeDPTrainer(BaseTrainer):
             'L_x0':        L_x0.item(),
             'L_delta':     L_delta.item(),
             'L_eps':       L_eps.item(),
+            'generator_safety_loss': generator_safety_loss,
             'critic_loss': critic_loss,
             'critic_mse_loss': critic_mse_loss,
             'critic_rank_loss': critic_rank_loss,

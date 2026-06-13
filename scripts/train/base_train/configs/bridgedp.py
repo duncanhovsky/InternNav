@@ -105,7 +105,7 @@ bridgedp_exp_cfg = ExpCfg(
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
         # 横向扰动，最直接增加左右绕障、多路径绕行的可能性。这个增大最有利于绕障多样性。
-        bridge_normal_sigma_ratio=6.0,
+        bridge_normal_sigma_ratio=10.0,
         # 沿目标方向的前后扰动，增大会让轨迹更容易提前/滞后、拉长/回退。它会增加差异，但对绕障帮助不如 normal，太大会带来绕路、抖动或目标一致性下降。
         bridge_tangent_sigma_ratio=0.3,
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
@@ -121,11 +121,11 @@ bridgedp_exp_cfg = ExpCfg(
 
         # anchor 角度扰动：中心候选使用截断高斯，边缘候选使用左右成对的反高斯/edge-biased 扰动。
         # 表示主要采样分布的高斯标准差，单位是 rad。
-        bridge_anchor_angle_std=0.25,
+        bridge_anchor_angle_std=0.75,
         # 这是硬限制。只要该值大于 0，扰动角会被限制在 [-max, max] 范围内。过大可能导致训练不稳定，过小可能限制多样性。
-        bridge_anchor_angle_max=0.65,
+        bridge_anchor_angle_max=1.95,
         # 旧版 uniform 混合，默认关闭；需要完全随机覆盖边界时再打开。
-        bridge_anchor_uniform_prob=0.0,
+        bridge_anchor_uniform_prob=0.3,
         # 一半扰动候选改用 edge-biased 分布；推理多候选时按左右成对分配，训练 sample_num=1 时按 batch 概率生效。
         bridge_anchor_edge_prob=0.5,
 
@@ -187,6 +187,15 @@ bridgedp_exp_cfg = ExpCfg(
         lambda_critic_rank=0.2,
         critic_rank_margin=0.5,
         critic_rank_target_min_gap=0.05,
+        # Generator-side safety loss: directly penalize predicted x0 trajectories
+        # whose densified local path collides with or brushes obstacle points.
+        lambda_generator_safety=0.2,
+        generator_safety_hard_threshold=0.25,
+        generator_safety_near_threshold=0.45,
+        generator_safety_hard_weight=8.0,
+        generator_safety_near_weight=1.0,
+        generator_safety_segment_substeps=4,
+        generator_safety_warmup_steps=2000,
     ),
     model=bridgedp_cfg,
 )

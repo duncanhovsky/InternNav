@@ -190,3 +190,57 @@ def test_critic_pairwise_ranking_loss_ignores_already_separated_pairs():
     )
 
     assert torch.isclose(loss, torch.tensor(0.0))
+
+
+def test_generator_safety_loss_penalizes_collision_between_waypoints():
+    pred_traj = torch.tensor(
+        [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    obstacle_pts = [torch.tensor([[0.5, 0.0]], dtype=torch.float32)]
+    sample_valid = torch.tensor([True])
+
+    loss = BridgeDPTrainer._generator_safety_loss(
+        pred_traj,
+        obstacle_pts,
+        sample_valid,
+        hard_threshold=0.25,
+        near_threshold=0.45,
+        hard_weight=8.0,
+        near_weight=1.0,
+        segment_substeps=4,
+    )
+
+    assert loss > 0.1
+
+
+def test_generator_safety_loss_penalizes_near_miss_less_than_collision():
+    pred_traj = torch.tensor(
+        [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    sample_valid = torch.tensor([True])
+
+    near_loss = BridgeDPTrainer._generator_safety_loss(
+        pred_traj,
+        [torch.tensor([[0.5, 0.35]], dtype=torch.float32)],
+        sample_valid,
+        hard_threshold=0.25,
+        near_threshold=0.45,
+        hard_weight=8.0,
+        near_weight=1.0,
+        segment_substeps=4,
+    )
+    collision_loss = BridgeDPTrainer._generator_safety_loss(
+        pred_traj,
+        [torch.tensor([[0.5, 0.0]], dtype=torch.float32)],
+        sample_valid,
+        hard_threshold=0.25,
+        near_threshold=0.45,
+        hard_weight=8.0,
+        near_weight=1.0,
+        segment_substeps=4,
+    )
+
+    assert near_loss > 0.0
+    assert near_loss < collision_loss
