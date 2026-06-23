@@ -374,6 +374,62 @@ class BridgeDPTrainer(BaseTrainer):
         return dense.reshape(-1, 2)
 
     @staticmethod
+    def _wrap_angle_static(angles: torch.Tensor) -> torch.Tensor:
+        return torch.remainder(angles + math.pi, 2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def _trajectory_acceleration_loss(
+        pred_traj: torch.Tensor,
+        target_traj: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match second-order XY motion so obstacle avoidance stays gradual."""
+        if pred_traj.shape[1] < 3:
+            return pred_traj.new_tensor(0.0)
+        pred_acc = (
+            pred_traj[:, 2:, :2]
+            - 2.0 * pred_traj[:, 1:-1, :2]
+            + pred_traj[:, :-2, :2]
+        )
+        target_acc = (
+            target_traj[:, 2:, :2]
+            - 2.0 * target_traj[:, 1:-1, :2]
+            + target_traj[:, :-2, :2]
+        )
+        acc_mask = mask[:, 2:] * mask[:, 1:-1] * mask[:, :-2]
+        return ((pred_acc - target_acc).square() * acc_mask).sum() / acc_mask.sum().clamp(min=1)
+
+    @staticmethod
+    def _turn_consistency_loss(
+        pred_traj: torch.Tensor,
+        target_traj: torch.Tensor,
+        mask: torch.Tensor,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Penalize delayed heading flips relative to the supervised XY trend."""
+        if pred_traj.shape[1] < 3:
+            return pred_traj.new_tensor(0.0)
+        pred_delta = pred_traj[:, 1:, :2] - pred_traj[:, :-1, :2]
+        target_delta = target_traj[:, 1:, :2] - target_traj[:, :-1, :2]
+        pred_heading = torch.atan2(pred_delta[..., 1], pred_delta[..., 0])
+        target_heading = torch.atan2(target_delta[..., 1], target_delta[..., 0])
+        pred_turn = BridgeDPTrainer._wrap_angle_static(pred_heading[:, 1:] - pred_heading[:, :-1])
+        target_turn = BridgeDPTrainer._wrap_angle_static(target_heading[:, 1:] - target_heading[:, :-1])
+
+        valid_turn = (mask[:, 2:, 0] * mask[:, 1:-1, 0] * mask[:, :-2, 0])
+        pred_len = torch.norm(pred_delta, dim=-1)
+        target_len = torch.norm(target_delta, dim=-1)
+        nonzero_segments = (
+            (pred_len[:, 1:] > eps)
+            & (pred_len[:, :-1] > eps)
+            & (target_len[:, 1:] > eps)
+            & (target_len[:, :-1] > eps)
+        )
+        turn_mask = valid_turn * nonzero_segments.to(dtype=valid_turn.dtype)
+        turn_diff = BridgeDPTrainer._wrap_angle_static(pred_turn - target_turn)
+        return (turn_diff.square() * turn_mask).sum() / turn_mask.sum().clamp(min=1)
+
+    @staticmethod
     def _generator_safety_loss(
         pred_traj_phys: torch.Tensor,
         obstacle_points,
@@ -383,6 +439,7 @@ class BridgeDPTrainer(BaseTrainer):
         hard_weight: float,
         near_weight: float,
         segment_substeps: int,
+        hard_topk: int = 4,
         eps: float = 1e-6,
     ) -> torch.Tensor:
         """Penalize predicted trajectories whose swept centerline is unsafe."""
@@ -417,8 +474,11 @@ class BridgeDPTrainer(BaseTrainer):
             clearance = torch.sqrt(delta.square().sum(dim=-1).clamp(min=eps)).min(dim=1).values
             hard_violation = torch.relu(pred_traj_phys.new_tensor(float(hard_threshold)) - clearance)
             near_violation = torch.relu(pred_traj_phys.new_tensor(float(near_threshold)) - clearance)
+            hard_sq = hard_violation.square()
+            topk_count = min(max(1, int(hard_topk)), hard_sq.numel())
+            hard_focus = torch.topk(hard_sq.reshape(-1), k=topk_count).values.mean()
             sample_loss = (
-                float(hard_weight) * (hard_violation.square().max() + hard_violation.square().mean())
+                float(hard_weight) * (hard_focus + hard_sq.mean())
                 + float(near_weight) * near_violation.square().mean()
             )
             losses.append(sample_loss)
@@ -774,8 +834,21 @@ class BridgeDPTrainer(BaseTrainer):
         ).sum() / mask_delta.sum().clamp(min=1)
         L_delta = 0.5 * (ng_delta_loss + mg_delta_loss)
 
+        ng_acc_loss = self._trajectory_acceleration_loss(x0_pred_ng, ng_x0_target, mask)
+        mg_acc_loss = self._trajectory_acceleration_loss(x0_pred_mg, mg_x0_target, mask)
+        L_acc = 0.5 * (ng_acc_loss + mg_acc_loss)
+
+        ng_turn_consistency_loss = self._turn_consistency_loss(x0_pred_ng, ng_x0_target, mask)
+        mg_turn_consistency_loss = self._turn_consistency_loss(x0_pred_mg, mg_x0_target, mask)
+        L_turn_consistency = 0.5 * (ng_turn_consistency_loss + mg_turn_consistency_loss)
+
         il_cfg = self.config.il if hasattr(self.config, 'il') else None
         lambda_delta = getattr(il_cfg, 'lambda_delta', 0.1) if il_cfg else 0.1
+        lambda_acc = getattr(il_cfg, 'lambda_acc', 0.0) if il_cfg else 0.0
+        lambda_turn_consistency = (
+            getattr(il_cfg, 'lambda_turn_consistency', getattr(il_cfg, 'lambda_turn_smooth', 0.0))
+            if il_cfg else 0.0
+        )
         lambda_eps = getattr(il_cfg, 'lambda_eps', 0.0) if il_cfg else 0.0
         lambda_critic_rank = getattr(il_cfg, 'lambda_critic_rank', 0.0) if il_cfg else 0.0
         critic_rank_margin = getattr(il_cfg, 'critic_rank_margin', 0.5) if il_cfg else 0.5
@@ -786,6 +859,7 @@ class BridgeDPTrainer(BaseTrainer):
         generator_safety_hard_weight = getattr(il_cfg, 'generator_safety_hard_weight', 8.0) if il_cfg else 8.0
         generator_safety_near_weight = getattr(il_cfg, 'generator_safety_near_weight', 1.0) if il_cfg else 1.0
         generator_safety_segment_substeps = getattr(il_cfg, 'generator_safety_segment_substeps', 4) if il_cfg else 4
+        generator_safety_hard_topk = getattr(il_cfg, 'generator_safety_hard_topk', 4) if il_cfg else 4
         generator_safety_warmup_steps = getattr(il_cfg, 'generator_safety_warmup_steps', 0) if il_cfg else 0
 
         # ── optional eps-consistency under the trajectory-time bridge ──────
@@ -828,6 +902,7 @@ class BridgeDPTrainer(BaseTrainer):
                 hard_weight=generator_safety_hard_weight,
                 near_weight=generator_safety_near_weight,
                 segment_substeps=generator_safety_segment_substeps,
+                hard_topk=generator_safety_hard_topk,
             )
         else:
             generator_safety_loss = L_x0.new_tensor(0.0)
@@ -839,6 +914,8 @@ class BridgeDPTrainer(BaseTrainer):
         action_loss = (
             L_x0
             + lambda_delta * L_delta
+            + lambda_acc * L_acc
+            + lambda_turn_consistency * L_turn_consistency
             + lambda_eps * L_eps
             + float(lambda_generator_safety) * generator_safety_scale * generator_safety_loss
         )
@@ -883,6 +960,7 @@ class BridgeDPTrainer(BaseTrainer):
                 print(f"[Step {self._log_step_count}] "
                       f"loss={loss.item():.4f}, action={action_loss.item():.4f} "
                       f"(L_x0={L_x0.item():.4f}, L_delta={L_delta.item():.4f}, "
+                      f"L_acc={L_acc.item():.4f}, L_turn={L_turn_consistency.item():.4f}, "
                       f"L_safe={generator_safety_loss.item():.4f}), "
                       f"critic={critic_loss.item():.4f}, "
                       f"rank={critic_rank_loss.item():.4f}, aux={aux_loss.item():.4f}")
@@ -893,6 +971,8 @@ class BridgeDPTrainer(BaseTrainer):
                 "loss/action":     action_loss.item(),
                 "loss/L_x0":       L_x0.item(),
                 "loss/L_delta":    L_delta.item(),
+                "loss/L_acc":      L_acc.item(),
+                "loss/L_turn_consistency": L_turn_consistency.item(),
                 "loss/L_eps":      L_eps.item(),
                 "loss/generator_safety": generator_safety_loss.item(),
                 "loss/generator_safety_scale": generator_safety_scale,
@@ -975,6 +1055,8 @@ class BridgeDPTrainer(BaseTrainer):
             'action_loss': action_loss,
             'L_x0':        L_x0.item(),
             'L_delta':     L_delta.item(),
+            'L_acc':       L_acc.item(),
+            'L_turn_consistency': L_turn_consistency.item(),
             'L_eps':       L_eps.item(),
             'generator_safety_loss': generator_safety_loss,
             'critic_loss': critic_loss,

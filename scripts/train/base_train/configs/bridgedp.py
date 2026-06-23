@@ -105,29 +105,29 @@ bridgedp_exp_cfg = ExpCfg(
         bridge_scale_invariant_sigma=True,
         bridge_anisotropic_xy=True,
         # 横向扰动，最直接增加左右绕障、多路径绕行的可能性。这个增大最有利于绕障多样性。
-        bridge_normal_sigma_ratio=10.0,
+        bridge_normal_sigma_ratio=6.0,
         # 沿目标方向的前后扰动，增大会让轨迹更容易提前/滞后、拉长/回退。它会增加差异，但对绕障帮助不如 normal，太大会带来绕路、抖动或目标一致性下降。
-        bridge_tangent_sigma_ratio=0.3,
+        bridge_tangent_sigma_ratio=0.08,
         # 航向扰动，增大会让轨迹姿态更多样，有利于转向探索，但太大会让 MPC 跟踪变难，出现大角速度或姿态摆动。
-        bridge_theta_sigma_ratio=1.2,
+        bridge_theta_sigma_ratio=0.6,
         bridge_virtual_prefix_steps=8.0,
         # v1.0.3: PointGoal bridge anchor sampling。真实 pointgoal 仍作为任务目标；
         # sampled anchor 只用于布朗桥均值、方差坐标系、推理初始化和反向 step。
         enable_bridge_anchor_sampling=True,
         # 训练时使用 sampled anchor 的样本比例；0 表示训练完全保持原行为。
-        bridge_anchor_train_prob=0.5,
+        bridge_anchor_train_prob=0.25,
         # 推理候选中保留第一组原始 pointgoal anchor，保证有无偏移候选可回退。
         bridge_anchor_keep_original_sample=True,
 
         # anchor 角度扰动：中心候选使用截断高斯，边缘候选使用左右成对的反高斯/edge-biased 扰动。
         # 表示主要采样分布的高斯标准差，单位是 rad。
-        bridge_anchor_angle_std=0.75,
+        bridge_anchor_angle_std=0.50,
         # 这是硬限制。只要该值大于 0，扰动角会被限制在 [-max, max] 范围内。过大可能导致训练不稳定，过小可能限制多样性。
-        bridge_anchor_angle_max=1.95,
+        bridge_anchor_angle_max=1.00,
         # 旧版 uniform 混合，默认关闭；需要完全随机覆盖边界时再打开。
-        bridge_anchor_uniform_prob=0.3,
+        bridge_anchor_uniform_prob=0.0,
         # 一半扰动候选改用 edge-biased 分布；推理多候选时按左右成对分配，训练 sample_num=1 时按 batch 概率生效。
-        bridge_anchor_edge_prob=0.5,
+        bridge_anchor_edge_prob=0.25,
 
         # v1.0.3: 监督重采样模式。
         # arc_length 保持旧行为；projection 强制按起终点 chord 投影均匀；
@@ -156,8 +156,8 @@ bridgedp_exp_cfg = ExpCfg(
         goal_consistency_path_weight=0.05,
         # Treat the hard core as an approximate robot footprint and the near
         # shell as a clearance margin, not just a sparse centerline distance.
-        critic_near_threshold=0.45,
-        critic_hard_threshold=0.25,
+        critic_near_threshold=0.23,
+        critic_hard_threshold=0.15,
         critic_soft_beta=4.0,
         critic_max_weight=8.0,
         critic_mean_weight=3.0,
@@ -171,16 +171,17 @@ bridgedp_exp_cfg = ExpCfg(
         n_prior_tokens=4,
         num_train_timesteps=10,
         num_inference_timesteps=10,
-        inference_eta=0.10,
+        inference_eta=0.03,
         # use_origin_bridge_train: 训练时布朗桥起点固定为零向量（原点→目标）
         use_origin_bridge_train=False,
         use_prior_traj=False,
         # ── 增量一致性正则超参数 ──
         # lambda_delta: 增量一致性正则权重
-        #   action_loss = L_x0 + lambda_delta * L_delta
-        lambda_delta=0.05,
+        # Keep velocity, acceleration and turning trend close to the supervised path.
+        lambda_delta=0.10,
+        lambda_acc=0.05,
+        lambda_turn_consistency=0.05,
         # lambda_eps: x0 -> eps 反推噪声回归权重
-        #   action_loss = L_x0 + lambda_delta * L_delta + lambda_eps * L_eps
         lambda_eps=0.0,
         # Pairwise critic ranking: when label/augment have different geometric
         # safety scores, train the critic to order the safer trajectory higher.
@@ -189,13 +190,14 @@ bridgedp_exp_cfg = ExpCfg(
         critic_rank_target_min_gap=0.05,
         # Generator-side safety loss: directly penalize predicted x0 trajectories
         # whose densified local path collides with or brushes obstacle points.
-        lambda_generator_safety=0.2,
-        generator_safety_hard_threshold=0.25,
-        generator_safety_near_threshold=0.45,
-        generator_safety_hard_weight=8.0,
-        generator_safety_near_weight=1.0,
-        generator_safety_segment_substeps=4,
-        generator_safety_warmup_steps=2000,
+        lambda_generator_safety=0.05,
+        generator_safety_hard_threshold=0.15,
+        generator_safety_near_threshold=0.23,
+        generator_safety_hard_weight=4.0,
+        generator_safety_near_weight=0.5,
+        generator_safety_segment_substeps=2,
+        generator_safety_hard_topk=4,
+        generator_safety_warmup_steps=8000,
     ),
     model=bridgedp_cfg,
 )

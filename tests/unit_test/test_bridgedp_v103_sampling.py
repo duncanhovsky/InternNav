@@ -244,3 +244,74 @@ def test_generator_safety_loss_penalizes_near_miss_less_than_collision():
 
     assert near_loss > 0.0
     assert near_loss < collision_loss
+
+
+def test_generator_safety_loss_uses_soft_topk_hard_aggregation():
+    pred_traj = torch.tensor(
+        [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    obstacle_pts = [torch.tensor([[0.25, 0.0]], dtype=torch.float32)]
+    sample_valid = torch.tensor([True])
+
+    loss = BridgeDPTrainer._generator_safety_loss(
+        pred_traj,
+        obstacle_pts,
+        sample_valid,
+        hard_threshold=0.4,
+        near_threshold=0.4,
+        hard_weight=1.0,
+        near_weight=0.0,
+        segment_substeps=4,
+    )
+
+    expected = torch.tensor(0.090637875, dtype=torch.float32)
+    assert torch.isclose(loss, expected, atol=1e-6)
+
+
+def test_trajectory_acceleration_loss_tracks_smoothness_against_target():
+    target = torch.tensor(
+        [[[0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0],
+          [2.0, 0.0, 0.0],
+          [3.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    kinked = torch.tensor(
+        [[[0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0],
+          [1.0, 1.0, 0.0],
+          [1.0, 2.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    mask = torch.ones((1, 4, 1), dtype=torch.float32)
+
+    matched_loss = BridgeDPTrainer._trajectory_acceleration_loss(target, target, mask)
+    kink_loss = BridgeDPTrainer._trajectory_acceleration_loss(kinked, target, mask)
+
+    assert torch.isclose(matched_loss, torch.tensor(0.0))
+    assert kink_loss > matched_loss
+
+
+def test_turn_consistency_loss_penalizes_delayed_abrupt_turns():
+    target = torch.tensor(
+        [[[0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0],
+          [2.0, 0.0, 0.0],
+          [3.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    delayed_turn = torch.tensor(
+        [[[0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0],
+          [1.0, 1.0, 0.0],
+          [1.0, 2.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    mask = torch.ones((1, 4, 1), dtype=torch.float32)
+
+    matched_loss = BridgeDPTrainer._turn_consistency_loss(target, target, mask)
+    delayed_turn_loss = BridgeDPTrainer._turn_consistency_loss(delayed_turn, target, mask)
+
+    assert torch.isclose(matched_loss, torch.tensor(0.0))
+    assert delayed_turn_loss > matched_loss
