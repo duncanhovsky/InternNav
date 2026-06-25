@@ -1,5 +1,5 @@
 """Bridge-DP 训练超参配置。
-
+v1.1.3
 仿照 ``scripts/train/base_train/configs/navdp.py`` 的结构，
 为 Bridge-DP 提供完整的训练参数配置。
 
