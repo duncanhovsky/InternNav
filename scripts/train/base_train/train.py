@@ -31,6 +31,7 @@ from internnav.model.utils.utils import load_dataset
 from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
 from scripts.train.base_train.configs import (
     bridgedp_exp_cfg,
+    bridgedp_full_exp_cfg,
     cma_exp_cfg,
     cma_plus_exp_cfg,
     flownav_dyn_exp_cfg,
@@ -47,7 +48,7 @@ class TrainCfg(BaseModel):
     """Training configuration class"""
 
     name: str = 'cma_train'  # Experiment name
-    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'flownav_static', 'flownav_dyn', 'flownav_mix'
+    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'bridgedp_full', 'flownav_static', 'flownav_dyn', 'flownav_mix'
 
 
 class FlowNavMixDataset(Dataset):
@@ -503,6 +504,8 @@ def main(config, model_class, model_config_class):
     try:
         """Main training function."""
         _make_dir(config)
+        torch.backends.cuda.matmul.allow_tf32 = bool(getattr(config.il, 'tf32', False))
+        torch.backends.cudnn.allow_tf32 = bool(getattr(config.il, 'tf32', False))
 
         print("=== Start training ===")
         print(f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -810,20 +813,20 @@ def main(config, model_class, model_config_class):
             remove_unused_columns=False,
             deepspeed='',
             gradient_checkpointing=False,
-            bf16=False,  # fp16=False,
-            tf32=False,
+            bf16=bool(getattr(config.il, 'bf16', False)),
+            tf32=bool(getattr(config.il, 'tf32', False)),
             per_device_train_batch_size=config.il.batch_size,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=int(getattr(config.il, 'gradient_accumulation_steps', 1)),
             dataloader_num_workers=config.il.num_workers,
-            dataloader_pin_memory=False,
+            dataloader_pin_memory=bool(getattr(config.il, 'dataloader_pin_memory', False)),
             optim='adamw_torch',
             learning_rate=config.il.lr,
             lr_scheduler_type='cosine',
-            logging_steps=10.0,
+            logging_steps=float(getattr(config.il, 'logging_steps', 10.0)),
             num_train_epochs=config.il.epochs,
             save_strategy='epoch',  # no
             save_steps=config.il.save_interval_epochs,
-            save_total_limit=1000,
+            save_total_limit=int(getattr(config.il, 'save_total_limit', 1000)),
             report_to=config.il.report_to,
             seed=0,
             do_eval=False,
@@ -895,6 +898,7 @@ if __name__ == '__main__':
         'rdp': [rdp_exp_cfg, "RDP_Policy"],
         'navdp': [navdp_exp_cfg, "NavDP_Policy"],
         'bridgedp': [bridgedp_exp_cfg, "BridgeDP_Policy"],
+        'bridgedp_full': [bridgedp_full_exp_cfg, "BridgeDP_Policy"],
         'flownav_static': [flownav_static_exp_cfg, "FlowNav_Policy"],
         'flownav_dyn': [flownav_dyn_exp_cfg, "FlowNav_Policy"],
         'flownav_mix': [flownav_mix_exp_cfg, "FlowNav_Policy"],
