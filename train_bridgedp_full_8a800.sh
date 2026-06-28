@@ -5,15 +5,15 @@ export BRIDGEDP_SSD_ROOT="${BRIDGEDP_SSD_ROOT:-/ssd}"
 export BRIDGEDP_PROJECT_ROOT="${BRIDGEDP_PROJECT_ROOT:-${BRIDGEDP_SSD_ROOT}/MyResearch/InternNav}"
 export BRIDGEDP_DATASET_ROOT="${BRIDGEDP_DATASET_ROOT:-${BRIDGEDP_SSD_ROOT}/datasets/InternData-N1/v0.5-full-vln-n1/vln_n1/traj_data}"
 export BRIDGEDP_PRELOAD_INDEX="${BRIDGEDP_PRELOAD_INDEX:-${BRIDGEDP_PROJECT_ROOT}/checkpoints/preload_index.json}"
-export BRIDGEDP_RUN_NAME="${BRIDGEDP_RUN_NAME:-bridgedp_full}"
-export BRIDGEDP_NUM_GPUS="${BRIDGEDP_NUM_GPUS:-4}"
+export BRIDGEDP_RUN_NAME="${BRIDGEDP_RUN_NAME:-bridgedp_full_8a800}"
+export BRIDGEDP_NUM_GPUS="${BRIDGEDP_NUM_GPUS:-8}"
 export BRIDGEDP_BATCH_SIZE="${BRIDGEDP_BATCH_SIZE:-96}"
-export BRIDGEDP_NUM_WORKERS="${BRIDGEDP_NUM_WORKERS:-10}"
+export BRIDGEDP_NUM_WORKERS="${BRIDGEDP_NUM_WORKERS:-5}"
 export BRIDGEDP_LR="${BRIDGEDP_LR:-3e-4}"
 export BRIDGEDP_AUTO_RESUME="${BRIDGEDP_AUTO_RESUME:-1}"
 export BRIDGEDP_RESUME_FROM="${BRIDGEDP_RESUME_FROM:-}"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export PYTHONPATH="${BRIDGEDP_PROJECT_ROOT}:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
@@ -41,7 +41,7 @@ if [[ ! -f "${BRIDGEDP_PROJECT_ROOT}/checkpoints/depth_anything_v2_vits.pth" ]];
     exit 1
 fi
 
-echo "Bridge-DP full training"
+echo "Bridge-DP full 8x A800 training"
 echo "  project: ${BRIDGEDP_PROJECT_ROOT}"
 echo "  dataset: ${BRIDGEDP_DATASET_ROOT}"
 echo "  preload: ${BRIDGEDP_PRELOAD_INDEX}"
@@ -67,5 +67,5 @@ torchrun \
     --master_port="${MASTER_PORT:-12345}" \
     scripts/train/base_train/train.py \
     --name "${BRIDGEDP_RUN_NAME}" \
-    --model-name bridgedp_full \
+    --model-name bridgedp_full_8a800 \
     "${EXTRA_ARGS[@]}"

@@ -1084,5 +1084,7 @@ class BridgeDPTrainer(BaseTrainer):
             model_to_save = self.model
 
         os.makedirs(output_dir, exist_ok=True)
-        torch.save(model_to_save.state_dict(), output_dir + "bridgedp.ckpt")
+        model_state = state_dict if state_dict is not None else model_to_save.state_dict()
+        torch.save(model_state, os.path.join(output_dir, "bridgedp.ckpt"))
+        torch.save(model_state, os.path.join(output_dir, "pytorch_model.bin"))
         print(f"Saving model to {output_dir} (is DDP: {hasattr(self.model, 'module')})")

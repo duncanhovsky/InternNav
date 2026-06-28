@@ -29,8 +29,10 @@ from internnav.model import get_config, get_policy
 from internnav.model.utils.logger import MyLogger
 from internnav.model.utils.utils import load_dataset
 from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
+from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight, resolve_resume_checkpoint
 from scripts.train.base_train.configs import (
     bridgedp_exp_cfg,
+    bridgedp_full_8a800_exp_cfg,
     bridgedp_full_exp_cfg,
     cma_exp_cfg,
     cma_plus_exp_cfg,
@@ -48,7 +50,9 @@ class TrainCfg(BaseModel):
     """Training configuration class"""
 
     name: str = 'cma_train'  # Experiment name
-    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'bridgedp_full', 'flownav_static', 'flownav_dyn', 'flownav_mix'
+    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'bridgedp_full', 'bridgedp_full_8a800', 'flownav_static', 'flownav_dyn', 'flownav_mix'
+    resume_from_checkpoint: str = ''  # "auto"/"latest" or an explicit checkpoint-* directory
+    auto_resume: bool = False  # If true, resume from the latest valid checkpoint in output_dir when present
 
 
 class FlowNavMixDataset(Dataset):
@@ -859,7 +863,30 @@ def main(config, model_class, model_config_class):
         print(f"[Monitor] DetailedProgressCallback registered. Dataset size: {dataset_size}, "
               f"Status file: {config.log_dir}/training_status.json")
 
-        trainer.train()
+        requested_resume = getattr(config, 'resume_from_checkpoint', '')
+        auto_resume = bool(getattr(config, 'auto_resume', False))
+        resume_checkpoint = resolve_resume_checkpoint(
+            config.output_dir,
+            requested=requested_resume,
+            auto_resume=auto_resume,
+        )
+        is_main_process = (not dist.is_initialized()) or (dist.is_initialized() and dist.get_rank() == 0)
+        if is_main_process:
+            if resume_checkpoint:
+                ensured_weight = ensure_checkpoint_model_weight(resume_checkpoint)
+                print(f"[Resume] Resume from checkpoint: {resume_checkpoint}")
+                if ensured_weight:
+                    print(f"[Resume] Model weight file ready: {ensured_weight}")
+            else:
+                if str(requested_resume or '').strip():
+                    print(f"[Resume] Requested checkpoint not found or incomplete: {requested_resume}")
+                print(f"[Resume] No valid checkpoint found in {config.output_dir}; start from scratch.")
+        if dist.is_initialized():
+            dist.barrier()
+        if resume_checkpoint and not is_main_process:
+            ensure_checkpoint_model_weight(resume_checkpoint)
+
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
         if train_logger:
             for handler in train_logger.handlers:
                 handler.flush()
@@ -899,6 +926,7 @@ if __name__ == '__main__':
         'navdp': [navdp_exp_cfg, "NavDP_Policy"],
         'bridgedp': [bridgedp_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_full': [bridgedp_full_exp_cfg, "BridgeDP_Policy"],
+        'bridgedp_full_8a800': [bridgedp_full_8a800_exp_cfg, "BridgeDP_Policy"],
         'flownav_static': [flownav_static_exp_cfg, "FlowNav_Policy"],
         'flownav_dyn': [flownav_dyn_exp_cfg, "FlowNav_Policy"],
         'flownav_mix': [flownav_mix_exp_cfg, "FlowNav_Policy"],
@@ -911,6 +939,9 @@ if __name__ == '__main__':
     model_class, model_config_class = get_policy(policy_name), get_config(policy_name)
 
     exp_cfg.name = config.name
+    if config.resume_from_checkpoint:
+        exp_cfg.resume_from_checkpoint = config.resume_from_checkpoint
+    exp_cfg.auto_resume = bool(config.auto_resume or getattr(exp_cfg, 'auto_resume', False))
     exp_cfg.num_gpus = len(exp_cfg.torch_gpu_ids)
     exp_cfg.world_size = exp_cfg.num_gpus
 
