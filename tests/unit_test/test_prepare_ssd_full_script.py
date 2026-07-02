@@ -8,6 +8,7 @@ def test_prepare_ssd_full_falls_back_when_rsync_is_missing():
     script = PROJECT_ROOT / "scripts" / "prepare_ssd_full.sh"
     text = script.read_text(encoding="utf-8")
 
+    assert 'CONDA_ENV="${CONDA_ENV:-base}"' in text
     assert "copy_project_to_ssd()" in text
     assert "command -v rsync" in text
     assert "rsync -aH --info=progress2" in text

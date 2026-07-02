@@ -2,7 +2,7 @@
 """训练监控 Web 服务器 - 实时显示 CPU、GPU、训练进度等信息。
 
 启动方式:
-    conda run -n internnav python scripts/train/monitor_server.py
+    conda run -n base python scripts/train/monitor_server.py
 
 浏览器访问: http://localhost:5000
 """

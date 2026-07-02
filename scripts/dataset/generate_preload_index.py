@@ -38,9 +38,25 @@ import numpy as np
 try:
     import jsonlines
 except ImportError:
-    print("错误: 需要安装 jsonlines 库")
-    print("运行: pip install jsonlines")
-    sys.exit(1)
+    jsonlines = None
+
+
+def _read_jsonl_records(path: Path) -> list:
+    if jsonlines is not None:
+        with jsonlines.open(str(path), 'r') as reader:
+            return list(reader)
+
+    records = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSONL at {path}:{line_no}: {exc}") from exc
+    return records
 
 
 def _process_data_unit(unit_path: Path) -> dict:
@@ -88,8 +104,7 @@ def _process_data_unit(unit_path: Path) -> dict:
     data_dir = unit_path / 'data' / chunk_name
 
     # 读取 episodes_stats.jsonl
-    with jsonlines.open(str(meta_path), 'r') as reader:
-        episode_info = list(reader)
+    episode_info = _read_jsonl_records(meta_path)
 
     # RGB 路径
     rgb_dir = unit_path / 'videos' / chunk_name / 'observation.images.rgb'

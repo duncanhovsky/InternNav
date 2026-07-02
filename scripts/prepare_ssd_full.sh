@@ -7,7 +7,7 @@ if [[ ! -d "${SOURCE_ROOT}" && -d "${HOME}/data" ]]; then
 fi
 
 SSD_ROOT="${SSD_ROOT:-/ssd}"
-CONDA_ENV="${CONDA_ENV:-internnav}"
+CONDA_ENV="${CONDA_ENV:-base}"
 EXTRACT_JOBS="${EXTRACT_JOBS:-4}"
 REQUIRE_SSD_MOUNT="${REQUIRE_SSD_MOUNT:-1}"
 

@@ -8,6 +8,7 @@ def test_setup_script_targets_pytorch270_cuda126_python310():
     script = PROJECT_ROOT / "scripts" / "setup_internnav_pytorch270_cu126.sh"
     text = script.read_text(encoding="utf-8")
 
+    assert "ENV_NAME=\"${ENV_NAME:-base}\"" in text
     assert "USE_CONDA=\"${USE_CONDA:-auto}\"" in text
     assert "PYTHON_VERSION=\"${PYTHON_VERSION:-3.10}\"" in text
     assert "TORCH_VERSION=\"${TORCH_VERSION:-2.7.0}\"" in text

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-internnav}"
+ENV_NAME="${ENV_NAME:-base}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 TORCH_VERSION="${TORCH_VERSION:-2.7.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.22.0}"

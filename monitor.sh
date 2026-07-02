@@ -1,1 +1,1 @@
-conda run -n internnav python scripts/train/monitor_server.py
+conda run -n base python scripts/train/monitor_server.py
