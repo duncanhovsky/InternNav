@@ -6,6 +6,7 @@ PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 TORCH_VERSION="${TORCH_VERSION:-2.7.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.22.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.7.0}"
+SYMPY_VERSION="${SYMPY_VERSION:-1.13.3}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 
 INSTALL_APT="${INSTALL_APT:-1}"
@@ -202,6 +203,7 @@ make_torch_constraints() {
 torch==${TORCH_VERSION}
 torchvision==${TORCHVISION_VERSION}
 torchaudio==${TORCHAUDIO_VERSION}
+sympy==${SYMPY_VERSION}
 EOF
     export TORCH_CONSTRAINTS
 }
@@ -220,8 +222,8 @@ install_internnav_requirements() {
 
     local model_req_tmp
     model_req_tmp="$(mktemp)"
-    grep -Ev '^(flash_attn|triton)==' requirements/model_requirements.txt > "${model_req_tmp}"
-    log "Install InternNav model requirements except flash_attn/triton compatibility pins"
+    grep -Ev '^(flash_attn|triton|sympy)==' requirements/model_requirements.txt > "${model_req_tmp}"
+    log "Install InternNav model requirements except flash_attn/triton/sympy compatibility pins"
     python -m pip install -c "${TORCH_CONSTRAINTS}" -r "${model_req_tmp}"
     rm -f "${model_req_tmp}"
 

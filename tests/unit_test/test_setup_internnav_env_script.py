@@ -23,7 +23,8 @@ def test_setup_script_avoids_known_torch27_conflict_pins():
 
     assert "flash_attn" in text
     assert "triton" in text
-    assert "grep -Ev '^(flash_attn|triton)=='" in text
+    assert "sympy" in text
+    assert "grep -Ev '^(flash_attn|triton|sympy)=='" in text
 
 
 def test_setup_script_reuses_matching_prebuilt_environment():
@@ -45,5 +46,6 @@ def test_setup_script_prevents_requirements_from_resolving_other_torch_versions(
     assert "torch==${TORCH_VERSION}" in text
     assert "torchvision==${TORCHVISION_VERSION}" in text
     assert "torchaudio==${TORCHAUDIO_VERSION}" in text
+    assert "sympy==${SYMPY_VERSION}" in text
     assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r requirements/core_requirements.txt" in text
     assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r \"${model_req_tmp}\"" in text
