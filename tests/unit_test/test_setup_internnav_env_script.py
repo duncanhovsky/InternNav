@@ -34,3 +34,16 @@ def test_setup_script_reuses_matching_prebuilt_environment():
     assert "torch_stack_matches()" in text
     assert "Current Python already matches Python ${PYTHON_VERSION}, torch ${TORCH_VERSION}, CUDA 12.6; reuse it." in text
     assert "Requested PyTorch stack is already installed; skip PyTorch reinstall." in text
+
+
+def test_setup_script_prevents_requirements_from_resolving_other_torch_versions():
+    script = PROJECT_ROOT / "scripts" / "setup_internnav_pytorch270_cu126.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "make_torch_constraints()" in text
+    assert "require_torch_stack_ready()" in text
+    assert "torch==${TORCH_VERSION}" in text
+    assert "torchvision==${TORCHVISION_VERSION}" in text
+    assert "torchaudio==${TORCHAUDIO_VERSION}" in text
+    assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r requirements/core_requirements.txt" in text
+    assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r \"${model_req_tmp}\"" in text

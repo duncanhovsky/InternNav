@@ -13,6 +13,7 @@ USE_CONDA="${USE_CONDA:-auto}"
 INTERNNAV_INSTALL_FLASH_ATTN="${INTERNNAV_INSTALL_FLASH_ATTN:-try}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONDA_ENV_ACTIVATED=0
+TORCH_CONSTRAINTS=""
 
 log() {
     echo "[InternNav setup] $*"
@@ -179,30 +180,60 @@ install_torch_stack() {
         "torchaudio==${TORCHAUDIO_VERSION}"
 }
 
+require_torch_stack_ready() {
+    if torch_stack_matches; then
+        return
+    fi
+
+    cat >&2 <<EOF
+PyTorch ${TORCH_VERSION} / torchvision ${TORCHVISION_VERSION} / torchaudio ${TORCHAUDIO_VERSION}
+with CUDA 12.6 is not ready in the current Python environment.
+
+Stop here to prevent pip requirements from resolving and downloading unrelated torch versions.
+If this is a CPU-only staging machine, either install the CUDA torch wheel first, or skip
+environment packaging for torch and rely on the GPU machine's preinstalled torch stack.
+EOF
+    exit 1
+}
+
+make_torch_constraints() {
+    TORCH_CONSTRAINTS="$(mktemp)"
+    cat > "${TORCH_CONSTRAINTS}" <<EOF
+torch==${TORCH_VERSION}
+torchvision==${TORCHVISION_VERSION}
+torchaudio==${TORCHAUDIO_VERSION}
+EOF
+    export TORCH_CONSTRAINTS
+}
+
 install_internnav_requirements() {
     cd "${PROJECT_ROOT}"
+    require_torch_stack_ready
+    make_torch_constraints
+
     log "Install Python packaging tools"
     python -m pip install --upgrade pip wheel packaging ninja
     python -m pip install "setuptools<81"
 
     log "Install InternNav core requirements"
-    python -m pip install -r requirements/core_requirements.txt
+    python -m pip install -c "${TORCH_CONSTRAINTS}" -r requirements/core_requirements.txt
 
     local model_req_tmp
     model_req_tmp="$(mktemp)"
     grep -Ev '^(flash_attn|triton)==' requirements/model_requirements.txt > "${model_req_tmp}"
     log "Install InternNav model requirements except flash_attn/triton compatibility pins"
-    python -m pip install -r "${model_req_tmp}"
+    python -m pip install -c "${TORCH_CONSTRAINTS}" -r "${model_req_tmp}"
     rm -f "${model_req_tmp}"
 
     log "Register InternNav package in editable mode"
     python -m pip install -e . --no-deps
 
     log "Install Bridge-DP runtime compatibility packages"
-    python -m pip install numpy-quaternion flask psutil "transformers==4.51.0"
+    python -m pip install -c "${TORCH_CONSTRAINTS}" numpy-quaternion flask psutil "transformers==4.51.0"
 
     # Some upstream requirements can pull a different torch-adjacent stack. Re-pin torch last.
     install_torch_stack
+    rm -f "${TORCH_CONSTRAINTS}"
 }
 
 install_flash_attn_if_requested() {
