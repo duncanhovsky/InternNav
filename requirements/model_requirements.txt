@@ -25,6 +25,7 @@ pandas==2.3.1
 pyarrow==21.0.0
 s3transfer==0.6.1
 safetensors==0.5.3
+swanlab>=0.8.3
 sympy==1.13.1
 tensorboard==2.20.0
 tokenizers==0.21.2

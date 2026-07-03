@@ -16,11 +16,53 @@ CACHE_SLOT_ROOT = os.environ.get("BRIDGEDP_CACHE_SLOT_ROOT", f"{NVME_ROOT}/bridg
 DATASET_ROOT = os.environ.get("BRIDGEDP_DATASET_ROOT", f"{CACHE_SLOT_ROOT}/vln_n1/traj_data")
 PRELOAD_INDEX = os.environ.get("BRIDGEDP_PRELOAD_INDEX", f"{CACHE_SLOT_ROOT}/preload_index.json")
 NUM_GPUS = _env_int("BRIDGEDP_NUM_GPUS", 4)
+ARCDP_CACHE_VARIANT = os.environ.get("ARCDP_CACHE_VARIANT", "full").strip().lower()
+
+
+_ARCDP_CACHE_VARIANT_OVERRIDES = {
+    "full": {},
+    "rel": {
+        "ablation_prediction_space": "relative_delta",
+        "ablation_diffusion_mode": "ddpm",
+        "ablation_initialization_mode": "gaussian",
+        "enable_trajectory_normalization": False,
+        "enable_bridge_anchor_sampling": False,
+        "bridge_anchor_train_prob": 0.0,
+    },
+    "no_bridge": {
+        "ablation_prediction_space": "absolute",
+        "ablation_diffusion_mode": "ddpm",
+        "ablation_initialization_mode": "gaussian",
+        "enable_bridge_anchor_sampling": False,
+        "bridge_anchor_train_prob": 0.0,
+    },
+    "no_ordered_init": {
+        "ablation_prediction_space": "absolute",
+        "ablation_diffusion_mode": "bridge",
+        "ablation_initialization_mode": "gaussian",
+    },
+    "no_scale_cond": {
+        "enable_scale_condition_token": False,
+        "enable_scale_rgbd_film": False,
+    },
+    "no_anchor_train": {
+        "enable_bridge_anchor_sampling": False,
+        "bridge_anchor_train_prob": 0.0,
+    },
+    "no_gcs": {
+        "enable_goal_consistency_score": False,
+    },
+}
+
+if ARCDP_CACHE_VARIANT not in _ARCDP_CACHE_VARIANT_OVERRIDES:
+    supported = ", ".join(sorted(_ARCDP_CACHE_VARIANT_OVERRIDES))
+    raise ValueError(f"Unsupported ARCDP_CACHE_VARIANT={ARCDP_CACHE_VARIANT!r}. Supported: {supported}")
 
 
 bridgedp_cache_rotation_exp_cfg = copy.deepcopy(bridgedp_full_exp_cfg)
 bridgedp_cache_rotation_exp_cfg.name = os.environ.get("BRIDGEDP_RUN_NAME", "bridgedp_cache_rotation")
 bridgedp_cache_rotation_exp_cfg.model_name = "bridgedp"
+bridgedp_cache_rotation_exp_cfg.arcdp_cache_variant = ARCDP_CACHE_VARIANT
 bridgedp_cache_rotation_exp_cfg.resume_from_checkpoint = os.environ.get("BRIDGEDP_RESUME_FROM", "")
 bridgedp_cache_rotation_exp_cfg.auto_resume = os.environ.get("BRIDGEDP_AUTO_RESUME", "1") != "0"
 bridgedp_cache_rotation_exp_cfg.torch_gpu_id = 0
@@ -44,3 +86,6 @@ il.ignore_data_skip = os.environ.get("BRIDGEDP_IGNORE_DATA_SKIP", "1") != "0"
 il.save_strategy = os.environ.get("BRIDGEDP_SAVE_STRATEGY", "steps")
 il.cache_stage_id = os.environ.get("BRIDGEDP_CACHE_STAGE_ID", "")
 il.cache_slot_root = CACHE_SLOT_ROOT
+
+for key, value in _ARCDP_CACHE_VARIANT_OVERRIDES[ARCDP_CACHE_VARIANT].items():
+    setattr(il, key, value)

@@ -253,6 +253,8 @@ class DetailedProgressCallback(TrainerCallback):
         self.loss_history = []
         # 按 epoch 分桶（key=epoch_int, value=list of loss records）
         self.loss_by_epoch = {}
+        self.eta_log_steps = int(os.environ.get("BRIDGEDP_ETA_LOG_STEPS", "0") or 0)
+        self._last_eta_log_step = -1
         # 加载已有历史（支持断点续训）
         self._load_loss_history()
 
@@ -379,11 +381,49 @@ class DetailedProgressCallback(TrainerCallback):
             'gpu_memory': self._get_gpu_memory_breakdown(),
         }
 
+        eta_metrics = {
+            "progress/percent": status["progress_pct"],
+            "time/eta_hours": round(eta_seconds / 3600, 4),
+            "time/elapsed_hours": round(elapsed / 3600, 4),
+            "time/avg_step_seconds": status["avg_step_time"],
+            "throughput/samples_per_second": status["samples_per_second"],
+        }
+        if logs is not None:
+            logs.update(eta_metrics)
+
+        should_log_eta = (
+            self.eta_log_steps > 0
+            and state.global_step > 0
+            and (
+                self._last_eta_log_step < 0
+                or state.global_step - self._last_eta_log_step >= self.eta_log_steps
+                or state.global_step >= state.max_steps
+            )
+        )
+        if should_log_eta and getattr(state, "is_world_process_zero", True):
+            self._last_eta_log_step = state.global_step
+            print(
+                f"[ETA] step {state.global_step}/{state.max_steps} "
+                f"({status['progress_pct']}%), elapsed {status['elapsed_human']}, "
+                f"eta {status['eta_human']}, avg_step {status['avg_step_time']}s"
+            )
+            report_to = str(getattr(args, "report_to", "")).lower()
+            env_report_to = os.environ.get("BRIDGEDP_REPORT_TO", "").lower()
+            if "swanlab" in report_to or "swanlab" in env_report_to:
+                try:
+                    import swanlab
+
+                    swanlab.log(eta_metrics, step=state.global_step)
+                except Exception as exc:
+                    print(f"[ETA] SwanLab ETA log skipped: {exc}")
+
         # 提取 logs 中的 loss 信息
         loss_record = {}
         if logs:
             for k, v in logs.items():
                 if isinstance(v, (int, float)):
+                    if k.startswith(("progress/", "time/", "throughput/")):
+                        continue
                     val = round(v, 6) if isinstance(v, float) else v
                     status['losses'][k] = val
                     # 收集所有 loss/ 开头和 debug/ 开头的指标

@@ -36,3 +36,87 @@ def test_cache_rotation_config_and_shell_entrypoints_exist():
     assert "train_cache_rotation.py" in train_shell_text
     assert "make_bridgedp_shards.py" in prepare_shell_text
     assert "build_bridgedp_cache_shard.py" in prepare_shell_text
+
+
+def test_arcdp_cache_rotation_config_supports_full_and_p0_variants():
+    config = PROJECT_ROOT / "scripts" / "train" / "base_train" / "configs" / "bridgedp_cache_rotation.py"
+    text = config.read_text(encoding="utf-8")
+
+    assert "ARCDP_CACHE_VARIANT" in text
+    for variant in [
+        "full",
+        "rel",
+        "no_bridge",
+        "no_ordered_init",
+        "no_scale_cond",
+        "no_anchor_train",
+        "no_gcs",
+    ]:
+        assert f'"{variant}"' in text
+
+    assert '"ablation_prediction_space": "relative_delta"' in text
+    assert '"ablation_diffusion_mode": "ddpm"' in text
+    assert '"enable_scale_condition_token": False' in text
+    assert '"enable_bridge_anchor_sampling": False' in text
+    assert '"enable_goal_consistency_score": False' in text
+
+
+def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
+    script_dir = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation"
+    generic = script_dir / "train_arcdp_cache_rotation.sh"
+    gpu4 = script_dir / "train_arcdp_cache_rotation_4a800.sh"
+    gpu8 = script_dir / "train_arcdp_cache_rotation_8a800.sh"
+    matrix = script_dir / "print_arcdp_cache_rotation_matrix.sh"
+
+    for path in [generic, gpu4, gpu8, matrix]:
+        assert path.exists(), f"missing launcher: {path}"
+
+    generic_text = generic.read_text(encoding="utf-8")
+    assert "--epochs 100|200|500|1000" in generic_text
+    assert "ARCDP_CACHE_VARIANT" in generic_text
+    assert "BRIDGEDP_REPORT_TO" in generic_text
+    assert "swanlab" in generic_text
+    assert "SWANLAB_PROJECT" in generic_text
+    assert "SWANLAB_PROJ_NAME" in generic_text
+    assert "BRIDGEDP_ETA_LOG_STEPS" in generic_text
+    assert "train_bridgedp_cache_rotation.sh" in generic_text
+
+    assert '--gpus "4"' in gpu4.read_text(encoding="utf-8")
+    assert '--gpus "8"' in gpu8.read_text(encoding="utf-8")
+
+    matrix_text = matrix.read_text(encoding="utf-8")
+    for epoch in ["100", "200", "500", "1000"]:
+        assert epoch in matrix_text
+    for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
+        assert variant in matrix_text
+
+
+def test_detailed_progress_callback_exposes_low_frequency_eta_metrics():
+    train_py = PROJECT_ROOT / "scripts" / "train" / "base_train" / "train.py"
+    text = train_py.read_text(encoding="utf-8")
+
+    assert "BRIDGEDP_ETA_LOG_STEPS" in text
+    assert "time/eta_hours" in text
+    assert "progress/percent" in text
+    assert "[ETA]" in text
+
+
+def test_arcdp_training_readiness_checker_guides_missing_prereqs():
+    checker = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "check_arcdp_training_ready.sh"
+    assert checker.exists(), f"missing readiness checker: {checker}"
+
+    text = checker.read_text(encoding="utf-8")
+    assert "--gpus 4|8" in text
+    assert "--variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs" in text
+    assert "--epochs 100|200|500|1000" in text
+    assert "prepare_bridgedp_cache_rotation.sh" in text
+    assert "train_arcdp_cache_rotation" in text
+    assert "SWANLAB_API_KEY" in text
+    assert "swanlab login" in text
+    assert "torchrun" in text
+    assert "nvidia-smi" in text
+    assert "check_bridgedp_cache.py" in text
+    assert "depth_anything_v2_vits.pth" in text
+    assert "manifest" in text
+    assert "cache_A" in text
+    assert "cache_B" in text
