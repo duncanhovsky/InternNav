@@ -78,6 +78,10 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
     assert "swanlab" in generic_text
     assert "SWANLAB_PROJECT" in generic_text
     assert "SWANLAB_PROJ_NAME" in generic_text
+    assert "SWANLAB_API_KEY" in generic_text
+    assert "swanlab login" in generic_text
+    assert "SwanLab enabled" in generic_text
+    assert "SwanLab project" in generic_text
     assert "BRIDGEDP_ETA_LOG_STEPS" in generic_text
     assert "train_bridgedp_cache_rotation.sh" in generic_text
 
@@ -106,6 +110,9 @@ def test_arcdp_training_readiness_checker_guides_missing_prereqs():
     assert checker.exists(), f"missing readiness checker: {checker}"
 
     text = checker.read_text(encoding="utf-8")
+    assert "set -uo pipefail" in text
+    assert "full scan" in text
+    assert "does not stop at the first failed check" in text
     assert "--gpus 4|8" in text
     assert "--variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs" in text
     assert "--epochs 100|200|500|1000" in text
@@ -120,3 +127,23 @@ def test_arcdp_training_readiness_checker_guides_missing_prereqs():
     assert "manifest" in text
     assert "cache_A" in text
     assert "cache_B" in text
+
+
+def test_swanlab_is_part_of_setup_and_cache_preparation_guidance():
+    setup = PROJECT_ROOT / "scripts" / "setup_internnav_pytorch270_cu126.sh"
+    prepare = PROJECT_ROOT / "scripts" / "cache_rotation" / "prepare_bridgedp_cache_rotation.sh"
+
+    setup_text = setup.read_text(encoding="utf-8")
+    prepare_text = prepare.read_text(encoding="utf-8")
+
+    assert "configure_swanlab" in setup_text
+    assert "pip install \"swanlab" in setup_text
+    assert "SWANLAB_API_KEY" in setup_text
+    assert "swanlab login" in setup_text
+    assert "ArcDP-cache-rotation" in setup_text
+
+    assert "check_swanlab_setup" in prepare_text
+    assert "SWANLAB_API_KEY" in prepare_text
+    assert "swanlab login" in prepare_text
+    assert "check_arcdp_training_ready.sh" in prepare_text
+    assert "full prerequisite scan" in prepare_text

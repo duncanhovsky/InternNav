@@ -147,6 +147,7 @@ TRAIN_CMD="bash ${SCRIPT_DIR}/train_arcdp_cache_rotation_${GPUS}a800.sh --varian
 
 printf '%s\n' \
     "ArcDP training readiness check" \
+    "  mode:       full scan; does not stop at the first failed check" \
     "  project:    ${PROJECT_ROOT}" \
     "  pythonpath: ${PY_PROJECT_ROOT}" \
     "  variant:    ${VARIANT}" \

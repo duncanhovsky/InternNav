@@ -27,7 +27,10 @@
         --output navdp_dataset_lerobot.json
 """
 
+from __future__ import annotations
+
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +42,18 @@ try:
     import jsonlines
 except ImportError:
     jsonlines = None
+
+
+INDEX_KEYS = (
+    'trajectory_data_dir',
+    'trajectory_rgb_path',
+    'trajectory_depth_path',
+    'trajectory_afford_path',
+)
+
+
+def _empty_index() -> dict:
+    return {key: [] for key in INDEX_KEYS}
 
 
 def _read_jsonl_records(path: Path) -> list:
@@ -75,12 +90,7 @@ def _process_data_unit(unit_path: Path) -> dict:
         包含 trajectory_data_dir, trajectory_rgb_path, trajectory_depth_path,
         trajectory_afford_path 四个列表的字典
     """
-    result = {
-        'trajectory_data_dir': [],
-        'trajectory_rgb_path': [],
-        'trajectory_depth_path': [],
-        'trajectory_afford_path': [],
-    }
+    result = _empty_index()
 
     data_path = unit_path / 'data'
     meta_path = unit_path / 'meta' / 'episodes_stats.jsonl'
@@ -168,12 +178,7 @@ def scan_lerobot_dataset(root_dir: str, scene_scale: float = 1.0) -> dict:
         包含 4 个路径数组的字典，可直接被 NavDP/BridgeDP Dataset 的
         preload=True 模式读取
     """
-    index_data = {
-        'trajectory_data_dir': [],
-        'trajectory_rgb_path': [],
-        'trajectory_depth_path': [],
-        'trajectory_afford_path': [],
-    }
+    index_data = _empty_index()
     root_path = Path(root_dir)
 
     if not root_path.exists():
@@ -229,6 +234,268 @@ def scan_lerobot_dataset(root_dir: str, scene_scale: float = 1.0) -> dict:
     return index_data
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + '.tmp')
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def _selected_scene_dirs(group_dir: Path, scene_scale: float) -> list[Path]:
+    all_scene_dirs = sorted([d for d in group_dir.iterdir() if d.is_dir()])
+    if scene_scale < 1.0:
+        indices = np.arange(0, len(all_scene_dirs), 1 / scene_scale).astype(np.int32)
+        return [all_scene_dirs[i] for i in indices if i < len(all_scene_dirs)]
+    return all_scene_dirs
+
+
+def _collect_scan_units(root_dir: str | Path, scene_scale: float = 1.0) -> list[dict]:
+    root_path = Path(root_dir)
+    if not root_path.exists():
+        raise FileNotFoundError(f"数据集根目录不存在: {root_path}")
+
+    units = []
+    for group_dir in sorted(root_path.iterdir()):
+        if not group_dir.is_dir():
+            continue
+
+        for scene_dir in _selected_scene_dirs(group_dir, scene_scale):
+            subdirs = [d for d in scene_dir.iterdir() if d.is_dir()]
+            trajectory_dirs = sorted([d for d in subdirs if d.name.startswith('trajectory_')])
+            unit_dirs = trajectory_dirs if trajectory_dirs else [scene_dir]
+            for unit_dir in unit_dirs:
+                unit_rel = unit_dir.relative_to(root_path).as_posix()
+                units.append(
+                    {
+                        'unit_rel': unit_rel,
+                        'unit_path': unit_dir,
+                        'group': group_dir.name,
+                        'scene': scene_dir.name,
+                    }
+                )
+    return units
+
+
+def _shard_path(work_dir: Path, unit_rel: str) -> Path:
+    digest = hashlib.sha1(unit_rel.encode('utf-8')).hexdigest()
+    return work_dir / 'shards' / f'{digest}.json'
+
+
+def _load_completed_shard(work_dir: Path, unit: dict) -> dict | None:
+    path = _shard_path(work_dir, unit['unit_rel'])
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get('unit_rel') != unit['unit_rel']:
+        return None
+    index = data.get('index')
+    if not isinstance(index, dict) or any(not isinstance(index.get(key), list) for key in INDEX_KEYS):
+        return None
+    lengths = [len(index[key]) for key in INDEX_KEYS]
+    if len(set(lengths)) != 1:
+        return None
+    return data
+
+
+def _summarize_work(units: list[dict], work_dir: Path) -> dict:
+    completed_units = 0
+    total_episodes = 0
+    last_completed = None
+    next_unit = None
+    for unit in units:
+        shard = _load_completed_shard(work_dir, unit)
+        if shard is None:
+            if next_unit is None:
+                next_unit = unit['unit_rel']
+            continue
+        completed_units += 1
+        last_completed = unit['unit_rel']
+        total_episodes += int(shard.get('episodes', len(shard['index']['trajectory_data_dir'])))
+
+    complete = completed_units == len(units)
+    return {
+        'complete': complete,
+        'total_units': len(units),
+        'completed_units': completed_units,
+        'total_episodes': total_episodes,
+        'last_completed': last_completed,
+        'next_unit': None if complete else next_unit,
+    }
+
+
+def _write_progress(
+    work_dir: Path,
+    *,
+    root_dir: Path,
+    output_path: Path,
+    scene_scale: float,
+    summary: dict,
+    status: str,
+    current_unit: str | None = None,
+) -> None:
+    progress = {
+        'status': status,
+        'root_dir': str(root_dir),
+        'output': str(output_path),
+        'work_dir': str(work_dir),
+        'scene_scale': scene_scale,
+        'current_unit': current_unit,
+        **summary,
+    }
+    _atomic_write_json(work_dir / 'progress.json', progress)
+
+
+def _write_unit_shard(work_dir: Path, unit: dict, unit_result: dict) -> int:
+    episode_count = len(unit_result['trajectory_data_dir'])
+    shard = {
+        'unit_rel': unit['unit_rel'],
+        'unit_path': str(unit['unit_path']),
+        'group': unit['group'],
+        'scene': unit['scene'],
+        'episodes': episode_count,
+        'index': unit_result,
+    }
+    _atomic_write_json(_shard_path(work_dir, unit['unit_rel']), shard)
+    return episode_count
+
+
+def _write_final_index_from_shards(units: list[dict], work_dir: Path, output_path: Path) -> dict:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(output_path.name + '.tmp')
+    counts = {key: 0 for key in INDEX_KEYS}
+
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        f.write('{\n')
+        for key_idx, key in enumerate(INDEX_KEYS):
+            f.write(f'  "{key}": [')
+            first_value = True
+            for unit in units:
+                shard = _load_completed_shard(work_dir, unit)
+                if shard is None:
+                    raise RuntimeError(f"缺少可恢复索引 shard: {unit['unit_rel']}")
+                for value in shard['index'][key]:
+                    if first_value:
+                        f.write('\n')
+                        first_value = False
+                    else:
+                        f.write(',\n')
+                    f.write('    ')
+                    json.dump(value, f, ensure_ascii=False)
+                    counts[key] += 1
+            if first_value:
+                f.write(']')
+            else:
+                f.write('\n  ]')
+            f.write(',\n' if key_idx < len(INDEX_KEYS) - 1 else '\n')
+        f.write('}\n')
+
+    os.replace(tmp_path, output_path)
+    return counts
+
+
+def generate_preload_index_resumable(
+    root_dir: str | Path,
+    output_path: str | Path,
+    scene_scale: float = 1.0,
+    work_dir: str | Path | None = None,
+    *,
+    status_only: bool = False,
+    max_units: int | None = None,
+) -> dict:
+    """Generate preload_index.json with per-unit shards for resumable full scans.
+
+    The final JSON keeps the legacy Bridge-DP/NavDP preload format, but
+    intermediate shards make the expensive scan resumable at scene/trajectory
+    granularity and avoid keeping the entire index in memory while scanning.
+    """
+    root_path = Path(root_dir)
+    output_path = Path(output_path)
+    work_dir = Path(work_dir) if work_dir is not None else Path(str(output_path) + '.work')
+    (work_dir / 'shards').mkdir(parents=True, exist_ok=True)
+
+    units = _collect_scan_units(root_path, scene_scale)
+    summary = _summarize_work(units, work_dir)
+    _write_progress(
+        work_dir,
+        root_dir=root_path,
+        output_path=output_path,
+        scene_scale=scene_scale,
+        summary=summary,
+        status='complete' if summary['complete'] else 'pending',
+    )
+    if status_only:
+        return summary
+
+    processed_this_run = 0
+    for unit in units:
+        if _load_completed_shard(work_dir, unit) is not None:
+            continue
+
+        current_summary = _summarize_work(units, work_dir)
+        _write_progress(
+            work_dir,
+            root_dir=root_path,
+            output_path=output_path,
+            scene_scale=scene_scale,
+            summary=current_summary,
+            status='running',
+            current_unit=unit['unit_rel'],
+        )
+
+        print(f"  扫描 unit: {unit['unit_rel']}", flush=True)
+        unit_result = _process_data_unit(unit['unit_path'])
+        episode_count = _write_unit_shard(work_dir, unit, unit_result)
+        print(f"    {unit['unit_rel']}: {episode_count} episodes", flush=True)
+        processed_this_run += 1
+
+        summary = _summarize_work(units, work_dir)
+        _write_progress(
+            work_dir,
+            root_dir=root_path,
+            output_path=output_path,
+            scene_scale=scene_scale,
+            summary=summary,
+            status='partial' if not summary['complete'] else 'merging',
+        )
+
+        if max_units is not None and processed_this_run >= max_units:
+            return summary
+
+    summary = _summarize_work(units, work_dir)
+    if not summary['complete']:
+        return summary
+
+    counts = _write_final_index_from_shards(units, work_dir, output_path)
+    total = counts['trajectory_data_dir']
+    if total == 0:
+        raise RuntimeError('未找到任何有效的 episode 数据')
+
+    summary = _summarize_work(units, work_dir)
+    _write_progress(
+        work_dir,
+        root_dir=root_path,
+        output_path=output_path,
+        scene_scale=scene_scale,
+        summary=summary,
+        status='complete',
+    )
+    return summary
+
+
+def _print_resumable_status(summary: dict, work_dir: Path) -> None:
+    print("可恢复 preload 生成状态")
+    print(f"  work_dir:        {work_dir}")
+    print(f"  complete:        {summary['complete']}")
+    print(f"  units:           {summary['completed_units']} / {summary['total_units']}")
+    print(f"  episodes:        {summary['total_episodes']}")
+    print(f"  last_completed:  {summary['last_completed']}")
+    print(f"  next_unit:       {summary['next_unit']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='生成 LeRobot 数据集预加载索引（NavDP/BridgeDP 兼容格式）',
@@ -244,6 +511,12 @@ def main():
       --root_dir /path/to/data \\
       --output preload.json \\
       --scene_scale 0.5
+
+  # 全量数据推荐：可恢复、低内存扫描
+  python scripts/dataset/generate_preload_index.py \\
+      --root_dir /path/to/data \\
+      --output preload.json \\
+      --resume
         """
     )
 
@@ -253,8 +526,38 @@ def main():
                         help='输出索引文件路径（默认: navdp_dataset_lerobot.json）')
     parser.add_argument('--scene_scale', type=float, default=1.0,
                         help='场景采样比例，1.0=全部（默认: 1.0）')
+    parser.add_argument('--resume', action='store_true',
+                        help='使用可恢复的分片扫描模式，适合全量 InternData-N1')
+    parser.add_argument('--work_dir', type=str, default=None,
+                        help='可恢复扫描的工作目录（默认: <output>.work）')
+    parser.add_argument('--status', action='store_true',
+                        help='只打印可恢复扫描状态，不继续扫描')
 
     args = parser.parse_args()
+
+    if args.resume or args.status:
+        output_path = Path(args.output)
+        work_dir = Path(args.work_dir) if args.work_dir else Path(str(output_path) + '.work')
+        summary = generate_preload_index_resumable(
+            root_dir=args.root_dir,
+            output_path=output_path,
+            scene_scale=args.scene_scale,
+            work_dir=work_dir,
+            status_only=args.status,
+        )
+        _print_resumable_status(summary, work_dir)
+        if args.status:
+            return
+        if not summary['complete']:
+            print("\n扫描未完成，再次执行同一条 --resume 命令会从 next_unit 继续。")
+            sys.exit(2)
+        total = summary['total_episodes']
+        print(f"\n{'='*60}")
+        print(f"索引文件已生成: {output_path.absolute()}")
+        print(f"总 episode 数: {total}")
+        print(f"可恢复工作目录: {work_dir.absolute()}")
+        print(f"{'='*60}")
+        return
 
     # 扫描数据集
     index_data = scan_lerobot_dataset(args.root_dir, args.scene_scale)

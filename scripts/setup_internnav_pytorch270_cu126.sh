@@ -14,6 +14,8 @@ UVICORN_VERSION="${UVICORN_VERSION:-0.30.6}"
 DASH_VERSION="${DASH_VERSION:-2.18.2}"
 FLASK_VERSION="${FLASK_VERSION:-3.0.3}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
+SWANLAB_VERSION_SPEC="${SWANLAB_VERSION_SPEC:-swanlab>=0.8.3}"
+SWANLAB_PROJECT="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-cache-rotation}}"
 
 INSTALL_APT="${INSTALL_APT:-1}"
 USE_CONDA="${USE_CONDA:-auto}"
@@ -280,14 +282,46 @@ install_flash_attn_if_requested() {
     warn "Bridge-DP training can usually run without flash_attn; InternVLA/Qwen-VL paths may require it."
 }
 
+configure_swanlab() {
+    log "Configure SwanLab for ArcDP training monitoring"
+    if python -c "import swanlab" >/dev/null 2>&1; then
+        log "SwanLab is already installed."
+    else
+        log "Install ${SWANLAB_VERSION_SPEC}"
+        log 'Equivalent manual command: pip install "swanlab>=0.8.3"'
+        python -m pip install "${SWANLAB_VERSION_SPEC}"
+    fi
+
+    python - <<'PY'
+import importlib.metadata as metadata
+
+try:
+    version = metadata.version("swanlab")
+except metadata.PackageNotFoundError:
+    raise SystemExit("swanlab package is still missing after installation")
+print("swanlab:", version)
+PY
+
+    log "Default ArcDP SwanLab project: ${SWANLAB_PROJECT}"
+    log "Training launchers enable SwanLab by default. Use --no-swanlab only for local TensorBoard-only runs."
+    if [[ -n "${SWANLAB_API_KEY:-}" ]]; then
+        log "SWANLAB_API_KEY is set; non-interactive cloud logging is ready."
+    else
+        warn "SWANLAB_API_KEY is not set."
+        warn "For cluster jobs, export SWANLAB_API_KEY=<your_api_key> before launching training."
+        warn "Alternatively run once interactively: swanlab login <your_api_key>"
+    fi
+}
+
 verify_install() {
     cd "${PROJECT_ROOT}"
-    log "Verify Python, PyTorch, CUDA, and InternNav imports"
+    log "Verify Python, PyTorch, CUDA, InternNav, and SwanLab imports"
     PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" python - <<'PY'
 import sys
 
 import torch
 import transformers
+import swanlab
 from internnav.model import get_config, get_policy
 
 print("python:", sys.version.split()[0])
@@ -296,6 +330,7 @@ print("torch cuda:", torch.version.cuda)
 print("cuda available:", torch.cuda.is_available())
 print("cuda device count:", torch.cuda.device_count())
 print("transformers:", transformers.__version__)
+print("swanlab:", getattr(swanlab, "__version__", "unknown"))
 print("BridgeDP policy:", get_policy("BridgeDP_Policy").__name__)
 print("BridgeDP config:", get_config("BridgeDP_Policy").__name__)
 PY
@@ -308,6 +343,7 @@ main() {
     install_torch_stack
     install_internnav_requirements
     install_flash_attn_if_requested
+    configure_swanlab
     verify_install
 
     log "Done."
@@ -317,6 +353,7 @@ main() {
     fi
     echo "  cd ${PROJECT_ROOT}"
     echo "  export PYTHONPATH=${PROJECT_ROOT}:\${PYTHONPATH:-}"
+    echo "  export SWANLAB_API_KEY=<your_api_key>   # optional if swanlab login was already done"
 }
 
 main "$@"

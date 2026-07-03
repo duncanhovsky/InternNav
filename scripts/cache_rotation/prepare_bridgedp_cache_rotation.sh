@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "${SCRIPT_PATH%/*}" && pwd)"
 SRC_PROJECT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PY_SRC_PROJECT="${SRC_PROJECT}"
+PY_PATH_SEP=":"
+if command -v cygpath >/dev/null 2>&1; then
+    PY_SRC_PROJECT="$(cygpath -w "${SRC_PROJECT}" 2>/dev/null || printf '%s' "${SRC_PROJECT}")"
+elif [[ "${SRC_PROJECT}" == /[a-zA-Z]/* ]]; then
+    PY_DRIVE="${SRC_PROJECT:1:1}"
+    PY_REST="${SRC_PROJECT:3}"
+    PY_SRC_PROJECT="${PY_DRIVE}:/${PY_REST}"
+fi
+case "${PY_SRC_PROJECT}" in
+    [a-zA-Z]:/*|[a-zA-Z]:\\*) PY_PATH_SEP=";" ;;
+esac
 
 GPUS=""
 NVME_SIZE=""
@@ -11,6 +24,34 @@ HDD_ROOT="/hdd"
 NVME_ROOT="/nvme"
 FORCE=0
 RUN_NAME="bridgedp_cache_rotation"
+ENABLE_SWANLAB=1
+SWANLAB_PROJECT_VALUE="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-cache-rotation}}"
+SWANLAB_WORKSPACE_VALUE="${SWANLAB_WORKSPACE:-}"
+
+check_swanlab_setup() {
+    if [[ "${ENABLE_SWANLAB}" != "1" ]]; then
+        echo "  swanlab:       disabled by --no-swanlab"
+        return
+    fi
+
+    echo "  swanlab:       enabled"
+    echo "  swanlab proj:  ${SWANLAB_PROJECT_VALUE}"
+    if [[ -n "${SWANLAB_WORKSPACE_VALUE}" ]]; then
+        echo "  swanlab ws:    ${SWANLAB_WORKSPACE_VALUE}"
+    fi
+    if python -c "import swanlab" >/dev/null 2>&1; then
+        echo "  swanlab pkg:   installed"
+    else
+        echo "  swanlab pkg:   missing" >&2
+        echo "                 fix: pip install swanlab, or run scripts/setup_internnav_pytorch270_cu126.sh" >&2
+    fi
+    if [[ -n "${SWANLAB_API_KEY:-}" ]]; then
+        echo "  swanlab key:   SWANLAB_API_KEY is set"
+    else
+        echo "  swanlab key:   not set" >&2
+        echo "                 fix: export SWANLAB_API_KEY=<your_api_key>; or run: swanlab login <your_api_key>" >&2
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,9 +61,12 @@ while [[ $# -gt 0 ]]; do
         --hdd-root) HDD_ROOT="$2"; shift 2 ;;
         --nvme-root) NVME_ROOT="$2"; shift 2 ;;
         --run-name) RUN_NAME="$2"; shift 2 ;;
+        --swanlab-project) SWANLAB_PROJECT_VALUE="$2"; shift 2 ;;
+        --swanlab-workspace) SWANLAB_WORKSPACE_VALUE="$2"; shift 2 ;;
+        --no-swanlab) ENABLE_SWANLAB=0; shift ;;
         --force) FORCE=1; shift ;;
         -h|--help)
-            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|2tb|4tb [--preset balanced|quality|throughput] [--force]"
+            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|2tb|4tb [--preset balanced|quality|throughput] [--swanlab-project NAME] [--no-swanlab] [--force]"
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -34,7 +78,11 @@ if [[ -z "${GPUS}" || -z "${NVME_SIZE}" ]]; then
     exit 1
 fi
 
-export PYTHONPATH="${SRC_PROJECT}:${PYTHONPATH:-}"
+if [[ -n "${PYTHONPATH:-}" ]]; then
+    export PYTHONPATH="${PY_SRC_PROJECT}${PY_PATH_SEP}${PYTHONPATH}"
+else
+    export PYTHONPATH="${PY_SRC_PROJECT}"
+fi
 eval "$(python "${SCRIPT_DIR}/profile_bridgedp_cache.py" --gpus "${GPUS}" --nvme-size "${NVME_SIZE}" --preset "${PRESET}")"
 
 PROJECT_ROOT="${NVME_ROOT}/MyResearch/InternNav"
@@ -52,9 +100,12 @@ echo "  gpus:           ${GPUS}"
 echo "  nvme size:      ${BRIDGEDP_NVME_SIZE}"
 echo "  preset:         ${PRESET}"
 echo "  cache slot GB:  ${BRIDGEDP_CACHE_SLOT_GB}"
+check_swanlab_setup
 
 if [[ ! -d "${HDD_TRAJ}" ]]; then
     echo "Missing extracted HDD dataset: ${HDD_TRAJ}" >&2
+    echo "For a full prerequisite scan that does not stop at the first failed check, run:" >&2
+    echo "  bash ${SRC_PROJECT}/scripts/train/arcdp_cache_rotation/check_arcdp_training_ready.sh --gpus ${GPUS} --variant full --epochs 100 --nvme-size ${BRIDGEDP_NVME_SIZE} --preset ${PRESET} --hdd-root ${HDD_ROOT} --nvme-root ${NVME_ROOT}" >&2
     exit 1
 fi
 
@@ -147,4 +198,5 @@ echo "  cache_A:  ${CACHE_ROOT}/cache_A"
 echo "  cache_B:  ${CACHE_ROOT}/cache_B"
 echo
 echo "Start training example:"
-echo "  bash ${PROJECT_ROOT}/train_bridgedp_cache_rotation.sh --gpus ${GPUS} --nvme-size ${BRIDGEDP_NVME_SIZE} --total-epochs 100 --preset ${PRESET}"
+echo "  export SWANLAB_API_KEY=<your_api_key>   # skip only if swanlab login was already done"
+echo "  bash ${PROJECT_ROOT}/scripts/train/arcdp_cache_rotation/train_arcdp_cache_rotation_${GPUS}a800.sh --variant full --epochs 100 --nvme-size ${BRIDGEDP_NVME_SIZE} --preset ${PRESET} --swanlab-project ${SWANLAB_PROJECT_VALUE}"

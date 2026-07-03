@@ -115,8 +115,25 @@ if [[ "${ENABLE_SWANLAB}" -eq 1 ]]; then
         echo "Or pass --no-swanlab to use tensorboard only." >&2
         exit 1
     fi
+    printf '%s\n' \
+        "[SwanLab] SwanLab enabled for this training run." \
+        "[SwanLab] SwanLab project: ${SWANLAB_PROJECT}" \
+        "[SwanLab] SwanLab experiment: ${SWANLAB_EXP_NAME}" \
+        "[SwanLab] report_to=${BRIDGEDP_REPORT_TO}"
+    if [[ -n "${SWANLAB_WORKSPACE_VALUE}" ]]; then
+        printf '%s\n' "[SwanLab] SwanLab workspace: ${SWANLAB_WORKSPACE_VALUE}"
+    fi
+    if [[ -n "${SWANLAB_API_KEY:-}" ]]; then
+        printf '%s\n' "[SwanLab] SWANLAB_API_KEY is set; cloud logging can run non-interactively."
+    else
+        printf '%s\n' \
+            "[SwanLab][WARN] SWANLAB_API_KEY is not set." \
+            "[SwanLab][WARN] If this node has not run swanlab login before, set: export SWANLAB_API_KEY=<your_api_key>" \
+            "[SwanLab][WARN] Or run once interactively: swanlab login <your_api_key>"
+    fi
 else
     export BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-tensorboard}"
+    printf '%s\n' "[SwanLab] Disabled by --no-swanlab; report_to=${BRIDGEDP_REPORT_TO}"
 fi
 
 CMD=(

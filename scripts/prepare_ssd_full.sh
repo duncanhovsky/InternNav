@@ -165,7 +165,8 @@ cd "${DST_PROJECT}"
 PYTHONPATH="${DST_PROJECT}" conda run -n "${CONDA_ENV}" env PYTHONPATH="${DST_PROJECT}" \
     python scripts/dataset/generate_preload_index.py \
     --root_dir "${DST_TRAJ}" \
-    --output "${DST_PROJECT}/checkpoints/preload_index.json"
+    --output "${DST_PROJECT}/checkpoints/preload_index.json" \
+    --resume
 
 echo
 echo "SSD preparation complete."
