@@ -24,6 +24,7 @@ import math
 
 import torch
 import torch.nn as nn
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from transformers import PretrainedConfig, PreTrainedModel
 
 from internnav.configs.model.base_encoders import ModelCfg
@@ -136,6 +137,15 @@ class BridgeDPNet(PreTrainedModel):
         self.dropout = il['dropout']
         self.token_dim = il['token_dim']
         self.finetune = il['finetune']
+        self.ablation_prediction_space = il.get('ablation_prediction_space', 'absolute')
+        self.ablation_diffusion_mode = il.get('ablation_diffusion_mode', 'bridge')
+        self.ablation_initialization_mode = il.get('ablation_initialization_mode', 'ordered_bridge')
+        if self.ablation_prediction_space not in ('absolute', 'relative_delta'):
+            raise ValueError(f"Unsupported ablation_prediction_space: {self.ablation_prediction_space}")
+        if self.ablation_diffusion_mode not in ('bridge', 'ddpm'):
+            raise ValueError(f"Unsupported ablation_diffusion_mode: {self.ablation_diffusion_mode}")
+        if self.ablation_initialization_mode not in ('ordered_bridge', 'gaussian'):
+            raise ValueError(f"Unsupported ablation_initialization_mode: {self.ablation_initialization_mode}")
 
         # Bridge-DP 专有超参数（从 il 中读取，有默认值）
         self.n_prior_tokens = il.get('n_prior_tokens', 4)
@@ -286,6 +296,14 @@ class BridgeDPNet(PreTrainedModel):
             bridge_anchor_uniform_prob=self.bridge_anchor_uniform_prob,
             bridge_anchor_edge_prob=self.bridge_anchor_edge_prob,
         )
+        self.noise_scheduler = None
+        if self.ablation_diffusion_mode == 'ddpm':
+            self.noise_scheduler = DDPMScheduler(
+                num_train_timesteps=self.num_train_timesteps,
+                beta_schedule='squaredcos_cap_v2',
+                clip_sample=True,
+                prediction_type='sample',
+            )
 
         # ── 因果掩码（与 NavDP 相同）──────────────────────────────────────
         self.tgt_mask = (torch.triu(torch.ones(self.predict_size, self.predict_size)) == 1).transpose(0, 1)
@@ -378,6 +396,26 @@ class BridgeDPNet(PreTrainedModel):
         if denormed.shape[-1] >= 3:
             denormed[..., 2] = denormed[..., 2] * self.action_scale_theta
         return denormed
+
+    def _trajectory_to_relative_delta(self, trajectory):
+        """Convert absolute trajectory control points to first-order deltas."""
+        origin = torch.zeros_like(trajectory[..., :1, :])
+        previous = torch.cat([origin, trajectory[..., :-1, :]], dim=-2)
+        return trajectory - previous
+
+    def _relative_delta_to_trajectory(self, deltas):
+        """Recover absolute trajectory control points from first-order deltas."""
+        return torch.cumsum(deltas, dim=-2)
+
+    def _to_model_action_space(self, trajectory):
+        if self.ablation_prediction_space == 'relative_delta':
+            return self._trajectory_to_relative_delta(trajectory)
+        return trajectory
+
+    def _to_output_trajectory_space(self, model_actions):
+        if self.ablation_prediction_space == 'relative_delta':
+            return self._relative_delta_to_trajectory(model_actions)
+        return model_actions
 
     def _default_nogoal_distance(self, batch_size, device, dtype=torch.float32):
         """NoGoal 没有真实目标距离，使用默认前向距离构造尺度 token。"""
@@ -494,6 +532,17 @@ class BridgeDPNet(PreTrainedModel):
                 (B,), device=device
             ).long()
         time_embeds = self.time_emb(timesteps).unsqueeze(1)
+        if self.ablation_diffusion_mode == 'ddpm':
+            noise = torch.randn_like(x0)
+            noisy_action = self.noise_scheduler.add_noise(x0, noise, timesteps)
+            noisy_action_embed = self.input_embed(noisy_action)
+            bridge_mu = torch.zeros_like(x0)
+            bridge_sigma = torch.ones_like(x0)
+            s_norm = (
+                (timesteps.float() + 1.0)
+                / float(self.noise_scheduler.config.num_train_timesteps)
+            ).view(B, 1, 1)
+            return x0, time_embeds, noisy_action_embed, timesteps, noisy_action, bridge_mu, bridge_sigma, s_norm
         bridge_x0 = torch.zeros_like(x0) if self.use_origin_bridge_train else x0
         origin = torch.zeros(x0.shape[0], x0.shape[-1], device=device, dtype=x0.dtype)
         noisy_action, _, bridge_mu, bridge_sigma, s_norm = self.bridge_scheduler.add_noise_trajectory(
@@ -672,13 +721,16 @@ class BridgeDPNet(PreTrainedModel):
 
         assert input_images.shape[1] == self.memory_size
         tensor_point_goal = torch.as_tensor(goal_point, dtype=torch.float32).to(device)
-        tensor_label_actions = torch.as_tensor(output_actions, dtype=torch.float32).to(device)
-        tensor_augment_actions = torch.as_tensor(augment_actions, dtype=torch.float32).to(device)
-        tensor_nogoal_actions = (
+        tensor_label_actions_abs = torch.as_tensor(output_actions, dtype=torch.float32).to(device)
+        tensor_augment_actions_abs = torch.as_tensor(augment_actions, dtype=torch.float32).to(device)
+        tensor_nogoal_actions_abs = (
             torch.as_tensor(nogoal_actions, dtype=torch.float32).to(device)
             if nogoal_actions is not None
-            else tensor_label_actions
+            else tensor_label_actions_abs
         )
+        tensor_label_actions = self._to_model_action_space(tensor_label_actions_abs)
+        tensor_augment_actions = self._to_model_action_space(tensor_augment_actions_abs)
+        tensor_nogoal_actions = self._to_model_action_space(tensor_nogoal_actions_abs)
         tensor_prior = torch.as_tensor(prior_traj, dtype=torch.float32).to(device)
         tensor_theta_g = torch.as_tensor(theta_g, dtype=torch.float32).to(device)
         if traj_distance_m is None:
@@ -767,8 +819,8 @@ class BridgeDPNet(PreTrainedModel):
             gated_prior_ng = gated_prior_mg
 
         # ── 标签/增强轨迹嵌入（用于 critic，与 NavDP 一致）────────────────
-        label_embed = self.input_embed(tensor_label_actions).detach()
-        augment_embed = self.input_embed(tensor_augment_actions).detach()
+        label_embed = self.input_embed(tensor_label_actions_abs).detach()
+        augment_embed = self.input_embed(tensor_augment_actions_abs).detach()
 
         # ── 构建 memory + 位置编码 ──────────────────────────────────────
         cond_base = torch.cat(
@@ -1041,45 +1093,63 @@ class BridgeDPNet(PreTrainedModel):
                         keep_first_sample=self.bridge_anchor_keep_original_sample,
                     )
                 )
-            naction = self.bridge_scheduler.sample_initial_noise_ordered(
-                goal=bridge_goal_repeated,
-                origin=origin_repeated,
-                shape=(sample_num * B, self.predict_size, 3),
-                device=self._device,
-            )
+            candidate_shape = (sample_num * B, self.predict_size, 3)
+            if (
+                self.ablation_diffusion_mode == 'ddpm'
+                or self.ablation_initialization_mode == 'gaussian'
+            ):
+                naction = torch.randn(candidate_shape, device=self._device, dtype=tensor_point_goal_n.dtype)
+            else:
+                naction = self.bridge_scheduler.sample_initial_noise_ordered(
+                    goal=bridge_goal_repeated,
+                    origin=origin_repeated,
+                    shape=candidate_shape,
+                    device=self._device,
+                )
 
             # 去噪时 scheduler 使用 bridge anchor；真实 pointgoal 保留给条件 token
             # 和后续 goal-consistency score。
-            self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
+            if self.ablation_diffusion_mode == 'ddpm':
+                self.noise_scheduler.set_timesteps(self.num_inference_timesteps)
+                denoise_timesteps = self.noise_scheduler.timesteps
+            else:
+                self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
+                denoise_timesteps = self.bridge_scheduler.timesteps
             if self.enable_trajectory_normalization:
                 distance_repeated = goal_distance_m.repeat(sample_num)
 
-            for k in self.bridge_scheduler.timesteps:
+            for k in denoise_timesteps:
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
                     pointgoal_embed, rgbd_embed, gated_prior, scale_embed
                 )
-                naction = self.bridge_scheduler.step_trajectory(
-                    x0_pred, naction, k,
-                    goal=bridge_goal_repeated,
-                    theta_g=bridge_theta_expanded,
-                    origin=origin_repeated,
-                    mode="pointgoal",
-                    eta=self.inference_eta,
-                )
+                if self.ablation_diffusion_mode == 'ddpm':
+                    naction = self.noise_scheduler.step(
+                        model_output=x0_pred, timestep=k, sample=naction
+                    ).prev_sample
+                else:
+                    naction = self.bridge_scheduler.step_trajectory(
+                        x0_pred, naction, k,
+                        goal=bridge_goal_repeated,
+                        theta_g=bridge_theta_expanded,
+                        origin=origin_repeated,
+                        mode="pointgoal",
+                        eta=self.inference_eta,
+                    )
 
             # Critic 排序
-            critic_values = self.predict_critic(naction, rgbd_embed, scale_embed)
+            trajectory_for_score = self._to_output_trajectory_space(naction)
+            critic_values = self.predict_critic(trajectory_for_score, rgbd_embed, scale_embed)
             score_values = self._apply_goal_consistency_score(
-                critic_values, naction, goal_repeated, origin_repeated
+                critic_values, trajectory_for_score, goal_repeated, origin_repeated
             )
 
             # ── 反归一化 ──
             # smooth_trajectory_batch 暂停使用；24 点本身即为可重采样的轨迹控制点。
             if self.enable_trajectory_normalization:
-                naction = self._denormalize_trajectory_action(naction, distance_repeated)
+                naction = self._denormalize_trajectory_action(trajectory_for_score, distance_repeated)
             else:
-                naction = self._denormalize_action(naction)
+                naction = self._denormalize_action(trajectory_for_score)
             trajectory = naction
 
             negative_trajectory = trajectory[(score_values).argsort()[0:8]]
@@ -1157,31 +1227,46 @@ class BridgeDPNet(PreTrainedModel):
                     B, self.n_prior_tokens, self.token_dim, device=self._device
                 )
 
-            # NoGoal: fixed forward default target with uncertainty growing toward the far end.
-            naction = self.bridge_scheduler.sample_initial_noise_nogoal(
-                (sample_num * B, self.predict_size, 3),
-                self._device,
-                dtype=zero_goal.dtype,
-            )
+            candidate_shape = (sample_num * B, self.predict_size, 3)
+            if self.ablation_diffusion_mode == 'ddpm':
+                naction = torch.randn(candidate_shape, device=self._device, dtype=zero_goal.dtype)
+            else:
+                # NoGoal: fixed forward default target with uncertainty growing toward the far end.
+                naction = self.bridge_scheduler.sample_initial_noise_nogoal(
+                    candidate_shape,
+                    self._device,
+                    dtype=zero_goal.dtype,
+                )
 
-            self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
+            if self.ablation_diffusion_mode == 'ddpm':
+                self.noise_scheduler.set_timesteps(self.num_inference_timesteps)
+                denoise_timesteps = self.noise_scheduler.timesteps
+            else:
+                self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
+                denoise_timesteps = self.bridge_scheduler.timesteps
 
-            for k in self.bridge_scheduler.timesteps:
+            for k in denoise_timesteps:
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
                     nogoal_embed, rgbd_embed, gated_prior, scale_embed
                 )
-                naction = self.bridge_scheduler.step_trajectory(
-                    x0_pred, naction, k,
-                    mode="nogoal",
-                    eta=self.inference_eta,
-                )
+                if self.ablation_diffusion_mode == 'ddpm':
+                    naction = self.noise_scheduler.step(
+                        model_output=x0_pred, timestep=k, sample=naction
+                    ).prev_sample
+                else:
+                    naction = self.bridge_scheduler.step_trajectory(
+                        x0_pred, naction, k,
+                        mode="nogoal",
+                        eta=self.inference_eta,
+                    )
 
-            critic_values = self.predict_critic(naction, rgbd_embed, scale_embed)
+            trajectory_for_score = self._to_output_trajectory_space(naction)
+            critic_values = self.predict_critic(trajectory_for_score, rgbd_embed, scale_embed)
 
             # ── 反归一化 ──
             # smooth_trajectory_batch 暂停使用；部署端可按机器人运动属性另行重采样。
-            naction = self._denormalize_action(naction)
+            naction = self._denormalize_action(trajectory_for_score)
             trajectory = naction
 
             negative_trajectory = trajectory[(critic_values).argsort()[0:8]]

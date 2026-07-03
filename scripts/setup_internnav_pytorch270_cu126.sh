@@ -7,6 +7,12 @@ TORCH_VERSION="${TORCH_VERSION:-2.7.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.22.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.7.0}"
 SYMPY_VERSION="${SYMPY_VERSION:-1.13.3}"
+HUGGINGFACE_HUB_VERSION="${HUGGINGFACE_HUB_VERSION:-0.34.4}"
+FASTAPI_VERSION="${FASTAPI_VERSION:-0.110.0}"
+STARLETTE_VERSION="${STARLETTE_VERSION:-0.36.3}"
+UVICORN_VERSION="${UVICORN_VERSION:-0.30.6}"
+DASH_VERSION="${DASH_VERSION:-2.18.2}"
+FLASK_VERSION="${FLASK_VERSION:-3.0.3}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 
 INSTALL_APT="${INSTALL_APT:-1}"
@@ -204,6 +210,12 @@ torch==${TORCH_VERSION}
 torchvision==${TORCHVISION_VERSION}
 torchaudio==${TORCHAUDIO_VERSION}
 sympy==${SYMPY_VERSION}
+huggingface-hub==${HUGGINGFACE_HUB_VERSION}
+fastapi==${FASTAPI_VERSION}
+starlette==${STARLETTE_VERSION}
+uvicorn==${UVICORN_VERSION}
+dash==${DASH_VERSION}
+Flask==${FLASK_VERSION}
 EOF
     export TORCH_CONSTRAINTS
 }
@@ -222,8 +234,8 @@ install_internnav_requirements() {
 
     local model_req_tmp
     model_req_tmp="$(mktemp)"
-    grep -Ev '^(flash_attn|triton|sympy)==' requirements/model_requirements.txt > "${model_req_tmp}"
-    log "Install InternNav model requirements except flash_attn/triton/sympy compatibility pins"
+    grep -Ev '^(flash_attn|triton|sympy|huggingface-hub)==' requirements/model_requirements.txt > "${model_req_tmp}"
+    log "Install InternNav model requirements except flash_attn/triton/sympy/huggingface-hub compatibility pins"
     python -m pip install -c "${TORCH_CONSTRAINTS}" -r "${model_req_tmp}"
     rm -f "${model_req_tmp}"
 

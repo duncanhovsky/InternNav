@@ -871,31 +871,48 @@ class BridgeDPTrainer(BaseTrainer):
                         B, model_ref.n_prior_tokens, model_ref.token_dim, device=device
                     )
 
-                # 有序区间初始化（与推理函数一致）
                 origin = torch.zeros_like(pg_n)  # (B, 3)
-                naction = model_ref.bridge_scheduler.sample_initial_noise_ordered(
-                    goal=pg_n,
-                    origin=origin,
-                    shape=(B, model_ref.predict_size, 3),
-                    device=device,
-                )
+                candidate_shape = (B, model_ref.predict_size, 3)
+                if (
+                    getattr(model_ref, "ablation_diffusion_mode", "bridge") == "ddpm"
+                    or getattr(model_ref, "ablation_initialization_mode", "ordered_bridge") == "gaussian"
+                ):
+                    naction = torch.randn(candidate_shape, device=device, dtype=pg_n.dtype)
+                else:
+                    naction = model_ref.bridge_scheduler.sample_initial_noise_ordered(
+                        goal=pg_n,
+                        origin=origin,
+                        shape=candidate_shape,
+                        device=device,
+                    )
                 theta_exp = theta_g
 
-                model_ref.bridge_scheduler.set_timesteps(model_ref.num_inference_timesteps)
-                for k in model_ref.bridge_scheduler.timesteps:
+                if getattr(model_ref, "ablation_diffusion_mode", "bridge") == "ddpm":
+                    model_ref.noise_scheduler.set_timesteps(model_ref.num_inference_timesteps)
+                    denoise_timesteps = model_ref.noise_scheduler.timesteps
+                else:
+                    model_ref.bridge_scheduler.set_timesteps(model_ref.num_inference_timesteps)
+                    denoise_timesteps = model_ref.bridge_scheduler.timesteps
+                for k in denoise_timesteps:
                     x0_pred = model_ref.predict_x0(
                         naction, k.to(device).unsqueeze(0),
                         pointgoal_embed, rgbd_embed, gated_prior, scale_embed,
                     )
-                    naction = model_ref.bridge_scheduler.step_trajectory(
-                        x0_pred, naction, k.to(device),
-                        goal=pg_n,
-                        theta_g=theta_exp,
-                        origin=origin,
-                        mode="pointgoal",
-                        eta=getattr(model_ref, "inference_eta", 0.0),
-                    )
+                    if getattr(model_ref, "ablation_diffusion_mode", "bridge") == "ddpm":
+                        naction = model_ref.noise_scheduler.step(
+                            model_output=x0_pred, timestep=k, sample=naction
+                        ).prev_sample
+                    else:
+                        naction = model_ref.bridge_scheduler.step_trajectory(
+                            x0_pred, naction, k.to(device),
+                            goal=pg_n,
+                            theta_g=theta_exp,
+                            origin=origin,
+                            mode="pointgoal",
+                            eta=getattr(model_ref, "inference_eta", 0.0),
+                        )
 
+                naction = model_ref._to_output_trajectory_space(naction)
                 if self.enable_trajectory_normalization:
                     pred_abs = self._trajectory_denorm_tensor(
                         naction,
