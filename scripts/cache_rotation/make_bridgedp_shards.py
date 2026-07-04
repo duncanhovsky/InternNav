@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.cache_rotation.cache_rotation_lib import (
     DEFAULT_TRAJ_SUFFIX,
     discover_scenes,
+    discover_scenes_resumable,
     resolve_profile,
     write_shard_manifest,
 )
@@ -28,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preset", choices=["balanced", "quality", "throughput"], default="balanced")
     parser.add_argument("--cache-slot-gb", type=int, default=0)
     parser.add_argument("--max-scenes-per-shard", type=int, default=0)
+    parser.add_argument("--work-dir", type=Path, default=None)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--quiet-progress", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)
     return parser.parse_args()
 
@@ -38,8 +42,16 @@ def main() -> int:
     hdd_traj = args.hdd_traj or (args.hdd_root / DEFAULT_TRAJ_SUFFIX)
     cache_slot_gb = args.cache_slot_gb or profile.cache_slot_gb
     max_scenes = args.max_scenes_per_shard or None
+    work_dir = args.work_dir or Path(f"{args.manifest}.work")
 
-    scenes = discover_scenes(hdd_traj)
+    if args.no_resume:
+        scenes = discover_scenes(hdd_traj)
+    else:
+        scenes = discover_scenes_resumable(
+            hdd_traj,
+            work_dir=work_dir,
+            log_progress=not args.quiet_progress,
+        )
     if not scenes:
         raise RuntimeError(f"no trainable scenes found under {hdd_traj}")
     manifest = write_shard_manifest(
@@ -51,6 +63,8 @@ def main() -> int:
     )
     summary = manifest["summary"]
     print(f"manifest={args.manifest}")
+    if not args.no_resume:
+        print(f"work_dir={work_dir}")
     print(f"hdd_traj={hdd_traj}")
     print(f"total_scenes={summary['total_scenes']}")
     print(f"total_episodes={summary['total_episodes']}")

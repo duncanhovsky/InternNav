@@ -164,13 +164,130 @@ def compute_training_plan(
 
 def directory_size(path: Path) -> int:
     total = 0
-    for file_path in path.rglob("*"):
-        if file_path.is_file():
-            try:
-                total += file_path.stat().st_size
-            except OSError:
-                pass
+    stack = [os.fspath(path)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     return total
+
+
+def _scene_record_from_dict(payload: dict) -> SceneRecord:
+    return SceneRecord(
+        group=str(payload["group"]),
+        scene=str(payload["scene"]),
+        rel_path=str(payload["rel_path"]),
+        bytes=int(payload.get("bytes", 0)),
+        episodes=int(payload.get("episodes", 0)),
+    )
+
+
+def _scene_inventory_file(work_dir: Path, group: str, scene: str) -> Path:
+    return Path(work_dir) / "scenes" / group / f"{scene}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def discover_scenes_resumable(
+    hdd_traj: Path,
+    *,
+    work_dir: Path,
+    log_progress: bool = True,
+) -> list[SceneRecord]:
+    """Discover scenes while checkpointing each scene inventory record.
+
+    Large shared filesystems can interrupt long metadata scans. This keeps one
+    JSON file per completed scene so reruns resume from the last completed scene
+    instead of restarting the whole dataset walk.
+    """
+    root = Path(hdd_traj)
+    if not root.is_dir():
+        raise FileNotFoundError(f"missing HDD trajectory root: {root}")
+
+    scene_dirs: list[Path] = []
+    for group_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        scene_dirs.extend(sorted(path for path in group_dir.iterdir() if path.is_dir()))
+
+    scenes: list[SceneRecord] = []
+    total = len(scene_dirs)
+    for index, scene_dir in enumerate(scene_dirs, start=1):
+        group = scene_dir.parent.name
+        scene_name = scene_dir.name
+        rel_path = scene_dir.relative_to(root).as_posix()
+        inventory = _scene_inventory_file(work_dir, group, scene_name)
+
+        if inventory.exists():
+            try:
+                payload = json.loads(inventory.read_text(encoding="utf-8"))
+                if payload.get("skipped"):
+                    if log_progress:
+                        print(f"[manifest-resume] skip cached empty scene {index}/{total}: {rel_path}", flush=True)
+                    continue
+                record = _scene_record_from_dict(payload)
+                scenes.append(record)
+                if log_progress:
+                    print(f"[manifest-resume] cached scene {index}/{total}: {rel_path} episodes={record.episodes}", flush=True)
+                continue
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                inventory.unlink(missing_ok=True)
+
+        if log_progress:
+            print(f"[manifest-resume] scan scene {index}/{total}: {rel_path}", flush=True)
+        episodes = count_scene_episodes(scene_dir)
+        if episodes <= 0:
+            _write_json_atomic(
+                inventory,
+                {
+                    "group": group,
+                    "scene": scene_name,
+                    "rel_path": rel_path,
+                    "bytes": 0,
+                    "episodes": 0,
+                    "skipped": True,
+                },
+            )
+            continue
+
+        record = SceneRecord(
+            group=group,
+            scene=scene_name,
+            rel_path=rel_path,
+            bytes=directory_size(scene_dir),
+            episodes=episodes,
+        )
+        _write_json_atomic(inventory, record.as_dict())
+        scenes.append(record)
+        if log_progress:
+            print(
+                f"[manifest-resume] done scene {index}/{total}: {rel_path} "
+                f"episodes={record.episodes} bytes={record.bytes}",
+                flush=True,
+            )
+
+    summary = {
+        "hdd_traj": str(root),
+        "total_scene_dirs": total,
+        "trainable_scenes": len(scenes),
+        "total_episodes": sum(scene.episodes for scene in scenes),
+        "total_bytes": sum(scene.bytes for scene in scenes),
+    }
+    _write_json_atomic(Path(work_dir) / "summary.json", summary)
+    return scenes
 
 
 def count_scene_episodes(scene_path: Path) -> int:

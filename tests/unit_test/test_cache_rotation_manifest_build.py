@@ -9,6 +9,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.cache_rotation.cache_rotation_lib import (
     build_cache_slot,
     discover_scenes,
+    discover_scenes_resumable,
     load_manifest,
     validate_cache_slot,
     write_shard_manifest,
@@ -75,3 +76,25 @@ def test_manifest_discovers_groups_and_builds_ready_cache_slot(tmp_path):
     preload = json.loads((slot_root / "preload_index.json").read_text(encoding="utf-8"))
     assert len(preload["trajectory_data_dir"]) == 1
     assert preload["trajectory_data_dir"][0].startswith(str(slot_root))
+
+
+def test_resumable_scene_discovery_reuses_completed_scene_records(tmp_path, monkeypatch):
+    from scripts.cache_rotation import cache_rotation_lib
+
+    hdd_traj = tmp_path / "hdd" / "datasets" / "InternData-N1" / "v0.5-full-vln-n1" / "vln_n1" / "traj_data"
+    _write_fake_episode(hdd_traj / "hssd_zed" / "scene_000" / "trajectory_00")
+    _write_fake_episode(hdd_traj / "hm3d_d435i" / "scene_001" / "trajectory_00")
+    work_dir = tmp_path / "manifest.work"
+
+    scenes = discover_scenes_resumable(hdd_traj, work_dir=work_dir, log_progress=False)
+    assert len(scenes) == 2
+    assert len(list((work_dir / "scenes").glob("*/*.json"))) == 2
+
+    def fail_if_rescanned(_path):
+        raise AssertionError("completed scene should have been loaded from resumable inventory")
+
+    monkeypatch.setattr(cache_rotation_lib, "directory_size", fail_if_rescanned)
+    monkeypatch.setattr(cache_rotation_lib, "count_scene_episodes", fail_if_rescanned)
+
+    resumed = discover_scenes_resumable(hdd_traj, work_dir=work_dir, log_progress=False)
+    assert [scene.as_dict() for scene in resumed] == [scene.as_dict() for scene in scenes]
