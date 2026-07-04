@@ -33,6 +33,7 @@ BRIDGEDP_NVME_SIZE=""
 BRIDGEDP_SHARD_EPOCHS=""
 BRIDGEDP_BATCH_SIZE=""
 BRIDGEDP_GRAD_ACCUM=""
+BRIDGEDP_LOW_NVME_MODE=""
 
 usage() {
     printf '%s\n' \
@@ -40,7 +41,7 @@ usage() {
         "  check_arcdp_training_ready.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 100|200|500|1000 [options]" \
         "" \
         "Options:" \
-        "  --nvme-size 1tb|2tb|4tb       NVMe cache profile size. Default: 2tb" \
+        "  --nvme-size 1tb|1.5tb|2tb|4tb NVMe cache profile size. Default: 2tb" \
         "  --preset balanced|quality|throughput" \
         "                                Cache rotation profile. Default: balanced" \
         "  --hdd-root PATH               HDD root used by cache rotation. Default: /hdd" \
@@ -133,8 +134,8 @@ case "${EPOCHS}" in
 esac
 
 case "${NVME_SIZE}" in
-    1tb|2tb|4tb) ;;
-    *) echo "--nvme-size must be 1tb, 2tb, or 4tb; got: ${NVME_SIZE}" >&2; exit 1 ;;
+    1tb|1.5tb|2tb|4tb) ;;
+    *) echo "--nvme-size must be 1tb, 1.5tb, 2tb, or 4tb; got: ${NVME_SIZE}" >&2; exit 1 ;;
 esac
 
 case "${PRESET}" in
@@ -190,7 +191,7 @@ if [[ "${PROFILE_STATUS}" -eq 0 ]]; then
     eval "${PROFILE_OUTPUT}"
     BRIDGEDP_NVME_SIZE="${BRIDGEDP_NVME_SIZE:-${NVME_SIZE}}"
     PROFILE_READY=1
-    pass "cache profile resolved: gpus=${BRIDGEDP_NUM_GPUS}, nvme=${BRIDGEDP_NVME_SIZE}, shard_epochs=${BRIDGEDP_SHARD_EPOCHS}, batch=${BRIDGEDP_BATCH_SIZE}, grad_accum=${BRIDGEDP_GRAD_ACCUM}"
+    pass "cache profile resolved: gpus=${BRIDGEDP_NUM_GPUS}, nvme=${BRIDGEDP_NVME_SIZE}, shard_epochs=${BRIDGEDP_SHARD_EPOCHS}, batch=${BRIDGEDP_BATCH_SIZE}, grad_accum=${BRIDGEDP_GRAD_ACCUM}, low_nvme=${BRIDGEDP_LOW_NVME_MODE:-0}"
 else
     BRIDGEDP_NVME_SIZE="${NVME_SIZE}"
     fail "cache profile failed" "Check --gpus/--nvme-size/--preset, then rerun this checker. Error: ${PROFILE_OUTPUT}"

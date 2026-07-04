@@ -1,8 +1,11 @@
 import logging
 import os
+import json
+import shutil
 import sys
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 if os.path.isdir('./third_party/diffusion-policy'):
     sys.path.append('./third_party/diffusion-policy')
@@ -22,6 +25,7 @@ from internnav.trainer import BridgeDPTrainer
 from scripts.train.base_train.configs.bridgedp_cache_rotation import bridgedp_cache_rotation_exp_cfg
 from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight, resolve_resume_checkpoint
 from scripts.train.base_train.train import CheckpointFormatCallback, DetailedProgressCallback, _make_dir
+from scripts.train.base_train.uniform_checkpoint_utils import compute_uniform_checkpoint_targets
 
 
 class CacheTrainCfg(BaseModel):
@@ -42,6 +46,102 @@ class StageStopCallback(TrainerCallback):
         if state.global_step >= self.stage_end_step:
             control.should_save = True
             control.should_training_stop = True
+        return control
+
+
+class UniformCheckpointArchiveCallback(TrainerCallback):
+    """Archive a fixed number of checkpoints spread across the full training run."""
+
+    def __init__(self, total_max_steps: int, checkpoint_count: int, archive_dir: str):
+        self.targets = compute_uniform_checkpoint_targets(total_max_steps, checkpoint_count)
+        self.archive_dir = Path(archive_dir) if archive_dir else None
+        self.archived_targets: set[int] = set()
+        self.records: list[dict] = []
+        self.manifest_path = self.archive_dir / "uniform_checkpoint_manifest.json" if self.archive_dir else None
+        self._load_manifest()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.archive_dir and self.targets)
+
+    def _load_manifest(self) -> None:
+        if not self.manifest_path or not self.manifest_path.exists():
+            return
+        try:
+            payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        records = payload.get("archives", [])
+        if not isinstance(records, list):
+            return
+        self.records = [record for record in records if isinstance(record, dict)]
+        self.archived_targets = {int(record["target_step"]) for record in self.records if "target_step" in record}
+
+    def _write_manifest(self) -> None:
+        if not self.manifest_path:
+            return
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "targets": self.targets,
+            "archive_count": len(self.records),
+            "archives": sorted(self.records, key=lambda item: int(item["target_step"])),
+        }
+        self.manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _next_due_target(self, current_step: int) -> int | None:
+        for target in self.targets:
+            if target not in self.archived_targets and int(current_step) >= target:
+                return target
+        return None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if self.enabled and _is_main_process():
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            self._write_manifest()
+            print(
+                "[UniformCheckpoint] archive enabled: "
+                f"{len(self.targets)} targets -> {self.archive_dir}"
+            )
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.enabled and self._next_due_target(state.global_step) is not None:
+            control.should_save = True
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        if not self.enabled or not _is_main_process():
+            return control
+        target = self._next_due_target(state.global_step)
+        if target is None:
+            return control
+
+        source = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        if not source.is_dir():
+            print(f"[UniformCheckpoint] skip missing source checkpoint: {source}")
+            return control
+
+        target_index = self.targets.index(target) + 1
+        dest = self.archive_dir / f"uniform-{target_index:02d}-target-{target}-step-{state.global_step}"
+        if dest.exists():
+            self.archived_targets.add(target)
+            self.records.append(
+                {"target_index": target_index, "target_step": target, "saved_step": state.global_step, "path": str(dest)}
+            )
+            self._write_manifest()
+            return control
+
+        tmp = dest.with_name(dest.name + ".tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        shutil.copytree(source, tmp)
+        tmp.rename(dest)
+        self.archived_targets.add(target)
+        self.records.append(
+            {"target_index": target_index, "target_step": target, "saved_step": state.global_step, "path": str(dest)}
+        )
+        self._write_manifest()
+        print(f"[UniformCheckpoint] archived target {target_index}/{len(self.targets)}: {dest}")
         return control
 
 
@@ -184,6 +284,16 @@ def main(config, model_class, model_config_class):
             data_collator=bridgedp_collate_fn,
         )
         trainer.add_callback(CheckpointFormatCallback(run_name=config.name, exp_cfg_dir=config.log_dir))
+        uniform_archive_dir = str(getattr(config.il, "uniform_checkpoint_dir", ""))
+        uniform_archive_count = int(getattr(config.il, "uniform_checkpoint_count", 0))
+        if uniform_archive_count > 0 and uniform_archive_dir:
+            trainer.add_callback(
+                UniformCheckpointArchiveCallback(
+                    total_max_steps=total_max_steps,
+                    checkpoint_count=uniform_archive_count,
+                    archive_dir=uniform_archive_dir,
+                )
+            )
         trainer.add_callback(
             DetailedProgressCallback(
                 log_dir=config.log_dir,

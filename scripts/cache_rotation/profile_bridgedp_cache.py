@@ -11,7 +11,11 @@ from scripts.cache_rotation.cache_rotation_lib import resolve_profile
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Print Bridge-DP cache rotation profile defaults.")
     parser.add_argument("--gpus", type=int, choices=[4, 8], required=True)
-    parser.add_argument("--nvme-size", choices=["1tb", "2tb", "4tb", "1t", "2t", "4t"], required=True)
+    parser.add_argument(
+        "--nvme-size",
+        choices=["1tb", "1.5tb", "2tb", "4tb", "1t", "1.5t", "1500g", "1500gb", "2t", "4t"],
+        required=True,
+    )
     parser.add_argument("--preset", choices=["balanced", "quality", "throughput"], default="balanced")
     return parser.parse_args()
 
@@ -28,6 +32,7 @@ def main() -> int:
     print(f"BRIDGEDP_BUILD_WORKERS={profile.build_workers}")
     print(f"BRIDGEDP_GRAD_ACCUM={profile.grad_accum}")
     print(f"BRIDGEDP_SAVE_STEPS={profile.save_steps}")
+    print(f"BRIDGEDP_LOW_NVME_MODE={1 if profile.low_nvme_mode else 0}")
     return 0
 
 

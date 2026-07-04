@@ -22,7 +22,7 @@ while [[ $# -gt 0 ]]; do
         --hdd-root) HDD_ROOT="$2"; shift 2 ;;
         --nvme-root) NVME_ROOT="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --slot cache_A|cache_B --shard-index N --gpus 4|8 --nvme-size 1tb|2tb|4tb [--preset balanced]"
+            echo "Usage: $0 --slot cache_A|cache_B --shard-index N --gpus 4|8 --nvme-size 1tb|1.5tb|2tb|4tb [--preset balanced]"
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;

@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hdd-traj", type=Path, default=None)
     parser.add_argument("--slot-root", type=Path, required=True)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--drop-existing-before-build",
+        action="store_true",
+        help="Remove the previous slot before copying the new shard to reduce NVMe peak usage.",
+    )
     return parser.parse_args()
 
 
@@ -29,6 +34,7 @@ def main() -> int:
         hdd_traj=hdd_traj,
         slot_root=args.slot_root,
         force=args.force,
+        drop_existing_before_build=args.drop_existing_before_build,
     )
     report = validate_cache_slot(args.slot_root)
     if not report.ok:

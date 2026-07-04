@@ -33,6 +33,7 @@ class RotationProfile:
     per_gpu_batch: int
     num_workers: int
     build_workers: int
+    low_nvme_mode: bool = False
     grad_accum: int = 1
     save_steps: int = 500
     validation_level: str = "fast"
@@ -75,21 +76,27 @@ class ValidationReport:
 
 _PROFILE_TABLE = {
     (4, "1tb", "balanced"): dict(cache_slot_gb=320, shard_epochs=3, num_workers=10, build_workers=3),
+    (4, "1.5tb", "balanced"): dict(cache_slot_gb=600, shard_epochs=2, num_workers=10, build_workers=4, low_nvme_mode=True),
     (4, "2tb", "balanced"): dict(cache_slot_gb=750, shard_epochs=2, num_workers=10, build_workers=4),
     (4, "4tb", "balanced"): dict(cache_slot_gb=1600, shard_epochs=1, num_workers=10, build_workers=4),
     (8, "1tb", "balanced"): dict(cache_slot_gb=320, shard_epochs=5, num_workers=8, build_workers=4),
+    (8, "1.5tb", "balanced"): dict(cache_slot_gb=600, shard_epochs=4, num_workers=8, build_workers=5, low_nvme_mode=True),
     (8, "2tb", "balanced"): dict(cache_slot_gb=750, shard_epochs=4, num_workers=8, build_workers=5),
     (8, "4tb", "balanced"): dict(cache_slot_gb=1600, shard_epochs=2, num_workers=8, build_workers=6),
     (4, "1tb", "quality"): dict(cache_slot_gb=320, shard_epochs=2, num_workers=10, build_workers=3),
+    (4, "1.5tb", "quality"): dict(cache_slot_gb=600, shard_epochs=1, num_workers=10, build_workers=4, low_nvme_mode=True),
     (4, "2tb", "quality"): dict(cache_slot_gb=750, shard_epochs=1, num_workers=10, build_workers=4),
     (4, "4tb", "quality"): dict(cache_slot_gb=1600, shard_epochs=1, num_workers=10, build_workers=4),
     (8, "1tb", "quality"): dict(cache_slot_gb=320, shard_epochs=4, num_workers=8, build_workers=4),
+    (8, "1.5tb", "quality"): dict(cache_slot_gb=600, shard_epochs=3, num_workers=8, build_workers=5, low_nvme_mode=True),
     (8, "2tb", "quality"): dict(cache_slot_gb=750, shard_epochs=2, num_workers=8, build_workers=5),
     (8, "4tb", "quality"): dict(cache_slot_gb=1600, shard_epochs=2, num_workers=8, build_workers=6),
     (4, "1tb", "throughput"): dict(cache_slot_gb=320, shard_epochs=4, num_workers=10, build_workers=4),
+    (4, "1.5tb", "throughput"): dict(cache_slot_gb=600, shard_epochs=3, num_workers=10, build_workers=4, low_nvme_mode=True),
     (4, "2tb", "throughput"): dict(cache_slot_gb=750, shard_epochs=3, num_workers=10, build_workers=4),
     (4, "4tb", "throughput"): dict(cache_slot_gb=1600, shard_epochs=2, num_workers=10, build_workers=5),
     (8, "1tb", "throughput"): dict(cache_slot_gb=320, shard_epochs=6, num_workers=8, build_workers=5),
+    (8, "1.5tb", "throughput"): dict(cache_slot_gb=600, shard_epochs=5, num_workers=8, build_workers=5, low_nvme_mode=True),
     (8, "2tb", "throughput"): dict(cache_slot_gb=750, shard_epochs=5, num_workers=8, build_workers=6),
     (8, "4tb", "throughput"): dict(cache_slot_gb=1600, shard_epochs=3, num_workers=8, build_workers=6),
 }
@@ -97,10 +104,18 @@ _PROFILE_TABLE = {
 
 def normalize_nvme_size(value: str) -> str:
     text = str(value).strip().lower().replace(" ", "")
+    aliases = {
+        "1.5t": "1.5tb",
+        "1.5tb": "1.5tb",
+        "1500g": "1.5tb",
+        "1500gb": "1.5tb",
+    }
+    if text in aliases:
+        return aliases[text]
     if text.endswith("t"):
         text += "b"
-    if text not in {"1tb", "2tb", "4tb"}:
-        raise ValueError(f"unsupported nvme size: {value}; expected 1tb, 2tb, or 4tb")
+    if text not in {"1tb", "1.5tb", "2tb", "4tb"}:
+        raise ValueError(f"unsupported nvme size: {value}; expected 1tb, 1.5tb, 2tb, or 4tb")
     return text
 
 
@@ -412,6 +427,7 @@ def build_cache_slot(
     hdd_traj: Path,
     slot_root: Path,
     force: bool = False,
+    drop_existing_before_build: bool = False,
 ) -> dict:
     manifest = load_manifest(manifest_path)
     shards = manifest.get("shards", [])
@@ -433,6 +449,8 @@ def build_cache_slot(
     building = slot.with_name(slot.name + ".building")
     if building.exists():
         shutil.rmtree(building)
+    if drop_existing_before_build and slot.exists():
+        shutil.rmtree(slot)
     building.mkdir(parents=True, exist_ok=True)
     (building / ".BUILDING").write_text(str(os.getpid()), encoding="utf-8")
 

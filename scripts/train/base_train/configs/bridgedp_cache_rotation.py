@@ -82,8 +82,11 @@ il.gradient_accumulation_steps = _env_int("BRIDGEDP_GRAD_ACCUM", 1)
 il.total_max_steps = _env_int("BRIDGEDP_TOTAL_MAX_STEPS", 100000)
 il.stage_end_step = _env_int("BRIDGEDP_STAGE_END_STEP", 1000)
 il.save_steps = _env_int("BRIDGEDP_SAVE_STEPS", 500)
+il.save_total_limit = _env_int("BRIDGEDP_SAVE_TOTAL_LIMIT", 3)
 il.ignore_data_skip = os.environ.get("BRIDGEDP_IGNORE_DATA_SKIP", "1") != "0"
 il.save_strategy = os.environ.get("BRIDGEDP_SAVE_STRATEGY", "steps")
+il.uniform_checkpoint_count = _env_int("BRIDGEDP_UNIFORM_CKPT_COUNT", 20)
+il.uniform_checkpoint_dir = os.environ.get("BRIDGEDP_UNIFORM_CKPT_DIR", "")
 il.cache_stage_id = os.environ.get("BRIDGEDP_CACHE_STAGE_ID", "")
 il.cache_slot_root = CACHE_SLOT_ROOT
 

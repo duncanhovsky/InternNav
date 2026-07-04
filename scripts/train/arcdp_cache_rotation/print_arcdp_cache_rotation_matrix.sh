@@ -5,14 +5,14 @@ SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_DIR="$(cd "${SCRIPT_PATH%/*}" && pwd)"
 
 GPU_LIST=("4" "8")
-NVME_SIZE="2tb"
+NVME_SIZE="1.5tb"
 PRESET="balanced"
 EXTRA_ARGS=()
 
 usage() {
     printf '%s\n' \
         "Usage:" \
-        "  print_arcdp_cache_rotation_matrix.sh [--gpus 4|8|both] [--nvme-size 1tb|2tb|4tb] [--preset balanced|quality|throughput] [extra launcher args]" \
+        "  print_arcdp_cache_rotation_matrix.sh [--gpus 4|8|both] [--nvme-size 1tb|1.5tb|2tb|4tb] [--preset balanced|quality|throughput] [extra launcher args]" \
         "" \
         "Prints the ArcDP full/P0 cache-rotation training command matrix." \
         "It does not start training."

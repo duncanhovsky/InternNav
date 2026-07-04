@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
         --no-swanlab) ENABLE_SWANLAB=0; shift ;;
         --force) FORCE=1; shift ;;
         -h|--help)
-            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|2tb|4tb [--preset balanced|quality|throughput] [--swanlab-project NAME] [--no-swanlab] [--force]"
+            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|1.5tb|2tb|4tb [--preset balanced|quality|throughput] [--swanlab-project NAME] [--no-swanlab] [--force]"
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -100,6 +100,7 @@ echo "  gpus:           ${GPUS}"
 echo "  nvme size:      ${BRIDGEDP_NVME_SIZE}"
 echo "  preset:         ${PRESET}"
 echo "  cache slot GB:  ${BRIDGEDP_CACHE_SLOT_GB}"
+echo "  low nvme mode:  ${BRIDGEDP_LOW_NVME_MODE:-0}"
 check_swanlab_setup
 
 if [[ ! -d "${HDD_TRAJ}" ]]; then
@@ -171,6 +172,9 @@ FORCE_ARGS=()
 if [[ "${FORCE}" == "1" ]]; then
     FORCE_ARGS+=(--force)
 fi
+if [[ "${BRIDGEDP_LOW_NVME_MODE:-0}" == "1" ]]; then
+    FORCE_ARGS+=(--drop-existing-before-build)
+fi
 
 echo
 echo "[5/5] Prebuild cache_A and cache_B"
@@ -199,4 +203,7 @@ echo "  cache_B:  ${CACHE_ROOT}/cache_B"
 echo
 echo "Start training example:"
 echo "  export SWANLAB_API_KEY=<your_api_key>   # skip only if swanlab login was already done"
-echo "  bash ${PROJECT_ROOT}/scripts/train/arcdp_cache_rotation/train_arcdp_cache_rotation_${GPUS}a800.sh --variant full --epochs 100 --nvme-size ${BRIDGEDP_NVME_SIZE} --preset ${PRESET} --swanlab-project ${SWANLAB_PROJECT_VALUE}"
+echo "  bash ${PROJECT_ROOT}/scripts/train/arcdp_cache_rotation/train_arcdp_cache_rotation_${GPUS}a800.sh --variant full --epochs 100 --nvme-size ${BRIDGEDP_NVME_SIZE} --preset ${PRESET} --hdd-root ${HDD_ROOT} --nvme-root ${NVME_ROOT} --swanlab-project ${SWANLAB_PROJECT_VALUE}"
+if [[ "${GPUS}" == "4" ]]; then
+    echo "  bash ${PROJECT_ROOT}/scripts/train/arcdp_cache_rotation/train_arcdp_cache_rotation_4a800_100ep_suite.sh --nvme-size ${BRIDGEDP_NVME_SIZE} --preset ${PRESET} --hdd-root ${HDD_ROOT} --nvme-root ${NVME_ROOT} --swanlab-project ${SWANLAB_PROJECT_VALUE}"
+fi

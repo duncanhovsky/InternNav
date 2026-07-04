@@ -95,6 +95,59 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
         assert variant in matrix_text
 
 
+def test_arcdp_cache_rotation_supports_1p5tb_low_nvme_and_uniform_archives():
+    cache_lib = PROJECT_ROOT / "scripts" / "cache_rotation" / "cache_rotation_lib.py"
+    profile = PROJECT_ROOT / "scripts" / "cache_rotation" / "profile_bridgedp_cache.py"
+    build = PROJECT_ROOT / "scripts" / "cache_rotation" / "build_bridgedp_cache_shard.py"
+    train_shell = PROJECT_ROOT / "train_bridgedp_cache_rotation.sh"
+    cache_train = PROJECT_ROOT / "scripts" / "train" / "base_train" / "train_cache_rotation.py"
+    cache_cfg = PROJECT_ROOT / "scripts" / "train" / "base_train" / "configs" / "bridgedp_cache_rotation.py"
+    generic = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "train_arcdp_cache_rotation.sh"
+    checker = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "check_arcdp_training_ready.sh"
+
+    cache_text = cache_lib.read_text(encoding="utf-8")
+    assert '"1.5tb"' in cache_text
+    assert "cache_slot_gb=600" in cache_text
+    assert "low_nvme_mode=True" in cache_text
+    assert "drop_existing_before_build" in cache_text
+
+    for path in [profile, train_shell, generic, checker]:
+        assert "1.5tb" in path.read_text(encoding="utf-8"), f"missing 1.5tb support in {path}"
+
+    assert "--drop-existing-before-build" in build.read_text(encoding="utf-8")
+    train_shell_text = train_shell.read_text(encoding="utf-8")
+    assert "BRIDGEDP_LOW_NVME_MODE" in train_shell_text
+    assert "BRIDGEDP_UNIFORM_CKPT_COUNT" in train_shell_text
+    assert "BRIDGEDP_UNIFORM_CKPT_DIR" in train_shell_text
+    assert "uniform_checkpoints" in train_shell_text
+    assert "BRIDGEDP_SAVE_TOTAL_LIMIT" in train_shell_text
+
+    cache_train_text = cache_train.read_text(encoding="utf-8")
+    assert "UniformCheckpointArchiveCallback" in cache_train_text
+    assert "compute_uniform_checkpoint_targets" in cache_train_text
+
+    cache_cfg_text = cache_cfg.read_text(encoding="utf-8")
+    assert "BRIDGEDP_UNIFORM_CKPT_COUNT" in cache_cfg_text
+    assert "BRIDGEDP_UNIFORM_CKPT_DIR" in cache_cfg_text
+    assert "BRIDGEDP_SAVE_TOTAL_LIMIT" in cache_cfg_text
+
+
+def test_4a800_100ep_suite_launcher_runs_full_and_p0_variants():
+    suite = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "train_arcdp_cache_rotation_4a800_100ep_suite.sh"
+    assert suite.exists(), f"missing suite launcher: {suite}"
+
+    text = suite.read_text(encoding="utf-8")
+    assert "--epochs" in text
+    assert "100" in text
+    assert "--hdd-root" in text
+    assert "/ssd" in text
+    assert "--nvme-size" in text
+    assert "1.5tb" in text
+    assert "swanlab" in text.lower()
+    for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
+        assert variant in text
+
+
 def test_detailed_progress_callback_exposes_low_frequency_eta_metrics():
     train_py = PROJECT_ROOT / "scripts" / "train" / "base_train" / "train.py"
     text = train_py.read_text(encoding="utf-8")

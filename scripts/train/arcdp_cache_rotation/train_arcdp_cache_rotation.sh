@@ -26,7 +26,7 @@ usage() {
         "  train_arcdp_cache_rotation.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 100|200|500|1000 [options]" \
         "" \
         "Options:" \
-        "  --nvme-size 1tb|2tb|4tb       NVMe cache profile size. Default: 2tb" \
+        "  --nvme-size 1tb|1.5tb|2tb|4tb NVMe cache profile size. Default: 2tb" \
         "  --preset balanced|quality|throughput" \
         "                                Cache rotation profile. Default: balanced" \
         "  --hdd-root PATH               HDD root used by cache rotation. Default: /hdd" \
@@ -84,8 +84,8 @@ case "${EPOCHS}" in
 esac
 
 case "${NVME_SIZE}" in
-    1tb|2tb|4tb) ;;
-    *) echo "--nvme-size must be 1tb, 2tb, or 4tb; got: ${NVME_SIZE}" >&2; exit 1 ;;
+    1tb|1.5tb|2tb|4tb) ;;
+    *) echo "--nvme-size must be 1tb, 1.5tb, 2tb, or 4tb; got: ${NVME_SIZE}" >&2; exit 1 ;;
 esac
 
 case "${PRESET}" in
@@ -100,6 +100,8 @@ fi
 export ARCDP_CACHE_VARIANT="${VARIANT}"
 export BRIDGEDP_LOGGING_STEPS="${BRIDGEDP_LOGGING_STEPS:-100}"
 export BRIDGEDP_ETA_LOG_STEPS="${BRIDGEDP_ETA_LOG_STEPS:-500}"
+export BRIDGEDP_SAVE_TOTAL_LIMIT="${BRIDGEDP_SAVE_TOTAL_LIMIT:-3}"
+export BRIDGEDP_UNIFORM_CKPT_COUNT="${BRIDGEDP_UNIFORM_CKPT_COUNT:-20}"
 
 if [[ "${ENABLE_SWANLAB}" -eq 1 ]]; then
     export BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-swanlab}"
@@ -165,6 +167,8 @@ printf '%s\n' \
     "  report_to:    ${BRIDGEDP_REPORT_TO}" \
     "  log steps:    ${BRIDGEDP_LOGGING_STEPS}" \
     "  eta steps:    ${BRIDGEDP_ETA_LOG_STEPS}" \
+    "  live ckpts:   keep latest ${BRIDGEDP_SAVE_TOTAL_LIMIT}" \
+    "  uniform ckpt: ${BRIDGEDP_UNIFORM_CKPT_COUNT} evenly spaced archives" \
     "  formula:      ceil(50 * total_episodes * ${EPOCHS} / (${GPUS} * per_gpu_batch * grad_accum))"
 
 printf 'Command:'

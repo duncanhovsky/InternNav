@@ -20,7 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gpus", type=int, choices=[4, 8], required=True)
-    parser.add_argument("--nvme-size", choices=["1tb", "2tb", "4tb", "1t", "2t", "4t"], required=True)
+    parser.add_argument(
+        "--nvme-size",
+        choices=["1tb", "1.5tb", "2tb", "4tb", "1t", "1.5t", "1500g", "1500gb", "2t", "4t"],
+        required=True,
+    )
     parser.add_argument("--preset", choices=["balanced", "quality", "throughput"], default="balanced")
     parser.add_argument("--total-epochs", type=int, required=True)
     parser.add_argument("--shard-epochs", type=int, default=0)

@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
         --start-shard) START_SHARD="$2"; shift 2 ;;
         --max-stages) MAX_STAGES="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|2tb|4tb --total-epochs N [--preset balanced|quality|throughput]"
+            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|1.5tb|2tb|4tb --total-epochs N [--preset balanced|quality|throughput]"
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -49,6 +49,7 @@ export BRIDGEDP_GRAD_ACCUM="${BRIDGEDP_GRAD_ACCUM:-1}"
 export BRIDGEDP_AUTO_RESUME="${BRIDGEDP_AUTO_RESUME:-1}"
 export BRIDGEDP_IGNORE_DATA_SKIP="${BRIDGEDP_IGNORE_DATA_SKIP:-1}"
 export BRIDGEDP_SAVE_STEPS="${BRIDGEDP_SAVE_STEPS:-500}"
+export BRIDGEDP_SAVE_TOTAL_LIMIT="${BRIDGEDP_SAVE_TOTAL_LIMIT:-3}"
 export BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-tensorboard}"
 export BRIDGEDP_LOGGING_STEPS="${BRIDGEDP_LOGGING_STEPS:-100}"
 export BRIDGEDP_ETA_LOG_STEPS="${BRIDGEDP_ETA_LOG_STEPS:-500}"
@@ -67,6 +68,9 @@ CACHE_ROOT="${NVME_ROOT}/bridgedp_cache"
 OUTPUT_DIR="${PROJECT_ROOT}/checkpoints/${RUN_NAME}/ckpts"
 BACKUP_DIR="${HDD_ROOT}/bridgedp_rotation/checkpoints/${RUN_NAME}"
 LOG_DIR="${HDD_ROOT}/bridgedp_rotation/logs/${RUN_NAME}"
+UNIFORM_CKPT_DIR="${BRIDGEDP_UNIFORM_CKPT_DIR:-${HDD_ROOT}/bridgedp_rotation/uniform_checkpoints/${RUN_NAME}}"
+export BRIDGEDP_UNIFORM_CKPT_COUNT="${BRIDGEDP_UNIFORM_CKPT_COUNT:-20}"
+export BRIDGEDP_UNIFORM_CKPT_DIR="${UNIFORM_CKPT_DIR}"
 mkdir -p "${BACKUP_DIR}" "${LOG_DIR}"
 
 if [[ ! -f "${MANIFEST}" ]]; then
@@ -84,12 +88,18 @@ fi
 build_slot() {
     local shard_index="$1"
     local slot_root="$2"
-    python "${PROJECT_ROOT}/scripts/cache_rotation/build_bridgedp_cache_shard.py" \
-        --manifest "${MANIFEST}" \
-        --hdd-root "${HDD_ROOT}" \
-        --shard-index "${shard_index}" \
-        --slot-root "${slot_root}" \
+    local build_args=(
+        "${PROJECT_ROOT}/scripts/cache_rotation/build_bridgedp_cache_shard.py"
+        --manifest "${MANIFEST}"
+        --hdd-root "${HDD_ROOT}"
+        --shard-index "${shard_index}"
+        --slot-root "${slot_root}"
         --force
+    )
+    if [[ "${BRIDGEDP_LOW_NVME_MODE:-0}" == "1" ]]; then
+        build_args+=(--drop-existing-before-build)
+    fi
+    python "${build_args[@]}"
 }
 
 wait_for_ready() {
@@ -118,6 +128,9 @@ echo "  variant:      ${ARCDP_CACHE_VARIANT}"
 echo "  report_to:    ${BRIDGEDP_REPORT_TO}"
 echo "  log steps:    ${BRIDGEDP_LOGGING_STEPS}"
 echo "  eta steps:    ${BRIDGEDP_ETA_LOG_STEPS}"
+echo "  live ckpts:   keep latest ${BRIDGEDP_SAVE_TOTAL_LIMIT}"
+echo "  uniform ckpt: ${BRIDGEDP_UNIFORM_CKPT_COUNT} -> ${BRIDGEDP_UNIFORM_CKPT_DIR}"
+echo "  low nvme:     ${BRIDGEDP_LOW_NVME_MODE:-0}"
 
 while true; do
     if [[ "${MAX_STAGES}" -gt 0 && "${STAGE}" -ge "${MAX_STAGES}" ]]; then

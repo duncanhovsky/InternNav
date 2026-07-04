@@ -20,7 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hdd-traj", type=Path, default=None)
     parser.add_argument("--manifest", type=Path, default=Path("/hdd/bridgedp_rotation/manifests/shards.json"))
     parser.add_argument("--gpus", type=int, choices=[4, 8], required=True)
-    parser.add_argument("--nvme-size", choices=["1tb", "2tb", "4tb", "1t", "2t", "4t"], required=True)
+    parser.add_argument(
+        "--nvme-size",
+        choices=["1tb", "1.5tb", "2tb", "4tb", "1t", "1.5t", "1500g", "1500gb", "2t", "4t"],
+        required=True,
+    )
     parser.add_argument("--preset", choices=["balanced", "quality", "throughput"], default="balanced")
     parser.add_argument("--cache-slot-gb", type=int, default=0)
     parser.add_argument("--max-scenes-per-shard", type=int, default=0)
