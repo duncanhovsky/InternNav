@@ -23,7 +23,7 @@ SWANLAB_WORKSPACE_VALUE="${SWANLAB_WORKSPACE:-}"
 usage() {
     printf '%s\n' \
         "Usage:" \
-        "  train_arcdp_cache_rotation.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 100|200|500|1000 [options]" \
+        "  train_arcdp_cache_rotation.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 10|100|200|500|1000 [options]" \
         "" \
         "Options:" \
         "  --nvme-size 1tb|1.5tb|2tb|4tb NVMe cache profile size. Default: 2tb" \
@@ -41,7 +41,7 @@ usage() {
         "  -h, --help                    Show this help." \
         "" \
         "Equivalent epoch budgets:" \
-        "  --epochs 100|200|500|1000 maps to cache-rotation total steps with:" \
+        "  --epochs 10|100|200|500|1000 maps to cache-rotation total steps with:" \
         "  ceil(50 * total_episodes * epochs / (gpus * per_gpu_batch * grad_accum))."
 }
 
@@ -78,9 +78,9 @@ case "${VARIANT}" in
 esac
 
 case "${EPOCHS}" in
-    100|200|500|1000) ;;
+    10|100|200|500|1000) ;;
     "") echo "--epochs is required." >&2; usage >&2; exit 1 ;;
-    *) echo "--epochs must be one of 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
+    *) echo "--epochs must be one of 10, 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
 esac
 
 case "${NVME_SIZE}" in

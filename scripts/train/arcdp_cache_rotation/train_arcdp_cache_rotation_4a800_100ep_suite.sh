@@ -14,6 +14,8 @@ ENABLE_SWANLAB=1
 DRY_RUN=0
 ONLY_VARIANT=""
 START_AT=""
+FULL_EPOCHS="100"
+ABLATION_EPOCHS="10"
 
 VARIANTS=(full rel no_bridge no_ordered_init no_scale_cond no_anchor_train no_gcs)
 
@@ -22,7 +24,7 @@ usage() {
         "Usage:" \
         "  train_arcdp_cache_rotation_4a800_100ep_suite.sh [options]" \
         "" \
-        "Runs full ArcDP and all P0 ablations for 100 equivalent epochs on 4 x A800." \
+        "Runs full ArcDP for 100 equivalent epochs and all P0 ablations for 10 equivalent epochs on 4 x A800." \
         "" \
         "Options:" \
         "  --nvme-size 1tb|1.5tb|2tb|4tb  Default: 1.5tb" \
@@ -32,6 +34,8 @@ usage() {
         "  --nvme-root PATH                 Default: /nvme" \
         "  --swanlab-project NAME           Default: ArcDP-100ep" \
         "  --swanlab-workspace NAME" \
+        "  --full-epochs N                  Default: 100" \
+        "  --ablation-epochs N              Default: 10" \
         "  --only VARIANT                   Run one variant only." \
         "  --start-at VARIANT               Skip variants before VARIANT." \
         "  --no-swanlab                     Use tensorboard only." \
@@ -58,6 +62,8 @@ while [[ $# -gt 0 ]]; do
         --nvme-root) NVME_ROOT="$2"; shift 2 ;;
         --swanlab-project) SWANLAB_PROJECT_VALUE="$2"; shift 2 ;;
         --swanlab-workspace) SWANLAB_WORKSPACE_VALUE="$2"; shift 2 ;;
+        --full-epochs) FULL_EPOCHS="$2"; shift 2 ;;
+        --ablation-epochs) ABLATION_EPOCHS="$2"; shift 2 ;;
         --only) ONLY_VARIANT="$2"; shift 2 ;;
         --start-at) START_AT="$2"; shift 2 ;;
         --no-swanlab) ENABLE_SWANLAB=0; shift ;;
@@ -77,6 +83,13 @@ case "${PRESET}" in
     *) echo "--preset must be balanced, quality, or throughput; got: ${PRESET}" >&2; exit 1 ;;
 esac
 
+for epoch_value in "${FULL_EPOCHS}" "${ABLATION_EPOCHS}"; do
+    case "${epoch_value}" in
+        10|100|200|500|1000) ;;
+        *) echo "suite epochs must be one of 10, 100, 200, 500, 1000; got: ${epoch_value}" >&2; exit 1 ;;
+    esac
+done
+
 if [[ -n "${ONLY_VARIANT}" ]] && ! is_supported_variant "${ONLY_VARIANT}"; then
     echo "Unsupported --only variant: ${ONLY_VARIANT}" >&2
     exit 1
@@ -87,8 +100,10 @@ if [[ -n "${START_AT}" ]] && ! is_supported_variant "${START_AT}"; then
 fi
 
 printf '%s\n' \
-    "ArcDP 4 x A800 100-epoch suite" \
+    "ArcDP 4 x A800 full-100ep / P0-10ep suite" \
     "  variants:       ${VARIANTS[*]}" \
+    "  full epochs:    ${FULL_EPOCHS}" \
+    "  ablation epochs:${ABLATION_EPOCHS}" \
     "  nvme profile:   ${NVME_SIZE}/${PRESET}" \
     "  hdd root:       ${HDD_ROOT}" \
     "  nvme root:      ${NVME_ROOT}" \
@@ -113,9 +128,14 @@ for variant in "${VARIANTS[@]}"; do
         fi
     fi
 
+    variant_epochs="${FULL_EPOCHS}"
+    if [[ "${variant}" != "full" ]]; then
+        variant_epochs="${ABLATION_EPOCHS}"
+    fi
+
     args=(
         --variant "${variant}"
-        --epochs 100
+        --epochs "${variant_epochs}"
         --nvme-size "${NVME_SIZE}"
         --preset "${PRESET}"
         --hdd-root "${HDD_ROOT}"
@@ -132,6 +152,6 @@ for variant in "${VARIANTS[@]}"; do
         args+=(--dry-run)
     fi
 
-    printf '\n%s\n' "=== Launch variant: ${variant} ==="
+    printf '\n%s\n' "=== Launch variant: ${variant} (${variant_epochs} equivalent epochs) ==="
     "${BASH:-bash}" "${SCRIPT_DIR}/train_arcdp_cache_rotation_4a800.sh" "${args[@]}"
 done

@@ -72,7 +72,7 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
         assert path.exists(), f"missing launcher: {path}"
 
     generic_text = generic.read_text(encoding="utf-8")
-    assert "--epochs 100|200|500|1000" in generic_text
+    assert "--epochs 10|100|200|500|1000" in generic_text
     assert "ARCDP_CACHE_VARIANT" in generic_text
     assert "BRIDGEDP_REPORT_TO" in generic_text
     assert "swanlab" in generic_text
@@ -89,7 +89,7 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
     assert '--gpus "8"' in gpu8.read_text(encoding="utf-8")
 
     matrix_text = matrix.read_text(encoding="utf-8")
-    for epoch in ["100", "200", "500", "1000"]:
+    for epoch in ["10", "100", "200", "500", "1000"]:
         assert epoch in matrix_text
     for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
         assert variant in matrix_text
@@ -138,7 +138,10 @@ def test_4a800_100ep_suite_launcher_runs_full_and_p0_variants():
 
     text = suite.read_text(encoding="utf-8")
     assert "--epochs" in text
-    assert "100" in text
+    assert "FULL_EPOCHS=\"100\"" in text
+    assert "ABLATION_EPOCHS=\"10\"" in text
+    assert 'variant_epochs="${FULL_EPOCHS}"' in text
+    assert 'variant_epochs="${ABLATION_EPOCHS}"' in text
     assert "--hdd-root" in text
     assert "/ssd" in text
     assert "--nvme-size" in text
@@ -168,7 +171,7 @@ def test_arcdp_training_readiness_checker_guides_missing_prereqs():
     assert "does not stop at the first failed check" in text
     assert "--gpus 4|8" in text
     assert "--variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs" in text
-    assert "--epochs 100|200|500|1000" in text
+    assert "--epochs 10|100|200|500|1000" in text
     assert "prepare_bridgedp_cache_rotation.sh" in text
     assert "train_arcdp_cache_rotation" in text
     assert "SWANLAB_API_KEY" in text
