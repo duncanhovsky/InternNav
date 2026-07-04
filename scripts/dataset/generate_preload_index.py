@@ -151,8 +151,8 @@ def _process_data_unit(unit_path: Path) -> dict:
                 if 'image_index' in episode:
                     image_start_index = episode['image_index']['min']
                     image_end_index = episode['image_index']['max']
-                    episode_rgb_path = np.array(rgb_paths)[image_start_index : image_end_index + 1].tolist()
-                    episode_depth_path = np.array(depth_paths)[image_start_index : image_end_index + 1].tolist()
+                    episode_rgb_path = rgb_paths[image_start_index : image_end_index + 1]
+                    episode_depth_path = depth_paths[image_start_index : image_end_index + 1]
                 else:
                     episode_rgb_path = rgb_paths
                     episode_depth_path = depth_paths
@@ -302,21 +302,50 @@ def _load_completed_shard(work_dir: Path, unit: dict) -> dict | None:
 
 
 def _summarize_work(units: list[dict], work_dir: Path) -> dict:
+    completed_unit_rels, total_episodes, last_completed = _scan_completed_shards(units, work_dir)
+    return _make_resume_summary(
+        units,
+        completed_unit_rels=completed_unit_rels,
+        total_episodes=total_episodes,
+        last_completed=last_completed,
+    )
+
+
+def _scan_completed_shards(units: list[dict], work_dir: Path) -> tuple[set[str], int, str | None]:
+    completed_unit_rels: set[str] = set()
     completed_units = 0
     total_episodes = 0
     last_completed = None
-    next_unit = None
     for unit in units:
         shard = _load_completed_shard(work_dir, unit)
         if shard is None:
-            if next_unit is None:
-                next_unit = unit['unit_rel']
             continue
+        completed_unit_rels.add(unit['unit_rel'])
         completed_units += 1
         last_completed = unit['unit_rel']
         total_episodes += int(shard.get('episodes', len(shard['index']['trajectory_data_dir'])))
+    return completed_unit_rels, total_episodes, last_completed
 
+
+def _first_uncompleted_unit(units: list[dict], completed_unit_rels: set[str], start_index: int = 0) -> str | None:
+    for unit in units[start_index:]:
+        if unit['unit_rel'] not in completed_unit_rels:
+            return unit['unit_rel']
+    return None
+
+
+def _make_resume_summary(
+    units: list[dict],
+    *,
+    completed_unit_rels: set[str],
+    total_episodes: int,
+    last_completed: str | None,
+    next_unit: str | None = None,
+) -> dict:
+    completed_units = len(completed_unit_rels)
     complete = completed_units == len(units)
+    if next_unit is None and not complete:
+        next_unit = _first_uncompleted_unit(units, completed_unit_rels)
     return {
         'complete': complete,
         'total_units': len(units),
@@ -418,7 +447,13 @@ def generate_preload_index_resumable(
     (work_dir / 'shards').mkdir(parents=True, exist_ok=True)
 
     units = _collect_scan_units(root_path, scene_scale)
-    summary = _summarize_work(units, work_dir)
+    completed_unit_rels, total_episodes, last_completed = _scan_completed_shards(units, work_dir)
+    summary = _make_resume_summary(
+        units,
+        completed_unit_rels=completed_unit_rels,
+        total_episodes=total_episodes,
+        last_completed=last_completed,
+    )
     _write_progress(
         work_dir,
         root_dir=root_path,
@@ -431,11 +466,17 @@ def generate_preload_index_resumable(
         return summary
 
     processed_this_run = 0
-    for unit in units:
-        if _load_completed_shard(work_dir, unit) is not None:
+    for unit_index, unit in enumerate(units):
+        if unit['unit_rel'] in completed_unit_rels:
             continue
 
-        current_summary = _summarize_work(units, work_dir)
+        current_summary = _make_resume_summary(
+            units,
+            completed_unit_rels=completed_unit_rels,
+            total_episodes=total_episodes,
+            last_completed=last_completed,
+            next_unit=unit['unit_rel'],
+        )
         _write_progress(
             work_dir,
             root_dir=root_path,
@@ -449,10 +490,20 @@ def generate_preload_index_resumable(
         print(f"  扫描 unit: {unit['unit_rel']}", flush=True)
         unit_result = _process_data_unit(unit['unit_path'])
         episode_count = _write_unit_shard(work_dir, unit, unit_result)
+        completed_unit_rels.add(unit['unit_rel'])
+        total_episodes += episode_count
+        last_completed = unit['unit_rel']
         print(f"    {unit['unit_rel']}: {episode_count} episodes", flush=True)
         processed_this_run += 1
 
-        summary = _summarize_work(units, work_dir)
+        next_unit = _first_uncompleted_unit(units, completed_unit_rels, unit_index + 1)
+        summary = _make_resume_summary(
+            units,
+            completed_unit_rels=completed_unit_rels,
+            total_episodes=total_episodes,
+            last_completed=last_completed,
+            next_unit=next_unit,
+        )
         _write_progress(
             work_dir,
             root_dir=root_path,
@@ -465,7 +516,12 @@ def generate_preload_index_resumable(
         if max_units is not None and processed_this_run >= max_units:
             return summary
 
-    summary = _summarize_work(units, work_dir)
+    summary = _make_resume_summary(
+        units,
+        completed_unit_rels=completed_unit_rels,
+        total_episodes=total_episodes,
+        last_completed=last_completed,
+    )
     if not summary['complete']:
         return summary
 
@@ -474,7 +530,12 @@ def generate_preload_index_resumable(
     if total == 0:
         raise RuntimeError('未找到任何有效的 episode 数据')
 
-    summary = _summarize_work(units, work_dir)
+    summary = _make_resume_summary(
+        units,
+        completed_unit_rels=completed_unit_rels,
+        total_episodes=total_episodes,
+        last_completed=last_completed,
+    )
     _write_progress(
         work_dir,
         root_dir=root_path,

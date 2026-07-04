@@ -76,3 +76,32 @@ def test_resumable_preload_index_continues_from_first_incomplete_unit(tmp_path):
     assert len(data["trajectory_rgb_path"]) == 2
     assert len(data["trajectory_depth_path"]) == 2
     assert len(data["trajectory_afford_path"]) == 2
+
+
+def test_resumable_preload_index_does_not_resummarize_all_units_after_each_scan(tmp_path, monkeypatch):
+    module = _load_generator_module()
+    root = tmp_path / "traj_data"
+    for idx in range(6):
+        _write_scene(root, "group_a", f"scene_{idx:03d}")
+
+    output = tmp_path / "preload_index.json"
+    work_dir = tmp_path / "preload_index.work"
+
+    load_calls = 0
+    original_load_completed_shard = module._load_completed_shard
+
+    def counted_load_completed_shard(*args, **kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        return original_load_completed_shard(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_load_completed_shard", counted_load_completed_shard)
+
+    module.generate_preload_index_resumable(
+        root_dir=str(root),
+        output_path=output,
+        work_dir=work_dir,
+        max_units=3,
+    )
+
+    assert load_calls <= 12
