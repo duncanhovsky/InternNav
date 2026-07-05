@@ -94,6 +94,7 @@ build_slot() {
         --hdd-root "${HDD_ROOT}"
         --shard-index "${shard_index}"
         --slot-root "${slot_root}"
+        --build-workers "${BRIDGEDP_BUILD_WORKERS}"
         --force
     )
     if [[ "${BRIDGEDP_LOW_NVME_MODE:-0}" == "1" ]]; then
@@ -128,6 +129,7 @@ echo "  variant:      ${ARCDP_CACHE_VARIANT}"
 echo "  report_to:    ${BRIDGEDP_REPORT_TO}"
 echo "  log steps:    ${BRIDGEDP_LOGGING_STEPS}"
 echo "  eta steps:    ${BRIDGEDP_ETA_LOG_STEPS}"
+echo "  build workers:${BRIDGEDP_BUILD_WORKERS}"
 echo "  live ckpts:   keep latest ${BRIDGEDP_SAVE_TOTAL_LIMIT}"
 echo "  uniform ckpt: ${BRIDGEDP_UNIFORM_CKPT_COUNT} -> ${BRIDGEDP_UNIFORM_CKPT_DIR}"
 echo "  low nvme:     ${BRIDGEDP_LOW_NVME_MODE:-0}"

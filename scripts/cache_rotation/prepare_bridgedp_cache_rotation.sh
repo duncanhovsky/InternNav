@@ -100,6 +100,7 @@ echo "  gpus:           ${GPUS}"
 echo "  nvme size:      ${BRIDGEDP_NVME_SIZE}"
 echo "  preset:         ${PRESET}"
 echo "  cache slot GB:  ${BRIDGEDP_CACHE_SLOT_GB}"
+echo "  build workers:  ${BRIDGEDP_BUILD_WORKERS}"
 echo "  low nvme mode:  ${BRIDGEDP_LOW_NVME_MODE:-0}"
 check_swanlab_setup
 
@@ -183,6 +184,7 @@ python "${PROJECT_ROOT}/scripts/cache_rotation/build_bridgedp_cache_shard.py" \
     --hdd-root "${HDD_ROOT}" \
     --shard-index 0 \
     --slot-root "${CACHE_ROOT}/cache_A" \
+    --build-workers "${BRIDGEDP_BUILD_WORKERS}" \
     "${FORCE_ARGS[@]}"
 
 if [[ "${NUM_SHARDS}" -gt 1 ]]; then
@@ -191,6 +193,7 @@ if [[ "${NUM_SHARDS}" -gt 1 ]]; then
         --hdd-root "${HDD_ROOT}" \
         --shard-index 1 \
         --slot-root "${CACHE_ROOT}/cache_B" \
+        --build-workers "${BRIDGEDP_BUILD_WORKERS}" \
         "${FORCE_ARGS[@]}"
 fi
 

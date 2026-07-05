@@ -115,8 +115,10 @@ def test_arcdp_cache_rotation_supports_1p5tb_low_nvme_and_uniform_archives():
         assert "1.5tb" in path.read_text(encoding="utf-8"), f"missing 1.5tb support in {path}"
 
     assert "--drop-existing-before-build" in build.read_text(encoding="utf-8")
+    assert "--build-workers" in build.read_text(encoding="utf-8")
     train_shell_text = train_shell.read_text(encoding="utf-8")
     assert "BRIDGEDP_LOW_NVME_MODE" in train_shell_text
+    assert "BRIDGEDP_BUILD_WORKERS" in train_shell_text
     assert "BRIDGEDP_UNIFORM_CKPT_COUNT" in train_shell_text
     assert "BRIDGEDP_UNIFORM_CKPT_DIR" in train_shell_text
     assert "uniform_checkpoints" in train_shell_text

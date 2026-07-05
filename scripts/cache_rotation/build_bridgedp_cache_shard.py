@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from scripts.cache_rotation.cache_rotation_lib import DEFAULT_TRAJ_SUFFIX, build_cache_slot, validate_cache_slot
@@ -22,6 +23,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Remove the previous slot before copying the new shard to reduce NVMe peak usage.",
     )
+    parser.add_argument(
+        "--build-workers",
+        type=int,
+        default=int(os.environ.get("BRIDGEDP_BUILD_WORKERS", "1")),
+        help="Number of scene-copy workers to use while building the cache slot.",
+    )
+    parser.add_argument(
+        "--no-resume-scene-copy",
+        action="store_true",
+        help="Discard any .building slot and copy every scene from scratch.",
+    )
     return parser.parse_args()
 
 
@@ -35,6 +47,8 @@ def main() -> int:
         slot_root=args.slot_root,
         force=args.force,
         drop_existing_before_build=args.drop_existing_before_build,
+        build_workers=args.build_workers,
+        resume_scene_copy=not args.no_resume_scene_copy,
     )
     report = validate_cache_slot(args.slot_root)
     if not report.ok:
@@ -46,6 +60,7 @@ def main() -> int:
     print(f"status={metadata['status']}")
     print(f"shard_index={metadata['shard_index']}")
     print(f"episode_count={metadata['episode_count']}")
+    print(f"build_workers={metadata.get('build_workers', 1)}")
     print(f"preload_index={metadata['preload_index']}")
     return 0
 

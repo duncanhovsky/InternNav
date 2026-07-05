@@ -87,3 +87,74 @@ def test_low_nvme_cache_build_removes_old_slot_before_copy(tmp_path, monkeypatch
     assert all(observed_slot_absent)
     assert not (slot / "old_payload").exists()
     assert (slot / ".READY").exists()
+
+
+def test_cache_build_reuses_completed_scene_markers_after_interruption(tmp_path, monkeypatch):
+    from scripts.cache_rotation import cache_rotation_lib
+
+    hdd_traj = tmp_path / "hdd" / "traj_data"
+    scene_a = _make_minimal_scene(hdd_traj)
+    scene_b = hdd_traj / "hm3d_d435i" / "scene_001"
+    shutil.copytree(scene_a, scene_b)
+    manifest = {
+        "version": 1,
+        "cache_slot_gb": 600,
+        "summary": {"total_scenes": 2, "total_episodes": 2, "total_bytes": 2, "num_shards": 1},
+        "shards": [
+            {
+                "shard_index": 0,
+                "scene_count": 2,
+                "episode_count": 2,
+                "bytes": 2,
+                "scenes": [
+                    {
+                        "group": "hm3d_d435i",
+                        "scene": "scene_000",
+                        "rel_path": scene_a.relative_to(hdd_traj).as_posix(),
+                        "bytes": 1,
+                        "episodes": 1,
+                    },
+                    {
+                        "group": "hm3d_d435i",
+                        "scene": "scene_001",
+                        "rel_path": scene_b.relative_to(hdd_traj).as_posix(),
+                        "bytes": 1,
+                        "episodes": 1,
+                    },
+                ],
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    slot = tmp_path / "cache_A"
+    building = slot.with_name(slot.name + ".building")
+    first_dst = building / cache_rotation_lib.SLOT_TRAJ_SUFFIX / "hm3d_d435i" / "scene_000"
+    shutil.copytree(scene_a, first_dst)
+    cache_rotation_lib._write_json_atomic(
+        cache_rotation_lib._cache_scene_marker(building, manifest["shards"][0]["scenes"][0]),
+        cache_rotation_lib._cache_scene_marker_payload(manifest["shards"][0]["scenes"][0]),
+    )
+
+    original_copytree = shutil.copytree
+    copied_sources = []
+
+    def copytree_with_record(src, dst, *args, **kwargs):
+        src_path = Path(src)
+        if src_path.parent.parent == hdd_traj:
+            copied_sources.append(src_path.name)
+        return original_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(cache_rotation_lib.shutil, "copytree", copytree_with_record)
+
+    cache_rotation_lib.build_cache_slot(
+        manifest_path=manifest_path,
+        shard_index=0,
+        hdd_traj=hdd_traj,
+        slot_root=slot,
+        force=True,
+        build_workers=1,
+    )
+
+    assert copied_sources == ["scene_001"]
+    assert (slot / ".READY").exists()

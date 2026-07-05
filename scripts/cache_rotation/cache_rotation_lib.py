@@ -13,6 +13,7 @@ import math
 import os
 import random
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -537,6 +538,59 @@ def ensure_slot_can_be_rebuilt(slot_root: Path, force: bool) -> None:
         raise RuntimeError(f"cache slot exists but is not READY; pass --force to rebuild: {slot}")
 
 
+def _cache_scene_marker(building: Path, scene: dict) -> Path:
+    rel_path = Path(f"{scene['rel_path']}.json")
+    return Path(building) / ".scene_done" / rel_path
+
+
+def _cache_scene_marker_payload(scene: dict) -> dict:
+    return {
+        "rel_path": scene["rel_path"],
+        "bytes": int(scene.get("bytes", 0)),
+        "episodes": int(scene.get("episodes", 0)),
+    }
+
+
+def _cache_scene_is_done(building: Path, scene: dict, dst: Path) -> bool:
+    marker = _cache_scene_marker(building, scene)
+    if not marker.exists() or not dst.is_dir():
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        marker.unlink(missing_ok=True)
+        return False
+    return payload == _cache_scene_marker_payload(scene)
+
+
+def _copy_cache_scene(scene: dict, *, hdd_traj: Path, slot_traj: Path, building: Path) -> str:
+    rel_path = Path(scene["rel_path"])
+    src = Path(hdd_traj) / rel_path
+    dst = Path(slot_traj) / rel_path
+    if _cache_scene_is_done(building, scene, dst):
+        print(f"[cache-build] reuse scene: {scene['rel_path']}", flush=True)
+        return scene["rel_path"]
+
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    _write_json_atomic(_cache_scene_marker(building, scene), _cache_scene_marker_payload(scene))
+    print(f"[cache-build] copied scene: {scene['rel_path']}", flush=True)
+    return scene["rel_path"]
+
+
+def _remove_extra_scene_dirs(slot_traj: Path, expected_rel_paths: set[str]) -> None:
+    root = Path(slot_traj)
+    if not root.exists():
+        return
+    for group_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        for scene_dir in sorted(path for path in group_dir.iterdir() if path.is_dir()):
+            rel_path = scene_dir.relative_to(root).as_posix()
+            if rel_path not in expected_rel_paths:
+                shutil.rmtree(scene_dir)
+
+
 def build_cache_slot(
     *,
     manifest_path: Path,
@@ -545,6 +599,8 @@ def build_cache_slot(
     slot_root: Path,
     force: bool = False,
     drop_existing_before_build: bool = False,
+    build_workers: int = 1,
+    resume_scene_copy: bool = True,
 ) -> dict:
     manifest = load_manifest(manifest_path)
     shards = manifest.get("shards", [])
@@ -563,45 +619,73 @@ def build_cache_slot(
             f"not requested shard/signature {shard_index}; pass --force to rebuild"
         )
 
-    building = slot.with_name(slot.name + ".building")
-    if building.exists():
-        shutil.rmtree(building)
     if drop_existing_before_build and slot.exists():
         shutil.rmtree(slot)
+    building = slot.with_name(slot.name + ".building")
+    build_state_path = building / ".BUILDING.json"
+    if building.exists() and not resume_scene_copy:
+        shutil.rmtree(building)
+    elif building.exists() and build_state_path.exists():
+        try:
+            build_state = json.loads(build_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            build_state = {}
+        if int(build_state.get("shard_index", -1)) != int(shard_index) or build_state.get("shard_signature") != signature:
+            shutil.rmtree(building)
+
     building.mkdir(parents=True, exist_ok=True)
     (building / ".BUILDING").write_text(str(os.getpid()), encoding="utf-8")
+    _write_json_atomic(
+        build_state_path,
+        {
+            "shard_index": int(shard_index),
+            "shard_signature": signature,
+            "scene_count": int(shard["scene_count"]),
+        },
+    )
 
     slot_traj = building / SLOT_TRAJ_SUFFIX
-    for scene in shard["scenes"]:
-        rel_path = Path(scene["rel_path"])
-        src = Path(hdd_traj) / rel_path
-        dst = slot_traj / rel_path
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+    scenes = list(shard["scenes"])
+    workers = max(int(build_workers or 1), 1)
+    print(
+        f"[cache-build] shard={shard_index} scenes={len(scenes)} "
+        f"workers={workers} resume_scene_copy={int(bool(resume_scene_copy))}",
+        flush=True,
+    )
+    if workers == 1 or len(scenes) <= 1:
+        for scene in scenes:
+            _copy_cache_scene(scene, hdd_traj=hdd_traj, slot_traj=slot_traj, building=building)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(_copy_cache_scene, scene, hdd_traj=hdd_traj, slot_traj=slot_traj, building=building)
+                for scene in scenes
+            ]
+            for future in as_completed(futures):
+                future.result()
+    _remove_extra_scene_dirs(slot_traj, {scene["rel_path"] for scene in scenes})
 
-    preload_index = generate_preload_index(slot_traj, building / "preload_index.json")
-    metadata = {
-        "status": "READY",
-        "shard_index": shard_index,
-        "scene_count": shard["scene_count"],
-        "episode_count": shard["episode_count"],
-        "bytes": shard["bytes"],
-        "trajectory_root": str(slot_traj),
-        "preload_index": str(building / "preload_index.json"),
-        "preload_episode_count": len(preload_index["trajectory_data_dir"]),
-        "shard_signature": signature,
-    }
-    (building / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     (building / ".BUILDING").unlink(missing_ok=True)
+    build_state_path.unlink(missing_ok=True)
     (building / ".READY").write_text(json.dumps({"shard_index": shard_index}), encoding="utf-8")
 
     if slot.exists():
         shutil.rmtree(slot)
     building.rename(slot)
     preload_index = generate_preload_index(slot / SLOT_TRAJ_SUFFIX, slot / "preload_index.json")
-    metadata["trajectory_root"] = str(slot / SLOT_TRAJ_SUFFIX)
-    metadata["preload_index"] = str(slot / "preload_index.json")
-    metadata["preload_episode_count"] = len(preload_index["trajectory_data_dir"])
+    metadata = {
+        "status": "READY",
+        "shard_index": shard_index,
+        "scene_count": shard["scene_count"],
+        "episode_count": shard["episode_count"],
+        "bytes": shard["bytes"],
+        "trajectory_root": str(slot / SLOT_TRAJ_SUFFIX),
+        "preload_index": str(slot / "preload_index.json"),
+        "preload_episode_count": len(preload_index["trajectory_data_dir"]),
+        "shard_signature": signature,
+        "build_workers": workers,
+        "resume_scene_copy": bool(resume_scene_copy),
+    }
     (slot / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     return metadata
 

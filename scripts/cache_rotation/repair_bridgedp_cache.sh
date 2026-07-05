@@ -58,6 +58,7 @@ python "${PROJECT_ROOT}/scripts/cache_rotation/build_bridgedp_cache_shard.py" \
     --hdd-root "${HDD_ROOT}" \
     --shard-index "${SHARD_INDEX}" \
     --slot-root "${SLOT_ROOT}" \
+    --build-workers "${BRIDGEDP_BUILD_WORKERS}" \
     --force
 
 python "${PROJECT_ROOT}/scripts/cache_rotation/check_bridgedp_cache.py" --slot-root "${SLOT_ROOT}"
