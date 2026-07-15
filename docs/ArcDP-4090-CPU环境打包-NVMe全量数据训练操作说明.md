@@ -63,7 +63,7 @@ ENV_NAME=arcdp \
 OUTPUT_DIR=/root/data/conda_env_packs \
 INSTALL_APT=1 \
 INTERNNAV_INSTALL_GIT_DEPS=skip \
-INTERNNAV_INSTALL_FLASH_ATTN=try \
+INTERNNAV_INSTALL_FLASH_ATTN=skip \
 bash scripts/arcdp_pack_training_env_cpu.sh
 ```
 
@@ -73,7 +73,7 @@ bash scripts/arcdp_pack_training_env_cpu.sh
 - 默认要求 PyTorch `2.7.0`、CUDA wheel `12.6`、Python `3.10`
 - CPU 机没有 GPU 时，`torch.cuda.is_available()` 可以是 `False`，但 `torch.version.cuda` 应为 `12.6`
 - CPU 机访问 GitHub 不稳定时，保持 `INTERNNAV_INSTALL_GIT_DEPS=skip`。这会跳过 `depth-camera-filtering` 和 `diffusion_policy` 两个 GitHub 源码依赖；当前 ArcDP/Bridge-DP full 训练不依赖它们，Habitat/RDP/InternVLA 路径需要时再补装。
-- `flash_attn` 在 CPU 机上可能因为编译条件失败，脚本默认 `try`，失败后继续；ArcDP/Bridge-DP 训练通常不依赖它
+- `flash_attn` 在 CPU 机上会触发很重的源码编译，可能导致会话被平台杀掉；ArcDP/Bridge-DP 训练通常不依赖它，所以 CPU 打包环境默认 `INTERNNAV_INSTALL_FLASH_ATTN=skip`
 - 环境包会保存到 `/root/data/conda_env_packs`
 
 检查产物：
