@@ -33,6 +33,8 @@ from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight
 from scripts.train.base_train.configs import (
     bridgedp_exp_cfg,
     bridgedp_full_8a800_exp_cfg,
+    bridgedp_full_8x4090_exp_cfg,
+    bridgedp_full_4x4090_exp_cfg,
     bridgedp_full_exp_cfg,
     bridgedp_p0_no_anchor_train_exp_cfg,
     bridgedp_p0_no_bridge_exp_cfg,
@@ -56,7 +58,7 @@ class TrainCfg(BaseModel):
     """Training configuration class"""
 
     name: str = 'cma_train'  # Experiment name
-    model_name: str = 'cma'  # Model name, options: 'cma', 'cma_plus', 'seq2seq', 'seq2seq_plus', 'rdp', 'navdp', 'bridgedp', 'bridgedp_full', 'bridgedp_full_8a800', 'flownav_static', 'flownav_dyn', 'flownav_mix'
+    model_name: str = 'cma'  # Model name, options include 'bridgedp_full_8x4090', 'bridgedp_full_4x4090', and the entries in supported_cfg below
     resume_from_checkpoint: str = ''  # "auto"/"latest" or an explicit checkpoint-* directory
     auto_resume: bool = False  # If true, resume from the latest valid checkpoint in output_dir when present
 
@@ -973,6 +975,8 @@ if __name__ == '__main__':
         'bridgedp': [bridgedp_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_full': [bridgedp_full_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_full_8a800': [bridgedp_full_8a800_exp_cfg, "BridgeDP_Policy"],
+        'bridgedp_full_8x4090': [bridgedp_full_8x4090_exp_cfg, "BridgeDP_Policy"],
+        'bridgedp_full_4x4090': [bridgedp_full_4x4090_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_p0_rel': [bridgedp_p0_rel_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_p0_no_bridge': [bridgedp_p0_no_bridge_exp_cfg, "BridgeDP_Policy"],
         'bridgedp_p0_no_ordered_init': [bridgedp_p0_no_ordered_init_exp_cfg, "BridgeDP_Policy"],

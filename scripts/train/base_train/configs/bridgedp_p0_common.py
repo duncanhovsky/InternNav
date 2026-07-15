@@ -3,7 +3,7 @@
 import copy
 import os
 
-from .bridgedp_full import PROJECT_ROOT, bridgedp_full_exp_cfg
+from .bridgedp_full import PROJECT_ROOT, _env_float, _env_int, bridgedp_full_exp_cfg
 
 
 def _env_bool(name, default):
@@ -32,6 +32,19 @@ def make_arcdp_p0_exp_cfg(default_run_name, il_overrides=None):
     cfg.tensorboard_dir = f"{checkpoint_root}/%s/tensorboard"
     cfg.checkpoint_folder = f"{checkpoint_root}/%s/ckpts"
     cfg.log_dir = f"{checkpoint_root}/%s/logs"
+    cfg.il.epochs = _env_int("BRIDGEDP_EPOCHS", cfg.il.epochs)
+    cfg.il.batch_size = _env_int("BRIDGEDP_BATCH_SIZE", cfg.il.batch_size)
+    cfg.il.gradient_accumulation_steps = _env_int(
+        "BRIDGEDP_GRAD_ACCUM",
+        cfg.il.gradient_accumulation_steps,
+    )
+    cfg.il.num_workers = _env_int("BRIDGEDP_NUM_WORKERS", cfg.il.num_workers)
+    cfg.il.lr = _env_float("BRIDGEDP_LR", cfg.il.lr)
+    cfg.il.save_interval_epochs = _env_int(
+        "BRIDGEDP_SAVE_INTERVAL_EPOCHS",
+        cfg.il.save_interval_epochs,
+    )
+    cfg.il.save_total_limit = _env_int("BRIDGEDP_SAVE_TOTAL_LIMIT", cfg.il.save_total_limit)
 
     for key, value in (il_overrides or {}).items():
         setattr(cfg.il, key, value)

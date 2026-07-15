@@ -34,6 +34,7 @@ def test_cache_rotation_config_and_shell_entrypoints_exist():
     assert "--gpus" in train_shell_text
     assert "--nvme-size" in train_shell_text
     assert "train_cache_rotation.py" in train_shell_text
+    assert "Final stage reaches total max steps; skip prebuilding next shard." in train_shell_text
     assert "make_bridgedp_shards.py" in prepare_shell_text
     assert "build_bridgedp_cache_shard.py" in prepare_shell_text
 
@@ -72,7 +73,8 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
         assert path.exists(), f"missing launcher: {path}"
 
     generic_text = generic.read_text(encoding="utf-8")
-    assert "--epochs 10|100|200|500|1000" in generic_text
+    assert "--epochs 1|2|4|6|10|16|100|200|500|1000" in generic_text
+    assert "--shard-epochs N" in generic_text
     assert "ARCDP_CACHE_VARIANT" in generic_text
     assert "BRIDGEDP_REPORT_TO" in generic_text
     assert "swanlab" in generic_text
@@ -89,7 +91,7 @@ def test_arcdp_cache_rotation_launchers_cover_gpu_epoch_matrix_and_swanlab():
     assert '--gpus "8"' in gpu8.read_text(encoding="utf-8")
 
     matrix_text = matrix.read_text(encoding="utf-8")
-    for epoch in ["10", "100", "200", "500", "1000"]:
+    for epoch in ["1", "2", "4", "6", "10", "16", "100", "200", "500", "1000"]:
         assert epoch in matrix_text
     for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
         assert variant in matrix_text
@@ -119,6 +121,7 @@ def test_arcdp_cache_rotation_supports_1p5tb_low_nvme_and_uniform_archives():
     train_shell_text = train_shell.read_text(encoding="utf-8")
     assert "BRIDGEDP_LOW_NVME_MODE" in train_shell_text
     assert "BRIDGEDP_BUILD_WORKERS" in train_shell_text
+    assert "--shard-epochs" in train_shell_text
     assert "BRIDGEDP_UNIFORM_CKPT_COUNT" in train_shell_text
     assert "BRIDGEDP_UNIFORM_CKPT_DIR" in train_shell_text
     assert "uniform_checkpoints" in train_shell_text
@@ -153,6 +156,69 @@ def test_4a800_100ep_suite_launcher_runs_full_and_p0_variants():
         assert variant in text
 
 
+def test_4a800_16ep_suite_launcher_runs_full16_p0_2_with_shard10():
+    suite = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "train_arcdp_cache_rotation_4a800_16ep_suite.sh"
+    assert suite.exists(), f"missing suite launcher: {suite}"
+
+    text = suite.read_text(encoding="utf-8")
+    assert "FULL_EPOCHS=\"16\"" in text
+    assert "ABLATION_EPOCHS=\"2\"" in text
+    assert "SHARD_EPOCHS=\"10\"" in text
+    assert "FULL_UNIFORM_CKPT_COUNT=\"8\"" in text
+    assert "ABLATION_UNIFORM_CKPT_COUNT=\"2\"" in text
+    assert 'variant_epochs="${FULL_EPOCHS}"' in text
+    assert 'variant_epochs="${ABLATION_EPOCHS}"' in text
+    assert 'variant_uniform_ckpts="${FULL_UNIFORM_CKPT_COUNT}"' in text
+    assert 'variant_uniform_ckpts="${ABLATION_UNIFORM_CKPT_COUNT}"' in text
+    assert "--shard-epochs" in text
+    assert "1.5tb" in text
+    assert "ArcDP-16ep" in text
+    for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
+        assert variant in text
+
+
+def test_4a800_6ep_suite_launcher_runs_full6_p0_1_with_shard10():
+    suite = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "train_arcdp_cache_rotation_4a800_6ep_suite.sh"
+    assert suite.exists(), f"missing suite launcher: {suite}"
+
+    text = suite.read_text(encoding="utf-8")
+    assert "FULL_EPOCHS=\"6\"" in text
+    assert "ABLATION_EPOCHS=\"1\"" in text
+    assert "SHARD_EPOCHS=\"10\"" in text
+    assert "FULL_UNIFORM_CKPT_COUNT=\"6\"" in text
+    assert "ABLATION_UNIFORM_CKPT_COUNT=\"1\"" in text
+    assert 'variant_epochs="${FULL_EPOCHS}"' in text
+    assert 'variant_epochs="${ABLATION_EPOCHS}"' in text
+    assert 'variant_uniform_ckpts="${FULL_UNIFORM_CKPT_COUNT}"' in text
+    assert 'variant_uniform_ckpts="${ABLATION_UNIFORM_CKPT_COUNT}"' in text
+    assert "--shard-epochs" in text
+    assert "1.5tb" in text
+    assert "ArcDP-6ep" in text
+    for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
+        assert variant in text
+
+
+def test_4a800_4ep_suite_launcher_runs_full4_p0_1_with_shard10():
+    suite = PROJECT_ROOT / "scripts" / "train" / "arcdp_cache_rotation" / "train_arcdp_cache_rotation_4a800_4ep_suite.sh"
+    assert suite.exists(), f"missing suite launcher: {suite}"
+
+    text = suite.read_text(encoding="utf-8")
+    assert "FULL_EPOCHS=\"4\"" in text
+    assert "ABLATION_EPOCHS=\"1\"" in text
+    assert "SHARD_EPOCHS=\"10\"" in text
+    assert "FULL_UNIFORM_CKPT_COUNT=\"4\"" in text
+    assert "ABLATION_UNIFORM_CKPT_COUNT=\"1\"" in text
+    assert 'variant_epochs="${FULL_EPOCHS}"' in text
+    assert 'variant_epochs="${ABLATION_EPOCHS}"' in text
+    assert 'variant_uniform_ckpts="${FULL_UNIFORM_CKPT_COUNT}"' in text
+    assert 'variant_uniform_ckpts="${ABLATION_UNIFORM_CKPT_COUNT}"' in text
+    assert "--shard-epochs" in text
+    assert "1.5tb" in text
+    assert "ArcDP-4ep" in text
+    for variant in ["full", "rel", "no_bridge", "no_ordered_init", "no_scale_cond", "no_anchor_train", "no_gcs"]:
+        assert variant in text
+
+
 def test_detailed_progress_callback_exposes_low_frequency_eta_metrics():
     train_py = PROJECT_ROOT / "scripts" / "train" / "base_train" / "train.py"
     text = train_py.read_text(encoding="utf-8")
@@ -173,7 +239,8 @@ def test_arcdp_training_readiness_checker_guides_missing_prereqs():
     assert "does not stop at the first failed check" in text
     assert "--gpus 4|8" in text
     assert "--variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs" in text
-    assert "--epochs 10|100|200|500|1000" in text
+    assert "--epochs 1|2|4|6|10|16|100|200|500|1000" in text
+    assert "--shard-epochs" in text
     assert "prepare_bridgedp_cache_rotation.sh" in text
     assert "train_arcdp_cache_rotation" in text
     assert "SWANLAB_API_KEY" in text

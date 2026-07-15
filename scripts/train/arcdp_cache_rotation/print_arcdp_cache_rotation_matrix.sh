@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 VARIANTS=(full rel no_bridge no_ordered_init no_scale_cond no_anchor_train no_gcs)
-EPOCHS=(10 100 200 500 1000)
+EPOCHS=(1 2 4 6 10 16 100 200 500 1000)
 
 for gpus in "${GPU_LIST[@]}"; do
     for variant in "${VARIANTS[@]}"; do

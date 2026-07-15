@@ -158,3 +158,59 @@ def test_cache_build_reuses_completed_scene_markers_after_interruption(tmp_path,
 
     assert copied_sources == ["scene_001"]
     assert (slot / ".READY").exists()
+
+
+def test_cache_build_force_reuses_ready_slot_when_signature_matches(tmp_path, monkeypatch):
+    from scripts.cache_rotation import cache_rotation_lib
+
+    hdd_traj = tmp_path / "hdd" / "traj_data"
+    scene = _make_minimal_scene(hdd_traj)
+    manifest = {
+        "version": 1,
+        "cache_slot_gb": 600,
+        "summary": {"total_scenes": 1, "total_episodes": 1, "total_bytes": 1, "num_shards": 1},
+        "shards": [
+            {
+                "shard_index": 0,
+                "scene_count": 1,
+                "episode_count": 1,
+                "bytes": 1,
+                "scenes": [
+                    {
+                        "group": "hm3d_d435i",
+                        "scene": "scene_000",
+                        "rel_path": scene.relative_to(hdd_traj).as_posix(),
+                        "bytes": 1,
+                        "episodes": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    slot = tmp_path / "cache_A"
+
+    first_metadata = cache_rotation_lib.build_cache_slot(
+        manifest_path=manifest_path,
+        shard_index=0,
+        hdd_traj=hdd_traj,
+        slot_root=slot,
+        force=True,
+    )
+
+    def fail_if_recopied(*_args, **_kwargs):
+        raise AssertionError("matching READY cache slot should be reused")
+
+    monkeypatch.setattr(cache_rotation_lib.shutil, "copytree", fail_if_recopied)
+    second_metadata = cache_rotation_lib.build_cache_slot(
+        manifest_path=manifest_path,
+        shard_index=0,
+        hdd_traj=hdd_traj,
+        slot_root=slot,
+        force=True,
+        drop_existing_before_build=True,
+    )
+
+    assert second_metadata["shard_signature"] == first_metadata["shard_signature"]
+    assert (slot / ".READY").exists()

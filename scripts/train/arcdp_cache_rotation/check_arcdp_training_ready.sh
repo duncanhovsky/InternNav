@@ -20,6 +20,7 @@ esac
 GPUS=""
 VARIANT="full"
 EPOCHS="100"
+SHARD_EPOCHS=""
 NVME_SIZE="2tb"
 PRESET="balanced"
 HDD_ROOT="/hdd"
@@ -38,7 +39,7 @@ BRIDGEDP_LOW_NVME_MODE=""
 usage() {
     printf '%s\n' \
         "Usage:" \
-        "  check_arcdp_training_ready.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 10|100|200|500|1000 [options]" \
+        "  check_arcdp_training_ready.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 1|2|4|6|10|16|100|200|500|1000 [options]" \
         "" \
         "Options:" \
         "  --nvme-size 1tb|1.5tb|2tb|4tb NVMe cache profile size. Default: 2tb" \
@@ -46,6 +47,7 @@ usage() {
         "                                Cache rotation profile. Default: balanced" \
         "  --hdd-root PATH               HDD root used by cache rotation. Default: /hdd" \
         "  --nvme-root PATH              NVMe root used by cache rotation. Default: /nvme" \
+        "  --shard-epochs N              Override per-shard training epochs before cache rotation." \
         "  --no-swanlab                  Skip SwanLab package/key checks." \
         "  -h, --help                    Show this help."
 }
@@ -107,6 +109,7 @@ while [[ $# -gt 0 ]]; do
         --gpus) GPUS="$2"; shift 2 ;;
         --variant) VARIANT="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
+        --shard-epochs) SHARD_EPOCHS="$2"; shift 2 ;;
         --nvme-size) NVME_SIZE="$2"; shift 2 ;;
         --preset) PRESET="$2"; shift 2 ;;
         --hdd-root) HDD_ROOT="$2"; shift 2 ;;
@@ -129,9 +132,14 @@ case "${VARIANT}" in
 esac
 
 case "${EPOCHS}" in
-    10|100|200|500|1000) ;;
-    *) echo "--epochs must be one of 10, 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
+    1|2|4|6|10|16|100|200|500|1000) ;;
+    *) echo "--epochs must be one of 1, 2, 4, 6, 10, 16, 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
 esac
+
+if [[ -n "${SHARD_EPOCHS}" && ! "${SHARD_EPOCHS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--shard-epochs must be a positive integer, got: ${SHARD_EPOCHS}" >&2
+    exit 1
+fi
 
 case "${NVME_SIZE}" in
     1tb|1.5tb|2tb|4tb) ;;
@@ -145,6 +153,9 @@ esac
 
 PREPARE_CMD="bash ${PROJECT_ROOT}/scripts/cache_rotation/prepare_bridgedp_cache_rotation.sh --gpus ${GPUS} --nvme-size ${NVME_SIZE} --preset ${PRESET} --hdd-root ${HDD_ROOT} --nvme-root ${NVME_ROOT}"
 TRAIN_CMD="bash ${SCRIPT_DIR}/train_arcdp_cache_rotation_${GPUS}a800.sh --variant ${VARIANT} --epochs ${EPOCHS} --nvme-size ${NVME_SIZE} --preset ${PRESET} --hdd-root ${HDD_ROOT} --nvme-root ${NVME_ROOT}"
+if [[ -n "${SHARD_EPOCHS}" ]]; then
+    TRAIN_CMD="${TRAIN_CMD} --shard-epochs ${SHARD_EPOCHS}"
+fi
 
 printf '%s\n' \
     "ArcDP training readiness check" \
@@ -154,6 +165,7 @@ printf '%s\n' \
     "  variant:    ${VARIANT}" \
     "  gpus:       ${GPUS}" \
     "  epochs(eq): ${EPOCHS}" \
+    "  shard ep:   ${SHARD_EPOCHS:-profile default}" \
     "  profile:    ${NVME_SIZE}/${PRESET}" \
     "  hdd root:   ${HDD_ROOT}" \
     "  nvme root:  ${NVME_ROOT}" \
@@ -296,6 +308,9 @@ check_cache_slot "cache_B" "${NEED_CACHE_B}"
 
 printf '\n[8/8] Launcher dry-run\n'
 DRY_RUN_ARGS=(--variant "${VARIANT}" --epochs "${EPOCHS}" --nvme-size "${NVME_SIZE}" --preset "${PRESET}" --hdd-root "${HDD_ROOT}" --nvme-root "${NVME_ROOT}" --dry-run)
+if [[ -n "${SHARD_EPOCHS}" ]]; then
+    DRY_RUN_ARGS+=(--shard-epochs "${SHARD_EPOCHS}")
+fi
 if [[ "${ENABLE_SWANLAB}" -eq 0 ]]; then
     DRY_RUN_ARGS+=(--no-swanlab)
 elif [[ -z "${SWANLAB_API_KEY:-}" ]]; then

@@ -12,6 +12,7 @@ NVME_ROOT="/nvme"
 RUN_NAME="bridgedp_cache_rotation"
 START_SHARD=0
 MAX_STAGES=0
+SHARD_EPOCHS_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -24,8 +25,9 @@ while [[ $# -gt 0 ]]; do
         --run-name) RUN_NAME="$2"; shift 2 ;;
         --start-shard) START_SHARD="$2"; shift 2 ;;
         --max-stages) MAX_STAGES="$2"; shift 2 ;;
+        --shard-epochs) SHARD_EPOCHS_OVERRIDE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|1.5tb|2tb|4tb --total-epochs N [--preset balanced|quality|throughput]"
+            echo "Usage: $0 --gpus 4|8 --nvme-size 1tb|1.5tb|2tb|4tb --total-epochs N [--preset balanced|quality|throughput] [--shard-epochs N]"
             exit 0
             ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -39,6 +41,13 @@ fi
 
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 eval "$(python "${PROJECT_ROOT}/scripts/cache_rotation/profile_bridgedp_cache.py" --gpus "${GPUS}" --nvme-size "${NVME_SIZE}" --preset "${PRESET}")"
+if [[ -n "${SHARD_EPOCHS_OVERRIDE}" ]]; then
+    if [[ ! "${SHARD_EPOCHS_OVERRIDE}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "--shard-epochs must be a positive integer, got: ${SHARD_EPOCHS_OVERRIDE}" >&2
+        exit 1
+    fi
+    BRIDGEDP_SHARD_EPOCHS="${SHARD_EPOCHS_OVERRIDE}"
+fi
 
 export BRIDGEDP_PROJECT_ROOT="${BRIDGEDP_PROJECT_ROOT:-${PROJECT_ROOT}}"
 export BRIDGEDP_RUN_NAME="${RUN_NAME}"
@@ -149,15 +158,6 @@ while true; do
     SLOT_ROOT="${CACHE_ROOT}/${SLOT_NAME}"
     INACTIVE_SLOT_ROOT="${CACHE_ROOT}/${INACTIVE_SLOT_NAME}"
 
-    echo
-    echo "=== Stage ${STAGE}: shard ${SHARD_INDEX} -> ${SLOT_NAME} ==="
-    if [[ -n "${BUILD_PID}" ]]; then
-        wait_for_ready "${SLOT_ROOT}" "${BUILD_PID}"
-        BUILD_PID=""
-    else
-        build_slot "${SHARD_INDEX}" "${SLOT_ROOT}"
-    fi
-
     eval "$(python "${PROJECT_ROOT}/scripts/cache_rotation/plan_bridgedp_cache_stage.py" \
         --manifest "${MANIFEST}" \
         --shard-index "${SHARD_INDEX}" \
@@ -170,15 +170,29 @@ while true; do
         --per-gpu-batch "${BRIDGEDP_BATCH_SIZE}" \
         --grad-accum "${BRIDGEDP_GRAD_ACCUM}")"
 
+    echo
+    echo "=== Stage ${STAGE}: shard ${SHARD_INDEX} -> ${SLOT_NAME} ==="
     if [[ "${BRIDGEDP_CURRENT_GLOBAL_STEP}" -ge "${BRIDGEDP_TOTAL_MAX_STEPS}" ]]; then
         echo "Training already reached total max steps: ${BRIDGEDP_CURRENT_GLOBAL_STEP}/${BRIDGEDP_TOTAL_MAX_STEPS}"
         break
     fi
 
+    if [[ -n "${BUILD_PID}" ]]; then
+        wait_for_ready "${SLOT_ROOT}" "${BUILD_PID}"
+        BUILD_PID=""
+    else
+        build_slot "${SHARD_INDEX}" "${SLOT_ROOT}"
+    fi
+
     NEXT_SHARD=$(((SHARD_INDEX + 1) % NUM_SHARDS))
-    echo "Prebuilding next shard ${NEXT_SHARD} into ${INACTIVE_SLOT_NAME}"
-    build_slot "${NEXT_SHARD}" "${INACTIVE_SLOT_ROOT}" >"${LOG_DIR}/build_stage_${STAGE}_next.log" 2>&1 &
-    BUILD_PID="$!"
+    if [[ "${BRIDGEDP_STAGE_END_STEP}" -lt "${BRIDGEDP_TOTAL_MAX_STEPS}" ]]; then
+        echo "Prebuilding next shard ${NEXT_SHARD} into ${INACTIVE_SLOT_NAME}"
+        build_slot "${NEXT_SHARD}" "${INACTIVE_SLOT_ROOT}" >"${LOG_DIR}/build_stage_${STAGE}_next.log" 2>&1 &
+        BUILD_PID="$!"
+    else
+        echo "Final stage reaches total max steps; skip prebuilding next shard."
+        BUILD_PID=""
+    fi
 
     export BRIDGEDP_CACHE_STAGE_ID="stage_${STAGE}_shard_${SHARD_INDEX}_${SLOT_NAME}"
     export BRIDGEDP_CACHE_SLOT_ROOT="${SLOT_ROOT}"

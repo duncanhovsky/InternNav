@@ -610,14 +610,18 @@ def build_cache_slot(
     slot = Path(slot_root)
     ensure_slot_can_be_rebuilt(slot, force=force)
     signature = shard_signature(shard)
-    if slot.exists() and (slot / ".READY").exists() and not force:
-        metadata = json.loads((slot / "metadata.json").read_text(encoding="utf-8"))
+    if slot.exists() and (slot / ".READY").exists():
+        try:
+            metadata = json.loads((slot / "metadata.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
         if int(metadata.get("shard_index", -1)) == int(shard_index) and metadata.get("shard_signature") == signature:
             return metadata
-        raise RuntimeError(
-            f"cache slot {slot} is READY for shard {metadata.get('shard_index')}, "
-            f"not requested shard/signature {shard_index}; pass --force to rebuild"
-        )
+        if not force:
+            raise RuntimeError(
+                f"cache slot {slot} is READY for shard {metadata.get('shard_index')}, "
+                f"not requested shard/signature {shard_index}; pass --force to rebuild"
+            )
 
     if drop_existing_before_build and slot.exists():
         shutil.rmtree(slot)

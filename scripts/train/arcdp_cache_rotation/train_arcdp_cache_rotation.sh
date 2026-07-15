@@ -15,6 +15,7 @@ NVME_ROOT="/nvme"
 RUN_NAME=""
 START_SHARD=""
 MAX_STAGES=""
+SHARD_EPOCHS=""
 ENABLE_SWANLAB=1
 DRY_RUN=0
 SWANLAB_PROJECT_VALUE="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-cache-rotation}}"
@@ -23,7 +24,7 @@ SWANLAB_WORKSPACE_VALUE="${SWANLAB_WORKSPACE:-}"
 usage() {
     printf '%s\n' \
         "Usage:" \
-        "  train_arcdp_cache_rotation.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 10|100|200|500|1000 [options]" \
+        "  train_arcdp_cache_rotation.sh --gpus 4|8 --variant full|rel|no_bridge|no_ordered_init|no_scale_cond|no_anchor_train|no_gcs --epochs 1|2|4|6|10|16|100|200|500|1000 [options]" \
         "" \
         "Options:" \
         "  --nvme-size 1tb|1.5tb|2tb|4tb NVMe cache profile size. Default: 2tb" \
@@ -34,6 +35,7 @@ usage() {
         "  --run-name NAME               Override checkpoint/log run name." \
         "  --start-shard N               Resume from shard index N." \
         "  --max-stages N                Stop after N cache-rotation stages." \
+        "  --shard-epochs N              Override per-shard training epochs before cache rotation." \
         "  --swanlab-project NAME        SwanLab project name. Default: ArcDP-cache-rotation" \
         "  --swanlab-workspace NAME      SwanLab workspace/entity name." \
         "  --no-swanlab                  Use tensorboard instead of SwanLab." \
@@ -41,7 +43,7 @@ usage() {
         "  -h, --help                    Show this help." \
         "" \
         "Equivalent epoch budgets:" \
-        "  --epochs 10|100|200|500|1000 maps to cache-rotation total steps with:" \
+        "  --epochs 1|2|4|6|10|16|100|200|500|1000 maps to cache-rotation total steps with:" \
         "  ceil(50 * total_episodes * epochs / (gpus * per_gpu_batch * grad_accum))."
 }
 
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --run-name) RUN_NAME="$2"; shift 2 ;;
         --start-shard) START_SHARD="$2"; shift 2 ;;
         --max-stages) MAX_STAGES="$2"; shift 2 ;;
+        --shard-epochs) SHARD_EPOCHS="$2"; shift 2 ;;
         --swanlab-project) SWANLAB_PROJECT_VALUE="$2"; shift 2 ;;
         --swanlab-workspace) SWANLAB_WORKSPACE_VALUE="$2"; shift 2 ;;
         --no-swanlab) ENABLE_SWANLAB=0; shift ;;
@@ -78,10 +81,15 @@ case "${VARIANT}" in
 esac
 
 case "${EPOCHS}" in
-    10|100|200|500|1000) ;;
+    1|2|4|6|10|16|100|200|500|1000) ;;
     "") echo "--epochs is required." >&2; usage >&2; exit 1 ;;
-    *) echo "--epochs must be one of 10, 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
+    *) echo "--epochs must be one of 1, 2, 4, 6, 10, 16, 100, 200, 500, 1000; got: ${EPOCHS}" >&2; exit 1 ;;
 esac
+
+if [[ -n "${SHARD_EPOCHS}" && ! "${SHARD_EPOCHS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--shard-epochs must be a positive integer, got: ${SHARD_EPOCHS}" >&2
+    exit 1
+fi
 
 case "${NVME_SIZE}" in
     1tb|1.5tb|2tb|4tb) ;;
@@ -155,6 +163,9 @@ fi
 if [[ -n "${MAX_STAGES}" ]]; then
     CMD+=(--max-stages "${MAX_STAGES}")
 fi
+if [[ -n "${SHARD_EPOCHS}" ]]; then
+    CMD+=(--shard-epochs "${SHARD_EPOCHS}")
+fi
 
 printf '%s\n' \
     "ArcDP cache-rotation training" \
@@ -167,6 +178,7 @@ printf '%s\n' \
     "  report_to:    ${BRIDGEDP_REPORT_TO}" \
     "  log steps:    ${BRIDGEDP_LOGGING_STEPS}" \
     "  eta steps:    ${BRIDGEDP_ETA_LOG_STEPS}" \
+    "  shard epochs: ${SHARD_EPOCHS:-profile default}" \
     "  live ckpts:   keep latest ${BRIDGEDP_SAVE_TOTAL_LIMIT}" \
     "  uniform ckpt: ${BRIDGEDP_UNIFORM_CKPT_COUNT} evenly spaced archives" \
     "  formula:      ceil(50 * total_episodes * ${EPOCHS} / (${GPUS} * per_gpu_batch * grad_accum))"
