@@ -8,6 +8,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/root/data/conda_env_packs}"
 ARCHIVE="${ARCHIVE:-}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RUN_SETUP="${RUN_SETUP:-1}"
+PACK_UNINSTALL_EDITABLE_INTERNNAV="${PACK_UNINSTALL_EDITABLE_INTERNNAV:-1}"
 INSTALL_APT="${INSTALL_APT:-1}"
 INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS:-skip}"
 INTERNNAV_INSTALL_FLASH_ATTN="${INTERNNAV_INSTALL_FLASH_ATTN:-skip}"
@@ -22,6 +23,30 @@ log() {
 die() {
     echo "[arcdp-pack] ERROR: $*" >&2
     exit 1
+}
+
+remove_editable_internnav_before_pack() {
+    if [[ "${PACK_UNINSTALL_EDITABLE_INTERNNAV}" != "1" ]]; then
+        log "skip removing editable internnav because PACK_UNINSTALL_EDITABLE_INTERNNAV=${PACK_UNINSTALL_EDITABLE_INTERNNAV}"
+        return
+    fi
+
+    log "remove editable internnav registration before conda-pack"
+    conda run -n "${ENV_NAME}" python -m pip uninstall -y internnav >/dev/null 2>&1 || true
+
+    log "verify source import still works through PYTHONPATH"
+    PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" conda run -n "${ENV_NAME}" python - "${PROJECT_ROOT}" <<'PY'
+from pathlib import Path
+import sys
+
+project_root = Path(sys.argv[1]).resolve()
+import internnav
+
+source_file = Path(internnav.__file__).resolve()
+print("internnav:", source_file)
+if project_root not in source_file.parents:
+    raise SystemExit(f"internnav is not imported from PROJECT_ROOT={project_root}: {source_file}")
+PY
 }
 
 find_conda_sh() {
@@ -108,6 +133,8 @@ print("packaging:", version)
 if Version(version) >= Version("25"):
     raise SystemExit(f"packaging version is incompatible with InternNav: {version}")
 PY
+
+remove_editable_internnav_before_pack
 
 rm -rf "${META_DIR}"
 mkdir -p "${META_DIR}"

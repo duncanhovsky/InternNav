@@ -67,6 +67,8 @@ INTERNNAV_INSTALL_FLASH_ATTN=skip \
 bash scripts/arcdp_pack_training_env_cpu.sh
 ```
 
+> 备注：`conda-pack` 不能打包 `pip install -e` 的 editable 包。脚本会在打包前自动从 `arcdp` 环境里卸载 editable 的 `internnav` 注册，但不会删除项目源码；后续 GPU 训练仍然通过 `/nvme/MyResearch/InternNav` 和 `PYTHONPATH` 导入源码。
+
 说明：
 
 - 脚本会调用 `scripts/setup_internnav_pytorch270_cu126.sh`

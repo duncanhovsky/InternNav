@@ -22,6 +22,16 @@ def test_cpu_env_pack_script_builds_arcdp_conda_pack_from_pytorch270_image():
     assert "arcdp_deploy_training_env_gpu.sh" in text
 
 
+def test_cpu_env_pack_script_removes_editable_internnav_before_conda_pack():
+    script = PROJECT_ROOT / "scripts" / "arcdp_pack_training_env_cpu.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "remove_editable_internnav_before_pack()" in text
+    assert 'PACK_UNINSTALL_EDITABLE_INTERNNAV="${PACK_UNINSTALL_EDITABLE_INTERNNAV:-1}"' in text
+    assert "python -m pip uninstall -y internnav" in text
+    assert "verify source import still works through PYTHONPATH" in text
+
+
 def test_gpu_env_deploy_script_unpacks_without_network_install():
     script = PROJECT_ROOT / "scripts" / "arcdp_deploy_training_env_gpu.sh"
     text = script.read_text(encoding="utf-8")
