@@ -12,6 +12,7 @@ def test_cpu_env_pack_script_builds_arcdp_conda_pack_from_pytorch270_image():
     assert 'OUTPUT_DIR="${OUTPUT_DIR:-/root/data/conda_env_packs}"' in text
     assert "setup_internnav_pytorch270_cu126.sh" in text
     assert "pytorch:2.7.0-cuda12.6-python3.10-ubuntu22.04" in text
+    assert 'INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS:-skip}"' in text
     assert "conda_pack" in text
     assert "torch.version.cuda" in text
     assert "EXPECTED_TORCH_CUDA" in text

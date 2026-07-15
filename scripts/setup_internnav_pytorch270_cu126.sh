@@ -19,6 +19,7 @@ SWANLAB_PROJECT="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-cache-rotation}}"
 
 INSTALL_APT="${INSTALL_APT:-1}"
 USE_CONDA="${USE_CONDA:-auto}"
+INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS:-try}"
 INTERNNAV_INSTALL_FLASH_ATTN="${INTERNNAV_INSTALL_FLASH_ATTN:-try}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONDA_ENV_ACTIVATED=0
@@ -234,12 +235,16 @@ install_internnav_requirements() {
     log "Install InternNav core requirements"
     python -m pip install -c "${TORCH_CONSTRAINTS}" -r requirements/core_requirements.txt
 
-    local model_req_tmp
+    local model_req_tmp git_req_tmp
     model_req_tmp="$(mktemp)"
-    grep -Ev '^(flash_attn|triton|sympy|huggingface-hub)==' requirements/model_requirements.txt > "${model_req_tmp}"
-    log "Install InternNav model requirements except flash_attn/triton/sympy/huggingface-hub compatibility pins"
+    git_req_tmp="$(mktemp)"
+    grep -Ev '(@ git\+|git\+https://github.com|^(flash_attn|triton|sympy|huggingface-hub)==)' requirements/model_requirements.txt > "${model_req_tmp}"
+    { grep -E '(@ git\+|git\+https://github.com)' requirements/model_requirements.txt || true; } > "${git_req_tmp}"
+    log "Install InternNav model requirements except GitHub deps and flash_attn/triton/sympy/huggingface-hub compatibility pins"
     python -m pip install -c "${TORCH_CONSTRAINTS}" -r "${model_req_tmp}"
+    install_git_requirements_if_requested "${git_req_tmp}"
     rm -f "${model_req_tmp}"
+    rm -f "${git_req_tmp}"
 
     log "Register InternNav package in editable mode"
     python -m pip install -e . --no-deps
@@ -250,6 +255,42 @@ install_internnav_requirements() {
     # Some upstream requirements can pull a different torch-adjacent stack. Re-pin torch last.
     install_torch_stack
     rm -f "${TORCH_CONSTRAINTS}"
+}
+
+install_git_requirements_if_requested() {
+    local git_req_file="$1"
+    if [[ ! -s "${git_req_file}" ]]; then
+        return
+    fi
+
+    case "${INTERNNAV_INSTALL_GIT_DEPS}" in
+        0|false|False|no|No|skip)
+            warn "Skip GitHub requirements: depth-camera-filtering and diffusion_policy."
+            warn "Set INTERNNAV_INSTALL_GIT_DEPS=try or required if Habitat/RDP/InternVLA paths need them."
+            return
+            ;;
+        try|1|true|True|required)
+            ;;
+        *)
+            warn "Unknown INTERNNAV_INSTALL_GIT_DEPS=${INTERNNAV_INSTALL_GIT_DEPS}; treat as try."
+            INTERNNAV_INSTALL_GIT_DEPS="try"
+            ;;
+    esac
+
+    log "Try installing GitHub requirements: depth-camera-filtering and diffusion_policy"
+    if python -m pip install -c "${TORCH_CONSTRAINTS}" -r "${git_req_file}"; then
+        log "GitHub requirements installed."
+        return
+    fi
+
+    if [[ "${INTERNNAV_INSTALL_GIT_DEPS}" == "required" || "${INTERNNAV_INSTALL_GIT_DEPS}" == "1" || "${INTERNNAV_INSTALL_GIT_DEPS}" == "true" || "${INTERNNAV_INSTALL_GIT_DEPS}" == "True" ]]; then
+        echo "GitHub requirements installation failed and INTERNNAV_INSTALL_GIT_DEPS=${INTERNNAV_INSTALL_GIT_DEPS}." >&2
+        echo "Check GitHub connectivity or provide local wheels/source mirrors, then rerun." >&2
+        exit 1
+    fi
+
+    warn "GitHub requirements failed, continuing because mode is '${INTERNNAV_INSTALL_GIT_DEPS}'."
+    warn "ArcDP/Bridge-DP training can continue; Habitat/RDP/InternVLA paths may require these packages."
 }
 
 install_flash_attn_if_requested() {

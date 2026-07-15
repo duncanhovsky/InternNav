@@ -16,8 +16,8 @@ SOURCE_ROOT=/root/data
 NVME_ROOT=/nvme
 ENV_NAME=arcdp
 
-SRC_PROJECT=/root/data/MyResearch/InternNav_v1.0.3
-DST_PROJECT=/nvme/MyResearch/InternNav_v1.0.3
+SRC_PROJECT=/root/data/MyResearch/InternNav
+DST_PROJECT=/nvme/MyResearch/InternNav
 
 SRC_TRAJ=/root/data/datasets/InternData-N1/v0.5-full-vln-n1/vln_n1/traj_data
 DST_TRAJ=/nvme/datasets/InternData-N1/v0.5-full-vln-n1/vln_n1/traj_data
@@ -34,9 +34,9 @@ df -hT /root/data
 df -ih /root/data
 
 test -d /root/data/datasets/InternData-N1/v0.5-full-vln-n1/vln_n1/traj_data && echo dataset_archive_root_ok
-test -d /root/data/MyResearch/InternNav_v1.0.3 && echo project_ok
-test -f /root/data/MyResearch/InternNav_v1.0.3/checkpoints/depth_anything_v2_vits.pth && echo depth_ckpt_ok
-test -f /root/data/MyResearch/InternNav_v1.0.3/scripts/setup_internnav_pytorch270_cu126.sh && echo setup_script_ok
+test -d /root/data/MyResearch/InternNav && echo project_ok
+test -f /root/data/MyResearch/InternNav/checkpoints/depth_anything_v2_vits.pth && echo depth_ckpt_ok
+test -f /root/data/MyResearch/InternNav/scripts/setup_internnav_pytorch270_cu126.sh && echo setup_script_ok
 ```
 
 建议先装基础工具：
@@ -51,7 +51,7 @@ apt-get install -y rsync tmux htop iotop lsof
 进入项目：
 
 ```bash
-cd /root/data/MyResearch/InternNav_v1.0.3
+cd /root/data/MyResearch/InternNav
 ```
 
 一键配置 `arcdp` 环境并打包：
@@ -62,6 +62,7 @@ chmod +x scripts/arcdp_pack_training_env_cpu.sh
 ENV_NAME=arcdp \
 OUTPUT_DIR=/root/data/conda_env_packs \
 INSTALL_APT=1 \
+INTERNNAV_INSTALL_GIT_DEPS=skip \
 INTERNNAV_INSTALL_FLASH_ATTN=try \
 bash scripts/arcdp_pack_training_env_cpu.sh
 ```
@@ -71,6 +72,7 @@ bash scripts/arcdp_pack_training_env_cpu.sh
 - 脚本会调用 `scripts/setup_internnav_pytorch270_cu126.sh`
 - 默认要求 PyTorch `2.7.0`、CUDA wheel `12.6`、Python `3.10`
 - CPU 机没有 GPU 时，`torch.cuda.is_available()` 可以是 `False`，但 `torch.version.cuda` 应为 `12.6`
+- CPU 机访问 GitHub 不稳定时，保持 `INTERNNAV_INSTALL_GIT_DEPS=skip`。这会跳过 `depth-camera-filtering` 和 `diffusion_policy` 两个 GitHub 源码依赖；当前 ArcDP/Bridge-DP full 训练不依赖它们，Habitat/RDP/InternVLA 路径需要时再补装。
 - `flash_attn` 在 CPU 机上可能因为编译条件失败，脚本默认 `try`，失败后继续；ArcDP/Bridge-DP 训练通常不依赖它
 - 环境包会保存到 `/root/data/conda_env_packs`
 
@@ -110,7 +112,7 @@ stat -f -c 'mount=%m fs_type=%T files_total=%c files_free=%d blocks_total=%b blo
 执行：
 
 ```bash
-cd /root/data/MyResearch/InternNav_v1.0.3
+cd /root/data/MyResearch/InternNav
 chmod +x scripts/arcdp_prepare_full_nvme_from_root_data.sh
 
 ENV_NAME=arcdp \

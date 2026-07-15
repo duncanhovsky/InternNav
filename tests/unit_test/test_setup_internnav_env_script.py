@@ -25,7 +25,18 @@ def test_setup_script_avoids_known_torch27_conflict_pins():
     assert "triton" in text
     assert "sympy" in text
     assert "huggingface-hub" in text
-    assert "grep -Ev '^(flash_attn|triton|sympy|huggingface-hub)=='" in text
+    assert "grep -Ev '(@ git\\+|git\\+https://github.com|^(flash_attn|triton|sympy|huggingface-hub)==)'" in text
+
+
+def test_setup_script_makes_github_requirements_optional_for_unreliable_networks():
+    script = PROJECT_ROOT / "scripts" / "setup_internnav_pytorch270_cu126.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert 'INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS:-try}"' in text
+    assert "install_git_requirements_if_requested()" in text
+    assert "depth-camera-filtering" in text
+    assert "diffusion_policy" in text
+    assert "GitHub requirements failed, continuing because mode is" in text
 
 
 def test_setup_script_reuses_matching_prebuilt_environment():
