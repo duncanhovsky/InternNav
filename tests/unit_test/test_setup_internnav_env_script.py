@@ -67,3 +67,14 @@ def test_setup_script_prevents_requirements_from_resolving_other_torch_versions(
     assert "Flask==${FLASK_VERSION}" in text
     assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r requirements/core_requirements.txt" in text
     assert "python -m pip install -c \"${TORCH_CONSTRAINTS}\" -r \"${model_req_tmp}\"" in text
+
+
+def test_setup_script_keeps_packaging_compatible_with_internnav_metadata():
+    script = PROJECT_ROOT / "scripts" / "setup_internnav_pytorch270_cu126.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert 'PACKAGING_VERSION_SPEC="${PACKAGING_VERSION_SPEC:-packaging>=23.0,<25}"' in text
+    assert "packaging>=23.0,<25" in text
+    assert 'python -m pip install --upgrade pip wheel "${PACKAGING_VERSION_SPEC}" ninja' in text
+    assert 'python -m pip install "${PACKAGING_VERSION_SPEC}"' in text
+    assert "packaging version is incompatible with InternNav" in text

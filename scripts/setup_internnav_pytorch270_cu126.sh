@@ -13,6 +13,7 @@ STARLETTE_VERSION="${STARLETTE_VERSION:-0.36.3}"
 UVICORN_VERSION="${UVICORN_VERSION:-0.30.6}"
 DASH_VERSION="${DASH_VERSION:-2.18.2}"
 FLASK_VERSION="${FLASK_VERSION:-3.0.3}"
+PACKAGING_VERSION_SPEC="${PACKAGING_VERSION_SPEC:-packaging>=23.0,<25}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
 SWANLAB_VERSION_SPEC="${SWANLAB_VERSION_SPEC:-swanlab>=0.8.3}"
 SWANLAB_PROJECT="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-cache-rotation}}"
@@ -212,6 +213,7 @@ make_torch_constraints() {
 torch==${TORCH_VERSION}
 torchvision==${TORCHVISION_VERSION}
 torchaudio==${TORCHAUDIO_VERSION}
+packaging>=23.0,<25
 sympy==${SYMPY_VERSION}
 huggingface-hub==${HUGGINGFACE_HUB_VERSION}
 fastapi==${FASTAPI_VERSION}
@@ -229,7 +231,7 @@ install_internnav_requirements() {
     make_torch_constraints
 
     log "Install Python packaging tools"
-    python -m pip install --upgrade pip wheel packaging ninja
+    python -m pip install --upgrade pip wheel "${PACKAGING_VERSION_SPEC}" ninja
     python -m pip install "setuptools<81"
 
     log "Install InternNav core requirements"
@@ -254,6 +256,7 @@ install_internnav_requirements() {
 
     # Some upstream requirements can pull a different torch-adjacent stack. Re-pin torch last.
     install_torch_stack
+    python -m pip install "${PACKAGING_VERSION_SPEC}"
     rm -f "${TORCH_CONSTRAINTS}"
 }
 
@@ -332,6 +335,7 @@ configure_swanlab() {
         log 'Equivalent manual command: pip install "swanlab>=0.8.3"'
         python -m pip install "${SWANLAB_VERSION_SPEC}"
     fi
+    python -m pip install "${PACKAGING_VERSION_SPEC}"
 
     python - <<'PY'
 import importlib.metadata as metadata
@@ -359,15 +363,22 @@ verify_install() {
     log "Verify Python, PyTorch, CUDA, InternNav, and SwanLab imports"
     PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" python - <<'PY'
 import sys
+import importlib.metadata as metadata
 
 import torch
 import transformers
 import swanlab
+from packaging.version import Version
 from internnav.model import get_config, get_policy
+
+packaging_version = metadata.version("packaging")
+if Version(packaging_version) >= Version("25"):
+    raise SystemExit(f"packaging version is incompatible with InternNav: {packaging_version}")
 
 print("python:", sys.version.split()[0])
 print("torch:", torch.__version__)
 print("torch cuda:", torch.version.cuda)
+print("packaging:", packaging_version)
 print("cuda available:", torch.cuda.is_available())
 print("cuda device count:", torch.cuda.device_count())
 print("transformers:", transformers.__version__)

@@ -11,6 +11,7 @@ RUN_SETUP="${RUN_SETUP:-1}"
 INSTALL_APT="${INSTALL_APT:-1}"
 INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS:-skip}"
 INTERNNAV_INSTALL_FLASH_ATTN="${INTERNNAV_INSTALL_FLASH_ATTN:-try}"
+PACKAGING_VERSION_SPEC="${PACKAGING_VERSION_SPEC:-packaging>=23.0,<25}"
 EXPECTED_TORCH_CUDA="${EXPECTED_TORCH_CUDA:-12.6}"
 EXPECTED_IMAGE="${EXPECTED_IMAGE:-pytorch:2.7.0-cuda12.6-python3.10-ubuntu22.04}"
 
@@ -72,6 +73,7 @@ if [[ "${RUN_SETUP}" == "1" ]]; then
     INSTALL_APT="${INSTALL_APT}" \
     INTERNNAV_INSTALL_GIT_DEPS="${INTERNNAV_INSTALL_GIT_DEPS}" \
     INTERNNAV_INSTALL_FLASH_ATTN="${INTERNNAV_INSTALL_FLASH_ATTN}" \
+    PACKAGING_VERSION_SPEC="${PACKAGING_VERSION_SPEC}" \
     bash "${SETUP_SCRIPT}"
 else
     log "skip runtime setup because RUN_SETUP=${RUN_SETUP}"
@@ -92,9 +94,20 @@ if str(torch.version.cuda) != expected_cuda:
 PY
 
 log "ensure conda_pack is available inside ${ENV_NAME}"
+conda run -n "${ENV_NAME}" python -m pip install "${PACKAGING_VERSION_SPEC}"
 if ! conda run -n "${ENV_NAME}" python -c "import conda_pack" >/dev/null 2>&1; then
-    conda run -n "${ENV_NAME}" python -m pip install conda-pack
+    conda run -n "${ENV_NAME}" python -m pip install "${PACKAGING_VERSION_SPEC}" conda-pack
 fi
+conda run -n "${ENV_NAME}" python - "${PACKAGING_VERSION_SPEC}" <<'PY'
+import importlib.metadata as metadata
+import sys
+from packaging.version import Version
+
+version = metadata.version("packaging")
+print("packaging:", version)
+if Version(version) >= Version("25"):
+    raise SystemExit(f"packaging version is incompatible with InternNav: {version}")
+PY
 
 rm -rf "${META_DIR}"
 mkdir -p "${META_DIR}"
