@@ -32,8 +32,10 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export TORCH_SHOW_CPP_STACKTRACES="${TORCH_SHOW_CPP_STACKTRACES:-1}"
 
 export BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-swanlab}"
-SWANLAB_PROJECT_VALUE="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-ArcDP-8x4090-full1-no-bridge}}"
-export SWANLAB_PROJECT="${SWANLAB_PROJECT_VALUE}"
+SWANLAB_PROJECT_VALUE="${SWANLAB_PROJ_NAME:-ArcDP-8x4090-full1-no-bridge}"
+# SwanLab 0.8.x reserves SWANLAB_PROJECT for a structured Settings field.
+# A plain project name there raises a pydantic-settings JSON parsing error.
+unset SWANLAB_PROJECT
 export SWANLAB_PROJ_NAME="${SWANLAB_PROJECT_VALUE}"
 
 cd "${BRIDGEDP_PROJECT_ROOT}"
@@ -54,7 +56,7 @@ if [[ ! -f "${BRIDGEDP_PROJECT_ROOT}/checkpoints/depth_anything_v2_vits.pth" ]];
 fi
 
 if [[ "${BRIDGEDP_REPORT_TO,,}" == *swanlab* ]]; then
-    if ! python -c "import swanlab" >/dev/null 2>&1; then
+    if ! python -c "import swanlab" >/dev/null; then
         echo "SwanLab is enabled but the Python package is not importable." >&2
         echo "Install it in the ArcDP environment: python -m pip install swanlab" >&2
         exit 1
@@ -87,7 +89,7 @@ run_stage() {
     echo "  effective global batch: ${global_batch}"
     echo "  workers/process: ${BRIDGEDP_NUM_WORKERS}"
     echo "  report_to: ${BRIDGEDP_REPORT_TO}"
-    echo "  swanlab project: ${SWANLAB_PROJECT}"
+    echo "  swanlab project: ${SWANLAB_PROJ_NAME}"
     echo "  swanlab experiment: ${SWANLAB_EXP_NAME}"
     echo "  auto resume: ${BRIDGEDP_AUTO_RESUME}"
 

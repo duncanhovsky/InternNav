@@ -112,8 +112,13 @@ def test_arcdp_4090_ten_day_suite_runs_full1_and_no_bridge1_with_swanlab():
     assert 'BRIDGEDP_BATCH_SIZE="${BRIDGEDP_BATCH_SIZE:-48}"' in text
     assert 'BRIDGEDP_GRAD_ACCUM="${BRIDGEDP_GRAD_ACCUM:-1}"' in text
     assert 'BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-swanlab}"' in text
+    assert "unset SWANLAB_PROJECT" in text
+    assert "export SWANLAB_PROJECT=" not in text
+    assert 'export SWANLAB_PROJ_NAME="${SWANLAB_PROJECT_VALUE}"' in text
+    assert 'echo "  swanlab project: ${SWANLAB_PROJ_NAME}"' in text
     assert "ArcDP-8x4090-full1-no-bridge" in text
     assert 'python -c "import swanlab"' in text
+    assert 'python -c "import swanlab" >/dev/null 2>&1' not in text
     assert text.count("export BRIDGEDP_EPOCHS=1") == 2
     assert "--model-name bridgedp_full_8x4090" in text
     assert "--model-name bridgedp_p0_no_bridge" in text
