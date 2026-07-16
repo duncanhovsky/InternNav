@@ -274,3 +274,6 @@ target/
 
 # modelzoo 统计（自动生成）
 docs/modelzoo_statistics.md
+
+# Local Git worktrees used for isolated feature development
+.worktrees/
