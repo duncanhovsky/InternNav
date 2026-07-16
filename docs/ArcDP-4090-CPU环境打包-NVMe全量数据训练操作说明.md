@@ -204,6 +204,8 @@ chmod +x /root/data/conda_env_packs/arcdp_deploy_training_env_gpu.sh
 
 bash /root/data/conda_env_packs/arcdp_deploy_training_env_gpu.sh \
   "$(ls -t /root/data/conda_env_packs/arcdp_*.tar.gz | head -n 1)"
+  
+/nvme/MyResearch/InternNav_v1.0.3# OVERWRITE=1 bash /root/data/conda_env_packs/arcdp_deploy_training_env_gpu.sh /root/data/conda_env_packs/arcdp_arcdp_pytorch270_cu126_cs-37167-c18b5-server_20260715_205117.tar.g
 ```
 
 如果目标环境已经存在，脚本会拒绝覆盖。确认要替换时：
@@ -220,6 +222,16 @@ conda activate arcdp
 cd /nvme/MyResearch/InternNav_v1.0.3
 export PYTHONPATH=/nvme/MyResearch/InternNav_v1.0.3:${PYTHONPATH:-}
 ```
+
+参考：
+
+> [InternNav setup] To use the environment later:
+> conda activate arcdp
+> cd /root/data/MyResearch/InternNav
+> export PYTHONPATH=/root/data/MyResearch/InternNav:${PYTHONPATH:-}
+> export SWANLAB_API_KEY=<your_api_key>   # optional if swanlab login was already done
+>
+> export SWANLAB_API_KEY=y5F2L5QPt6jS7Hhme3aCR
 
 验证：
 

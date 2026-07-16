@@ -623,11 +623,11 @@ def main(config, model_class, model_config_class):
                     print(f"Buffer {name} is on wrong device {buffer.device}, should be moved to {device}")
                     buffer.data = buffer.data.to(device)
 
-            # If distributed training, wrap the model with DDP
-            if world_size > 1:
-                model = torch.nn.parallel.DistributedDataParallel(
-                    model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
-                )
+            # # If distributed training, wrap the model with DDP
+            # if world_size > 1:
+            #     model = torch.nn.parallel.DistributedDataParallel(
+            #         model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
+            #     )
         # ------------ load logger ------------
         train_logger_filename = os.path.join(config.log_dir, 'train.log')
         # 无论是否分布式，主进程（rank=0 或单机）都写日志文件
