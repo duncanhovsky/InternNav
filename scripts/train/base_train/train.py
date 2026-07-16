@@ -30,6 +30,7 @@ from internnav.model.utils.logger import MyLogger
 from internnav.model.utils.utils import load_dataset
 from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
 from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight, resolve_resume_checkpoint
+from scripts.train.base_train.swanlab_compat import initialize_swanlab_run
 from scripts.train.base_train.configs import (
     bridgedp_exp_cfg,
     bridgedp_full_8a800_exp_cfg,
@@ -934,6 +935,11 @@ def main(config, model_class, model_config_class):
         if resume_checkpoint and not is_main_process:
             ensure_checkpoint_model_weight(resume_checkpoint)
 
+        initialize_swanlab_run(
+            config.il.report_to,
+            is_main_process=is_main_process,
+            run_name=config.name,
+        )
         trainer.train(resume_from_checkpoint=resume_checkpoint)
         if train_logger:
             for handler in train_logger.handlers:
