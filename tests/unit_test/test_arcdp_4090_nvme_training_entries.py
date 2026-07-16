@@ -97,10 +97,38 @@ def test_arcdp_4090_nvme_suite_scripts_launch_full10_and_six_p0_one_epoch():
             assert f"--model-name {model_name}" in text
 
 
+def test_arcdp_4090_ten_day_suite_runs_full1_and_no_bridge1_with_swanlab():
+    script = (
+        PROJECT_ROOT
+        / "scripts"
+        / "train"
+        / "arcdp_4090"
+        / "train_arcdp_full1_no_bridge_1ep_8x4090_nvme.sh"
+    )
+    text = script.read_text(encoding="utf-8")
+
+    assert 'BRIDGEDP_NUM_GPUS="${BRIDGEDP_NUM_GPUS:-8}"' in text
+    assert 'CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"' in text
+    assert 'BRIDGEDP_BATCH_SIZE="${BRIDGEDP_BATCH_SIZE:-48}"' in text
+    assert 'BRIDGEDP_GRAD_ACCUM="${BRIDGEDP_GRAD_ACCUM:-1}"' in text
+    assert 'BRIDGEDP_REPORT_TO="${BRIDGEDP_REPORT_TO:-swanlab}"' in text
+    assert "ArcDP-8x4090-full1-no-bridge" in text
+    assert 'python -c "import swanlab"' in text
+    assert text.count("export BRIDGEDP_EPOCHS=1") == 2
+    assert "--model-name bridgedp_full_8x4090" in text
+    assert "--model-name bridgedp_p0_no_bridge" in text
+    assert "bridgedp_p0_rel" not in text
+    assert "bridgedp_p0_no_ordered_init" not in text
+    assert "bridgedp_p0_no_scale_cond" not in text
+    assert "bridgedp_p0_no_anchor_train" not in text
+    assert "bridgedp_p0_no_gcs" not in text
+
+
 def test_arcdp_4090_root_wrappers_point_to_nvme_suite_scripts():
     expected = {
         "train_arcdp_full10_p0_1ep_8x4090_nvme.sh": "scripts/train/arcdp_4090/train_arcdp_full10_p0_1ep_8x4090_nvme.sh",
         "train_arcdp_full10_p0_1ep_4x4090_nvme.sh": "scripts/train/arcdp_4090/train_arcdp_full10_p0_1ep_4x4090_nvme.sh",
+        "train_arcdp_full1_no_bridge_1ep_8x4090_nvme.sh": "scripts/train/arcdp_4090/train_arcdp_full1_no_bridge_1ep_8x4090_nvme.sh",
     }
 
     for wrapper, target in expected.items():
