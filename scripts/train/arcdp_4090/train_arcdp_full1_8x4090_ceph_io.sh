@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROFILE="${1:-}"
 if [[ -z "${PROFILE}" ]]; then
-    echo "Usage: $0 {b48_w2|b24_ga2_w2_pf1} [extra train.py arguments...]" >&2
+    echo "Usage: $0 {b48_w2|b24_ga2_w2_pf1|b24_ga2_w4_pf1} [extra train.py arguments...]" >&2
     exit 2
 fi
 shift
@@ -24,6 +24,14 @@ case "${PROFILE}" in
         PROFILE_PREFETCH_FACTOR=1
         PROFILE_RUN_NAME="arcdp_full1_b24_ga2_w2_pf1_8x4090_ceph"
         PROFILE_MASTER_PORT=12347
+        ;;
+    b24_ga2_w4_pf1)
+        PROFILE_BATCH_SIZE=24
+        PROFILE_GRAD_ACCUM=2
+        PROFILE_NUM_WORKERS=4
+        PROFILE_PREFETCH_FACTOR=1
+        PROFILE_RUN_NAME="arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph"
+        PROFILE_MASTER_PORT=12348
         ;;
     *)
         echo "Unknown ArcDP Ceph I/O profile: ${PROFILE}" >&2

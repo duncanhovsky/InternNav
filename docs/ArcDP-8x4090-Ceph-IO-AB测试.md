@@ -1,6 +1,6 @@
-# ArcDP 8卡4090 Ceph I/O A/B测试
+# ArcDP 8卡4090 Ceph I/O A/B/B+测试
 
-本方案只训练 full 模型1个epoch，不会启动 no-bridge 或其他消融实验。两套方案的有效全局batch均为384，学习率均为 `3e-4`。
+本方案只训练 full 模型1个epoch，不会启动 no-bridge 或其他消融实验。三套方案的有效全局batch均为384，学习率均为 `3e-4`。
 
 ## 方案参数
 
@@ -8,8 +8,9 @@
 |---|---:|---:|---:|---:|---:|
 | A（优先） | 48 | 1 | 2 | 2 | 384 |
 | B（A仍卡顿时） | 24 | 2 | 2 | 1 | 384 |
+| B+（增加取数并发） | 24 | 2 | 4 | 1 | 384 |
 
-方案A只把DataLoader进程从32个降至16个，GPU计算batch不变。方案B进一步减少Ceph瞬时排队样本，但小micro-batch可能降低少量纯GPU效率。
+方案A只把DataLoader进程从32个降至16个，GPU计算batch不变。方案B进一步减少Ceph瞬时排队样本，但小micro-batch可能降低少量纯GPU效率。方案B+保持B的micro-batch和梯度累积，把DataLoader进程从16个恢复到32个，并把每个worker的prefetch保持为1。
 
 ## 1. 更新代码并进入环境
 
@@ -20,6 +21,7 @@ conda activate arcdp
 
 chmod +x train_arcdp_full1_b48_w2_8x4090_ceph.sh
 chmod +x train_arcdp_full1_b24_ga2_w2_pf1_8x4090_ceph.sh
+chmod +x train_arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph.sh
 ```
 
 脚本会检查是否已经存在GPU计算进程。当前训练没有结束时，实际启动会被拒绝，避免误杀或与旧训练争抢显存。`ARCDP_DRY_RUN=1` 只打印配置，不占用GPU。
@@ -195,7 +197,65 @@ checkpoints/arcdp_full1_b24_ga2_w2_pf1_8x4090_ceph/logs/training_status.json
 
 方案B每个 `global_step` 包含两个micro-batches，但有效全局batch仍为384，因此可以直接比较两套方案的 `avg_step_time` 和 `samples_per_second`。
 
-## 9. 回传给Codex的指标
+## 9. 停止方案B并启动方案B+
+
+先确认方案B仍在运行：
+
+```bash
+pgrep -af '[a]rcdp_full1_b24_ga2_w2_pf1_8x4090_ceph'
+```
+
+只停止方案B，不会匹配B+：
+
+```bash
+pkill -TERM -f '[a]rcdp_full1_b24_ga2_w2_pf1_8x4090_ceph'
+sleep 15
+pkill -KILL -f '[a]rcdp_full1_b24_ga2_w2_pf1_8x4090_ceph' 2>/dev/null || true
+pgrep -af '[a]rcdp_full1_b24_ga2_w2_pf1_8x4090_ceph' || echo "方案B已停止"
+```
+
+检查B+配置：
+
+```bash
+ARCDP_DRY_RUN=1 ./train_arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph.sh
+```
+
+确认输出包含：
+
+```text
+run: arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph
+per-device batch: 24
+gradient accumulation: 2
+effective global batch: 384
+workers/process: 4
+prefetch factor/worker: 1
+```
+
+后台启动B+：
+
+```bash
+LOG=logs/arcdp_full1_b24_ga2_w4_pf1_$(date +%F_%H%M%S).log
+nohup setsid ./train_arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph.sh \
+  >"$LOG" 2>&1 < /dev/null &
+echo $! | tee logs/arcdp_full1_b24_ga2_w4_pf1.pid
+echo "log: $LOG"
+tail -f "$LOG"
+```
+
+B+使用独立状态和checkpoint目录：
+
+```text
+checkpoints/arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph/logs/training_status.json
+checkpoints/arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph/
+```
+
+至少运行100个optimizer steps后，与方案B约 `41.56s/step` 的初步结果比较。十天内完成需要约 `33.76s/step` 或更低。检查worker状态时，把第6节的 `RUN` 改为：
+
+```bash
+RUN=arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph
+```
+
+## 10. 回传给Codex的指标
 
 请粘贴以下内容：
 
@@ -205,4 +265,4 @@ checkpoints/arcdp_full1_b24_ga2_w2_pf1_8x4090_ceph/logs/training_status.json
 4. 日志中最近的 `[ETA]` 和 `[Step ...]` 行；
 5. 如有异常，粘贴完整异常栈。
 
-有了这些指标即可判断方案A是否已经解决长尾阻塞，还是需要继续测试方案B。
+有了这些指标即可判断B+增加worker后是否提高稳定吞吐，以及是否重新引入Ceph长尾阻塞。
