@@ -311,6 +311,8 @@ class DetailedProgressCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         """训练开始时记录基础信息"""
+        if not getattr(state, 'is_world_process_zero', True):
+            return
         self.start_time = time.time()
         self.last_step_time = time.time()
         self.start_global_step = int(state.global_step)
@@ -347,6 +349,8 @@ class DetailedProgressCallback(TrainerCallback):
 
     def on_log(self, args, state, control, logs=None, model=None, **kwargs):
         """每个 logging_step 记录详细状态"""
+        if not getattr(state, 'is_world_process_zero', True):
+            return
         now = time.time()
         log_interval_duration = now - self.last_step_time
         self.last_step_time = now
@@ -504,6 +508,8 @@ class DetailedProgressCallback(TrainerCallback):
 
     def on_train_end(self, args, state, control, **kwargs):
         """训练结束时记录"""
+        if not getattr(state, 'is_world_process_zero', True):
+            return
         elapsed = time.time() - self.start_time
         status = {
             'phase': 'training_completed',

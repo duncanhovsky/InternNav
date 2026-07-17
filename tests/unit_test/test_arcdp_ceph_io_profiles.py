@@ -29,6 +29,15 @@ def test_training_arguments_receive_validated_prefetch_factor():
     assert "dataloader_prefetch_factor=dataloader_prefetch_factor" in train_entry
 
 
+def test_detailed_progress_status_is_written_only_by_world_rank_zero():
+    train_entry = (
+        PROJECT_ROOT / "scripts" / "train" / "base_train" / "train.py"
+    ).read_text(encoding="utf-8")
+
+    rank_zero_guard = "if not getattr(state, 'is_world_process_zero', True):"
+    assert train_entry.count(rank_zero_guard) >= 3
+
+
 def test_ceph_io_launcher_defines_two_isolated_full1_profiles():
     launcher = (
         PROJECT_ROOT
