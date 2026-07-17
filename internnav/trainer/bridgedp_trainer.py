@@ -18,6 +18,7 @@
 import json
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -26,6 +27,37 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from internnav.trainer.base import BaseTrainer
+
+
+def _atomic_torch_save(value, destination: str | Path) -> None:
+    """Durably write a torch payload before atomically publishing its final name."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("wb") as stream:
+            torch.save(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_link_or_copy(source: str | Path, destination: str | Path) -> None:
+    """Publish a compatibility alias without duplicating data when hard links are supported."""
+    source = Path(source)
+    destination = Path(destination)
+    temporary = destination.with_name(f"{destination.name}.tmp-{os.getpid()}")
+    try:
+        temporary.unlink(missing_ok=True)
+        try:
+            os.link(source, temporary)
+        except OSError:
+            shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class BridgeDPTrainer(BaseTrainer):
@@ -1095,6 +1127,9 @@ class BridgeDPTrainer(BaseTrainer):
 
     def save_model(self, output_dir, state_dict=None, **kwargs):
         """保存模型到指定目录。仿照 NavDPTrainer.save_model。"""
+        if not self.args.should_save:
+            return
+
         if hasattr(self.model, 'module'):
             model_to_save = self.model.module
         else:
@@ -1102,6 +1137,8 @@ class BridgeDPTrainer(BaseTrainer):
 
         os.makedirs(output_dir, exist_ok=True)
         model_state = state_dict if state_dict is not None else model_to_save.state_dict()
-        torch.save(model_state, os.path.join(output_dir, "bridgedp.ckpt"))
-        torch.save(model_state, os.path.join(output_dir, "pytorch_model.bin"))
+        hf_weight_path = Path(output_dir) / "pytorch_model.bin"
+        _atomic_torch_save(model_state, hf_weight_path)
+        _atomic_link_or_copy(hf_weight_path, Path(output_dir) / "bridgedp.ckpt")
+        _atomic_torch_save(self.args, Path(output_dir) / "training_args.bin")
         print(f"Saving model to {output_dir} (is DDP: {hasattr(self.model, 'module')})")

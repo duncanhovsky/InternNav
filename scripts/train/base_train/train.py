@@ -29,6 +29,7 @@ from internnav.model import get_config, get_policy
 from internnav.model.utils.logger import MyLogger
 from internnav.model.utils.utils import load_dataset
 from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
+from scripts.train.base_train.percent_checkpoint_manager import PercentCheckpointCallback
 from scripts.train.base_train.progress_metrics import compute_progress_metrics
 from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight, resolve_resume_checkpoint
 from scripts.train.base_train.swanlab_compat import initialize_swanlab_run
@@ -897,6 +898,8 @@ def main(config, model_class, model_config_class):
             dataloader_prefetch_factor = None
         elif dataloader_prefetch_factor is not None:
             dataloader_prefetch_factor = max(int(dataloader_prefetch_factor), 1)
+        percent_checkpoint_interval = int(getattr(config.il, 'percent_checkpoint_interval', 0) or 0)
+        percent_checkpoint_enabled = percent_checkpoint_interval > 0
 
         training_args = TrainingArguments(
             output_dir=config.output_dir,
@@ -917,9 +920,9 @@ def main(config, model_class, model_config_class):
             lr_scheduler_type='cosine',
             logging_steps=float(getattr(config.il, 'logging_steps', 10.0)),
             num_train_epochs=config.il.epochs,
-            save_strategy='epoch',  # no
+            save_strategy='no' if percent_checkpoint_enabled else 'epoch',
             save_steps=config.il.save_interval_epochs,
-            save_total_limit=int(getattr(config.il, 'save_total_limit', 1000)),
+            save_total_limit=None if percent_checkpoint_enabled else int(getattr(config.il, 'save_total_limit', 1000)),
             report_to=config.il.report_to,
             seed=0,
             do_eval=False,
@@ -952,12 +955,32 @@ def main(config, model_class, model_config_class):
         print(f"[Monitor] DetailedProgressCallback registered. Dataset size: {dataset_size}, "
               f"Status file: {config.log_dir}/training_status.json")
 
+        percent_checkpoint_callback = None
+        if percent_checkpoint_enabled:
+            percent_checkpoint_callback = PercentCheckpointCallback(
+                interval_percent=percent_checkpoint_interval,
+                rolling_keep=int(getattr(config.il, 'percent_checkpoint_rolling_keep', 5)),
+                permanent_interval_percent=int(
+                    getattr(config.il, 'percent_checkpoint_permanent_interval', 10)
+                ),
+                verify_loads=bool(getattr(config.il, 'percent_checkpoint_verify_loads', True)),
+            )
+            trainer.add_callback(percent_checkpoint_callback)
+            print(
+                "[PercentCheckpoint] callback registered: "
+                f"interval={percent_checkpoint_interval}%, "
+                f"rolling_keep={percent_checkpoint_callback.rolling_keep}, "
+                f"permanent_interval={percent_checkpoint_callback.permanent_interval_percent}%"
+            )
+
         requested_resume = getattr(config, 'resume_from_checkpoint', '')
         auto_resume = bool(getattr(config, 'auto_resume', False))
+        require_complete_checkpoint = bool(getattr(config, 'require_complete_checkpoint', False))
         resume_checkpoint = resolve_resume_checkpoint(
             config.output_dir,
             requested=requested_resume,
             auto_resume=auto_resume,
+            require_complete=require_complete_checkpoint,
         )
         is_main_process = (not dist.is_initialized()) or (dist.is_initialized() and dist.get_rank() == 0)
         if is_main_process:
@@ -981,6 +1004,10 @@ def main(config, model_class, model_config_class):
             run_name=config.name,
         )
         trainer.train(resume_from_checkpoint=resume_checkpoint)
+        if percent_checkpoint_callback is not None:
+            final_checkpoint = percent_checkpoint_callback.ensure_final_checkpoint(trainer)
+            if is_main_process:
+                print(f"[PercentCheckpoint] final checkpoint verified: {final_checkpoint}")
         if train_logger:
             for handler in train_logger.handlers:
                 handler.flush()

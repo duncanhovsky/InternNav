@@ -16,6 +16,9 @@ bridgedp_full_8x4090_exp_cfg.torch_gpu_id = 0
 bridgedp_full_8x4090_exp_cfg.torch_gpu_ids = list(range(NUM_GPUS))
 bridgedp_full_8x4090_exp_cfg.resume_from_checkpoint = os.environ.get("BRIDGEDP_RESUME_FROM", "")
 bridgedp_full_8x4090_exp_cfg.auto_resume = os.environ.get("BRIDGEDP_AUTO_RESUME", "1") != "0"
+bridgedp_full_8x4090_exp_cfg.require_complete_checkpoint = (
+    os.environ.get("BRIDGEDP_REQUIRE_COMPLETE_CHECKPOINT", "0") != "0"
+)
 
 il = bridgedp_full_8x4090_exp_cfg.il
 il.epochs = _env_int("BRIDGEDP_EPOCHS", 10)
@@ -26,3 +29,7 @@ il.dataloader_prefetch_factor = _env_int("BRIDGEDP_PREFETCH_FACTOR", 2)
 il.lr = _env_float("BRIDGEDP_LR", 3e-4)
 il.save_interval_epochs = _env_int("BRIDGEDP_SAVE_INTERVAL_EPOCHS", 1)
 il.save_total_limit = _env_int("BRIDGEDP_SAVE_TOTAL_LIMIT", 20)
+il.percent_checkpoint_interval = _env_int("BRIDGEDP_PERCENT_CHECKPOINT_INTERVAL", 0)
+il.percent_checkpoint_rolling_keep = _env_int("BRIDGEDP_PERCENT_CHECKPOINT_ROLLING_KEEP", 5)
+il.percent_checkpoint_permanent_interval = _env_int("BRIDGEDP_PERCENT_CHECKPOINT_PERMANENT_INTERVAL", 10)
+il.percent_checkpoint_verify_loads = os.environ.get("BRIDGEDP_PERCENT_CHECKPOINT_VERIFY_LOADS", "1") != "0"

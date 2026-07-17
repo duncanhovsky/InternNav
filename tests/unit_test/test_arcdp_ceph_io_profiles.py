@@ -65,6 +65,14 @@ def test_ceph_io_launcher_defines_three_isolated_full1_profiles():
     assert 'PROFILE_PREFETCH_FACTOR=1' in launcher
     assert 'arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph' in launcher
 
+    assert 'b24_ga2_w4_pf1_safeckpt)' in launcher
+    assert 'arcdp_full1_b24_ga2_w4_pf1_safeckpt_8x4090_ceph' in launcher
+    assert 'PROFILE_MASTER_PORT=12349' in launcher
+    assert 'PROFILE_PERCENT_CHECKPOINT_INTERVAL=1' in launcher
+    assert 'PROFILE_PERCENT_CHECKPOINT_ROLLING_KEEP=5' in launcher
+    assert 'PROFILE_PERCENT_CHECKPOINT_PERMANENT_INTERVAL=10' in launcher
+    assert 'PROFILE_REQUIRE_COMPLETE_CHECKPOINT=1' in launcher
+
     assert 'BRIDGEDP_NUM_GPUS=8' in launcher
     assert 'BRIDGEDP_EPOCHS=1' in launcher
     assert 'CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"' in launcher
@@ -82,6 +90,7 @@ def test_root_wrappers_launch_the_requested_ceph_io_profile():
         "train_arcdp_full1_b48_w2_8x4090_ceph.sh": "b48_w2",
         "train_arcdp_full1_b24_ga2_w2_pf1_8x4090_ceph.sh": "b24_ga2_w2_pf1",
         "train_arcdp_full1_b24_ga2_w4_pf1_8x4090_ceph.sh": "b24_ga2_w4_pf1",
+        "train_arcdp_full1_b24_ga2_w4_pf1_safeckpt_8x4090_ceph.sh": "b24_ga2_w4_pf1_safeckpt",
     }
 
     for filename, profile in expected.items():
