@@ -29,6 +29,7 @@ from internnav.model import get_config, get_policy
 from internnav.model.utils.logger import MyLogger
 from internnav.model.utils.utils import load_dataset
 from internnav.trainer import BridgeDPTrainer, CMATrainer, FlowNavTrainer, NavDPTrainer, RDPTrainer
+from scripts.train.base_train.progress_metrics import compute_progress_metrics
 from scripts.train.base_train.resume_utils import ensure_checkpoint_model_weight, resolve_resume_checkpoint
 from scripts.train.base_train.swanlab_compat import initialize_swanlab_run
 from scripts.train.base_train.configs import (
@@ -252,6 +253,8 @@ class DetailedProgressCallback(TrainerCallback):
         self.step_times = []
         self.start_time = time.time()
         self.last_step_time = time.time()
+        self.start_global_step = 0
+        self.last_log_step = 0
         # loss 历史数据（列表，每个元素为 {step, epoch, loss/total, loss/action, ...}）
         self.loss_history = []
         # 按 epoch 分桶（key=epoch_int, value=list of loss records）
@@ -310,11 +313,21 @@ class DetailedProgressCallback(TrainerCallback):
         """训练开始时记录基础信息"""
         self.start_time = time.time()
         self.last_step_time = time.time()
+        self.start_global_step = int(state.global_step)
+        self.last_log_step = int(state.global_step)
         status = {
             'phase': 'training_started',
             'timestamp': datetime.now().isoformat(),
             'dataset_size': self.dataset_size,
             'batch_size': self.batch_size,
+            'per_device_batch_size': self.batch_size,
+            'world_size': max(int(getattr(args, 'world_size', 1)), 1),
+            'gradient_accumulation_steps': max(int(getattr(args, 'gradient_accumulation_steps', 1)), 1),
+            'effective_global_batch': (
+                self.batch_size
+                * max(int(getattr(args, 'world_size', 1)), 1)
+                * max(int(getattr(args, 'gradient_accumulation_steps', 1)), 1)
+            ),
             'total_steps': state.max_steps,
             'total_epochs': args.num_train_epochs,
             'gpu_memory': self._get_gpu_memory_breakdown(),
@@ -335,25 +348,32 @@ class DetailedProgressCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, model=None, **kwargs):
         """每个 logging_step 记录详细状态"""
         now = time.time()
-        step_duration = now - self.last_step_time
+        log_interval_duration = now - self.last_step_time
         self.last_step_time = now
+        log_step_delta = max(int(state.global_step) - self.last_log_step, 1)
+        step_duration = log_interval_duration / log_step_delta
+        self.last_log_step = int(state.global_step)
         self.step_times.append(step_duration)
         # 保留最近100个step的时间
         if len(self.step_times) > 100:
             self.step_times = self.step_times[-100:]
 
         elapsed = now - self.start_time
-        samples_done = state.global_step * self.batch_size
-        total_samples = state.max_steps * self.batch_size
-        samples_per_sec = samples_done / max(elapsed, 1)
+        world_size = max(int(getattr(args, 'world_size', 1)), 1)
+        gradient_accumulation_steps = max(int(getattr(args, 'gradient_accumulation_steps', 1)), 1)
+        progress = compute_progress_metrics(
+            global_step=state.global_step,
+            max_steps=state.max_steps,
+            elapsed_seconds=elapsed,
+            per_device_batch_size=self.batch_size,
+            world_size=world_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            start_global_step=self.start_global_step,
+            dataset_size=self.dataset_size,
+        )
 
         # ETA 估算
-        if state.global_step > 0:
-            avg_step_time = elapsed / state.global_step
-            remaining_steps = state.max_steps - state.global_step
-            eta_seconds = remaining_steps * avg_step_time
-        else:
-            eta_seconds = 0
+        eta_seconds = progress['eta_seconds']
 
         status = {
             'phase': 'training',
@@ -363,20 +383,26 @@ class DetailedProgressCallback(TrainerCallback):
             'max_steps': state.max_steps,
             'epoch': round(state.epoch, 4) if state.epoch else 0,
             'total_epochs': args.num_train_epochs,
-            'progress_pct': round(state.global_step / max(state.max_steps, 1) * 100, 2),
+            'progress_pct': round(progress['progress_pct'], 2),
             # 样本级进度
-            'samples_completed': samples_done,
-            'total_samples': total_samples,
-            'samples_per_second': round(samples_per_sec, 2),
+            'samples_completed': progress['samples_completed'],
+            'samples_this_run': progress['samples_this_run'],
+            'total_samples': progress['total_samples'],
+            'samples_per_second': round(progress['samples_per_second'], 2),
             'dataset_size': self.dataset_size,
             'batch_size': self.batch_size,
-            'steps_per_epoch': self.dataset_size // self.batch_size if self.batch_size > 0 else 0,
+            'per_device_batch_size': self.batch_size,
+            'world_size': world_size,
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'effective_global_batch': progress['effective_global_batch'],
+            'optimizer_steps_this_run': progress['optimizer_steps_this_run'],
+            'steps_per_epoch': progress['steps_per_epoch'],
             # 时间统计
             'elapsed_seconds': round(elapsed, 1),
             'elapsed_human': self._fmt_duration(elapsed),
             'eta_seconds': round(eta_seconds, 1),
             'eta_human': self._fmt_duration(eta_seconds),
-            'avg_step_time': round(elapsed / max(state.global_step, 1), 2),
+            'avg_step_time': round(progress['avg_step_time'], 2),
             'last_step_time': round(step_duration, 2),
             # Loss 详情
             'losses': {},
@@ -859,6 +885,13 @@ def main(config, model_class, model_config_class):
             )
 
         # ------------ training args ------------
+        dataloader_num_workers = int(config.il.num_workers)
+        dataloader_prefetch_factor = getattr(config.il, 'dataloader_prefetch_factor', None)
+        if dataloader_num_workers <= 0:
+            dataloader_prefetch_factor = None
+        elif dataloader_prefetch_factor is not None:
+            dataloader_prefetch_factor = max(int(dataloader_prefetch_factor), 1)
+
         training_args = TrainingArguments(
             output_dir=config.output_dir,
             logging_dir=config.tensorboard_dir,  # TensorBoard 日志目录
@@ -870,7 +903,8 @@ def main(config, model_class, model_config_class):
             tf32=bool(getattr(config.il, 'tf32', False)),
             per_device_train_batch_size=config.il.batch_size,
             gradient_accumulation_steps=int(getattr(config.il, 'gradient_accumulation_steps', 1)),
-            dataloader_num_workers=config.il.num_workers,
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_prefetch_factor=dataloader_prefetch_factor,
             dataloader_pin_memory=bool(getattr(config.il, 'dataloader_pin_memory', False)),
             optim='adamw_torch',
             learning_rate=config.il.lr,

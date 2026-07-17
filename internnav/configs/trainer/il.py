@@ -18,6 +18,7 @@ class IlCfg(BaseModel, extra='allow'):
     batch_size: Optional[int] = None
     lr: Optional[float]
     num_workers: Optional[int]
+    dataloader_prefetch_factor: Optional[int] = None
     weight_decay: Optional[float]
     warmup_ratio: Optional[float]
     use_iw: Optional[bool] = None
