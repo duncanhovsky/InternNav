@@ -131,12 +131,25 @@ class BridgeScheduler:
         """设置推理时的时间步序列。
 
         Args:
-            num_inference_steps: 推理步数（通常等于 num_train_timesteps=10）。
+            num_inference_steps: 推理模型评估次数，范围为 [1, num_train_timesteps]。
 
         产出:
-            self._timesteps: 形如 [9, 8, ..., 1, 0] 的 LongTensor。
+            self._timesteps: 覆盖完整训练时间轴、从 T-1 降至 0 的 LongTensor。
         """
-        self._timesteps = torch.arange(num_inference_steps - 1, -1, -1).long()
+        if not isinstance(num_inference_steps, int):
+            raise TypeError("num_inference_steps must be an integer")
+        if not 1 <= num_inference_steps <= self.num_train_timesteps:
+            raise ValueError(
+                "num_inference_steps must be between 1 and "
+                f"{self.num_train_timesteps}, got {num_inference_steps}"
+            )
+
+        self._timesteps = torch.linspace(
+            self.num_train_timesteps - 1,
+            0,
+            steps=num_inference_steps,
+            dtype=torch.float64,
+        ).round().long()
 
     # ------------------------------------------------------------------
     # 方差计算
@@ -752,6 +765,7 @@ class BridgeScheduler:
         x0_pred: torch.Tensor,
         x_s: torch.Tensor,
         timestep: torch.Tensor,
+        prev_timestep: Optional[torch.Tensor] = None,
         goal: Optional[torch.Tensor] = None,
         theta_g: Optional[torch.Tensor] = None,
         origin: Optional[torch.Tensor] = None,
@@ -763,16 +777,26 @@ class BridgeScheduler:
         dtype = x_s.dtype
         timestep = timestep.to(device)
         s_norm = self._normalized_time(timestep).to(dtype=dtype)
-        dt = 1.0 / self.num_train_timesteps
-
-        if s_norm.numel() == 1 and s_norm.item() <= dt + 1e-6:
-            return x0_pred
+        if prev_timestep is None:
+            prev_timestep = timestep - 1
+        else:
+            prev_timestep = torch.as_tensor(prev_timestep, device=device).to(
+                dtype=timestep.dtype
+            )
+        invalid_order = (prev_timestep >= 0) & (prev_timestep >= timestep)
+        if torch.any(invalid_order):
+            raise ValueError("prev_timestep must be smaller than timestep")
+        s_prev_norm = self._normalized_time(prev_timestep).clamp(min=0.0).to(
+            dtype=dtype
+        )
 
         B, _, dim = x_s.shape
         s = s_norm.view(-1, 1, 1)
         if s.shape[0] == 1 and B > 1:
             s = s.expand(B, 1, 1)
-        s_prev = (s - dt).clamp(min=0.0)
+        s_prev = s_prev_norm.view(-1, 1, 1)
+        if s_prev.shape[0] == 1 and B > 1:
+            s_prev = s_prev.expand(B, 1, 1)
 
         if mode == "nogoal":
             mu = self.bridge_mean_nogoal(x_s.shape, device, dtype)

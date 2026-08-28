@@ -1118,7 +1118,12 @@ class BridgeDPNet(PreTrainedModel):
             if self.enable_trajectory_normalization:
                 distance_repeated = goal_distance_m.repeat(sample_num)
 
-            for k in denoise_timesteps:
+            for step_index, k in enumerate(denoise_timesteps):
+                next_k = (
+                    denoise_timesteps[step_index + 1]
+                    if step_index + 1 < len(denoise_timesteps)
+                    else k.new_tensor(-1)
+                )
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
                     pointgoal_embed, rgbd_embed, gated_prior, scale_embed
@@ -1130,6 +1135,7 @@ class BridgeDPNet(PreTrainedModel):
                 else:
                     naction = self.bridge_scheduler.step_trajectory(
                         x0_pred, naction, k,
+                        prev_timestep=next_k,
                         goal=bridge_goal_repeated,
                         theta_g=bridge_theta_expanded,
                         origin=origin_repeated,
@@ -1245,7 +1251,12 @@ class BridgeDPNet(PreTrainedModel):
                 self.bridge_scheduler.set_timesteps(self.num_inference_timesteps)
                 denoise_timesteps = self.bridge_scheduler.timesteps
 
-            for k in denoise_timesteps:
+            for step_index, k in enumerate(denoise_timesteps):
+                next_k = (
+                    denoise_timesteps[step_index + 1]
+                    if step_index + 1 < len(denoise_timesteps)
+                    else k.new_tensor(-1)
+                )
                 x0_pred = self.predict_x0(
                     naction, k.to(self._device).unsqueeze(0),
                     nogoal_embed, rgbd_embed, gated_prior, scale_embed
@@ -1257,6 +1268,7 @@ class BridgeDPNet(PreTrainedModel):
                 else:
                     naction = self.bridge_scheduler.step_trajectory(
                         x0_pred, naction, k,
+                        prev_timestep=next_k,
                         mode="nogoal",
                         eta=self.inference_eta,
                     )
